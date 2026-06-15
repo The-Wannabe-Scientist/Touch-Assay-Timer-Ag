@@ -1190,11 +1190,8 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   document.addEventListener("visibilitychange", async () => {
     if (document.visibilityState === "hidden" && currentState === STATES.RUNNING && currentAssay) {
-      const activeTrial = getActiveTrial(currentAssay);
-      const run         = activeTrial?.runs.find(r => r.status === "active");
-      if (run) {
-        saveRun(currentAssay.assayId, activeTrial.trialId, run).catch(() => {});
-      }
+      console.log("App backgrounded: automatically stopping active run.");
+      endRun();
     }
 
     // Wake Locks are released when hidden; re-acquire when visible
