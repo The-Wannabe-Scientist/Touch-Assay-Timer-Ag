@@ -1,0 +1,742 @@
+/* =====================================================================
+   1. DESIGN TOKENS (CSS VARIABLES)
+   ===================================================================== */
+
+:root {
+  color-scheme: light;
+
+  --bg-body: #f4f6f8;
+  --bg-card: #ffffff;
+  --bg-header: #1f2937;
+  --bg-input: #f9fafb;
+  --bg-input-focus: #ffffff;
+  --bg-progress: #fafafa;
+  --bg-table-header: #f3f4f6;
+
+  --text-main: #111827;
+  --text-muted: #4b5563;
+  --text-header: #ffffff;
+  --text-placeholder: #9ca3af;
+
+  --border-base: #e5e7eb;
+  --border-input: #d1d5db;
+  --focus-ring: rgba(59, 130, 246, 0.15);
+  
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-danger: #dc2626;
+
+  --bg-warning: #fef2f2;
+  --border-warning: #fecaca;
+  --text-warning: #b91c1c;
+
+  --tap-bg: linear-gradient(145deg, #f9fafb, #e5e7eb);
+  --tap-text: #111;
+  --tap-active: #e3e8f0;
+  --tap-flash: #dbeafe;
+  --color-success: #16a34a;
+  --tap-fulfilled: #dcfce7;
+  --tap-fulfilled-border: #86efac;
+  --tap-fulfilled-flash: #bbf7d0; 
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-body: #111827;
+  --bg-card: #1f2937;
+  --bg-header: #111827;
+  --bg-input: #374151; 
+  --bg-input-focus: #111827;
+  --bg-progress: #1f2937;
+  --bg-table-header: #374151;
+
+  --text-main: #f9fafb;
+  --text-muted: #d1d5db;
+  --text-header: #f9fafb;
+  --text-placeholder: #9ca3af;
+
+  --border-base: #374151;
+  --border-input: #4b5563;
+  --focus-ring: rgba(59, 130, 246, 0.2);
+
+  --bg-warning: #450a0a;
+  --border-warning: #7f1d1d;
+  --text-warning: #fca5a5;
+
+  --tap-bg: #374151;
+  --tap-text: #f9fafb;
+  --tap-active: #1f2937;
+  --tap-flash: #1e3a8a;
+  --color-success: #22c55e;
+  --tap-fulfilled: #064e3b;
+  --tap-fulfilled-border: #047857;
+  --tap-fulfilled-flash: #065f46; 
+}
+
+/* =====================================================================
+   2. GLOBAL RESET & BASE
+   ===================================================================== */
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg-body);
+  color: var(--text-main);
+  line-height: 1.5;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* =====================================================================
+   3. APP HEADER & NAVIGATION MENUS
+   ===================================================================== */
+
+.appHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  /* Centering trick: Anchors the header content to the 800px main column */
+  padding: 1rem max(1rem, calc(50vw - 400px));
+  background: var(--bg-header);
+  color: var(--text-header);
+  position: relative; 
+}
+
+.appHeader h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+#overflowMenuButton {
+  background: none;
+  border: none;
+  color: var(--text-header);
+  font-size: 1.4rem;
+  cursor: pointer;
+}
+
+#overflowMenu {
+  position: absolute;
+  top: 60px;
+  /* Aligns the menu natively with the constrained header column */
+  right: max(12px, calc(50vw - 400px));
+  background: var(--bg-card);
+  border: 1px solid var(--border-base);
+  border-radius: 10px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 180px;
+  z-index: 100;
+}
+
+#overflowMenu button {
+  background: none;
+  border: none;
+  padding: 0.6rem;
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-main);
+}
+
+#overflowMenu button:active,
+#overflowMenu button:hover {
+  background-color: var(--border-base);
+}
+
+/* =====================================================================
+   4. LAYOUT & SECTIONS (RESPONSIVE CONTAINERS)
+   ===================================================================== */
+
+main {
+  min-height: calc(100svh - 60px);
+  display: flex;
+  flex-direction: column;
+  padding: 1rem;
+  /* Desktop Scaling: Locks everything into a clean central column */
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto; 
+}
+
+section {
+  background: var(--bg-card);
+  border-radius: 14px;
+  padding: 1rem;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.04);
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-base);
+}
+
+h1, h2, h3, legend {
+  color: var(--text-main);
+}
+
+.appHeader h1, .modal-header h2 {
+  color: var(--text-header);
+}
+
+/* =====================================================================
+   5. FORM ELEMENTS & DARK MODE OVERRIDES
+   ===================================================================== */
+
+fieldset {
+  border: none;
+  margin-bottom: 1.25rem;
+  padding: 0;
+}
+
+#setupForm fieldset,
+#settingsScreen fieldset {
+  background: var(--bg-card);
+  border: 1px solid var(--border-base);
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem; /* This provides perfect line-spacing between setting options */
+}
+
+legend {
+  font-size: 1.1rem;
+  font-weight: 700;
+  padding: 0 0.5rem;
+  margin-left: -0.5rem;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  gap: 0.4rem;
+}
+
+input, select, button, textarea {
+  font-family: inherit;
+  font-size: 1rem;
+  padding: 0.65rem;
+  border-radius: 10px;
+  border: 1px solid var(--border-input);
+  background-color: var(--bg-input);
+  color: var(--text-main);
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  
+  /* Strip Apple/Google native styling curves */
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+input::placeholder {
+  color: var(--text-placeholder);
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  background-color: var(--bg-input-focus);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* Re-inject custom arrow because we stripped native appearance */
+select {
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 1em;
+  padding-right: 2.5rem;
+}
+[data-theme="dark"] select {
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f9fafb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+}
+
+/* Natively restore radio/checkboxes */
+input[type="checkbox"], input[type="radio"] {
+  -webkit-appearance: auto;
+  appearance: auto;
+  accent-color: var(--color-primary);
+  width: 1.1rem;
+  height: 1.1rem;
+  margin: 0;
+}
+
+select option {
+  background-color: var(--bg-card);
+  color: var(--text-main);
+}
+select option:disabled {
+  color: var(--text-muted);
+}
+
+.required-asterisk {
+  color: var(--color-danger);
+  font-weight: bold;
+  margin-left: 3px;
+}
+
+/* ------------------------------------------------------------------
+   CRITICAL DARK MODE READABILITY FIXES
+   Brute-forces dark backgrounds over browser autofill/iOS defaults 
+------------------------------------------------------------------- */
+[data-theme="dark"] input[type="text"],
+[data-theme="dark"] input[type="number"],
+[data-theme="dark"] select,
+[data-theme="dark"] textarea {
+    background-color: var(--bg-input) !important;
+    color: var(--text-main) !important;
+    border-color: var(--border-input) !important;
+}
+
+[data-theme="dark"] input[type="text"]:focus,
+[data-theme="dark"] input[type="number"]:focus,
+[data-theme="dark"] select:focus,
+[data-theme="dark"] textarea:focus {
+    background-color: var(--bg-input-focus) !important;
+}
+
+/* WebKit Autofill Dark Mode Override */
+[data-theme="dark"] input:-webkit-autofill,
+[data-theme="dark"] input:-webkit-autofill:hover,
+[data-theme="dark"] input:-webkit-autofill:focus,
+[data-theme="dark"] input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 30px #374151 inset !important; 
+  -webkit-text-fill-color: #f9fafb !important; 
+  transition: background-color 5000s ease-in-out 0s;
+}
+
+/* Form Layout Responsiveness */
+.input-row {
+  display: flex;
+  flex-direction: row;
+  gap: 1rem;
+  flex-wrap: wrap; 
+}
+.input-row > .input-group {
+  flex: 1 1 calc(50% - 0.5rem);
+  min-width: 130px; 
+}
+#setupForm input[type="number"],
+#setupForm input[type="text"] {
+  max-width: none;
+  width: 100%;
+}
+
+/* =====================================================================
+   6. STANDARD BUTTONS
+   ===================================================================== */
+
+button {
+  cursor: pointer;
+  color: var(--text-main);
+}
+
+button.primary {
+  background: var(--color-primary);
+  color: white;
+  border: none;
+}
+button.primary:active {
+  background: var(--color-primary-hover);
+}
+
+button.secondary {
+  background: var(--border-base);
+  color: var(--text-main);
+  border: none;
+}
+button.secondary:active {
+  background: var(--border-input);
+}
+
+button.danger {
+  background: var(--color-danger);
+  color: white;
+  border: none;
+}
+
+#beginBtn {
+  width: 100%;
+  padding: 0.85rem;
+  font-size: 1.15rem;
+  font-weight: 600;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+  margin-top: 0.5rem;
+}
+#beginBtn:active {
+  transform: scale(0.98);
+}
+
+/* =====================================================================
+   7. ASSAY SCREEN & INTERACTIVE TAP ZONE
+   ===================================================================== */
+
+#assayScreen {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+#assayScreen > header, #assayScreen > footer {
+  padding: 0.75rem;
+}
+#assayScreen > footer {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+#tapZone {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+/* VISUAL METRONOME ANIMATION BAR */
+#visualMetronomeContainer {
+  width: 100%;
+  height: 12px;
+  background: var(--border-base);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
+}
+
+#visualMetronomeBar {
+  height: 100%;
+  width: 0%;
+  background: var(--color-primary);
+  transition: none; 
+}
+#visualMetronomeBar.fulfilled {
+  background: var(--color-success);
+}
+
+/* MASSIVE TAP BUTTON */
+#tapButton {
+  flex: 1;
+  width: 100%;
+  
+  /* NEW: Dynamic minimum height for massive mobile touch targets */
+  min-height: max(280px, 35vh); 
+  
+  font-size: clamp(2.5rem, 8vw, 4rem); /* Slightly larger minimum font size too */
+  font-weight: 500;
+  border: none;
+  border-radius: 20px;
+  background: var(--tap-bg);
+  color: var(--tap-text);
+  box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+  
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  
+  transition: transform 40ms linear, background-color 50ms linear;
+}
+/* Desktop sizing is naturally handled by flex: 1 taking up the remaining screen height */
+
+#tapButton:active {
+  transform: scale(0.996);
+  background: var(--tap-active);
+}
+
+/* Persistent Fulfilled State (Light Green) */
+#tapButton.bucket-fulfilled {
+  background: var(--tap-fulfilled);
+  border: 2px solid var(--tap-fulfilled-border);
+  color: #064e3b; 
+}
+[data-theme="dark"] #tapButton.bucket-fulfilled {
+  color: #dcfce7; 
+}
+
+/* Transient Flash State (Blue) */
+#tapButton.tapped {
+  background: var(--tap-flash) !important; 
+  transform: scale(0.96) !important;
+  transition: transform 50ms ease-out, background-color 50ms ease-out;
+}
+
+/* Transient Flash State when already green (Deeper Green) */
+#tapButton.bucket-fulfilled.tapped {
+  background: var(--tap-fulfilled-flash) !important;
+}
+
+/* =====================================================================
+   8. PROGRESS PANEL & DATA TABLES
+   ===================================================================== */
+
+.live-progress {
+  text-align: center;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+  font-variant-numeric: tabular-nums; 
+}
+
+#assayProgress {
+  max-height: 30vh;
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border-base);
+  padding: 0.5rem;
+  background: var(--bg-progress);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+th, td {
+  padding: 0.5rem;
+  text-align: center;
+  border-bottom: 1px solid var(--border-base);
+}
+
+th {
+  font-weight: 600;
+  background: var(--bg-table-header);
+  color: var(--text-main);
+}
+
+/* =====================================================================
+   9. MODALS & EXPORT PREVIEWS
+   ===================================================================== */
+
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; justify-content: center; align-items: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.modal-content {
+  background: var(--bg-card);
+  border-radius: 14px;
+  width: 100%; max-width: 900px;
+  max-height: 90vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+  border: 1px solid var(--border-base);
+}
+
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border-base);
+}
+
+.modal-header button {
+  background: none; border: none; font-size: 1.5rem;
+  color: var(--text-muted); padding: 0; cursor: pointer;
+}
+
+#previewContainer {
+  flex: 1; overflow: auto; padding: 1.25rem;
+  display: flex; flex-direction: column; gap: 2rem;
+}
+
+.preview-table-wrapper {
+  overflow-x: auto;
+  border: 1px solid var(--border-base); 
+  border-radius: 8px;
+}
+
+.preview-table-wrapper table {
+  width: max-content; min-width: 100%;
+  border-collapse: collapse; font-variant-numeric: tabular-nums;
+}
+
+.preview-table-wrapper th, .preview-table-wrapper td {
+  padding: 0.5rem 0.75rem; border: 1px solid var(--border-base);
+  white-space: nowrap; font-size: 0.85rem; text-align: center;
+}
+
+.preview-table-wrapper th {
+  background: var(--bg-table-header); font-weight: 600;
+  position: sticky; top: 0; box-shadow: 0 1px 0 var(--border-base);
+}
+
+.modal-actions {
+  padding: 1rem 1.25rem; border-top: 1px solid var(--border-base);
+  display: flex; justify-content: flex-end;
+}
+
+/* =====================================================================
+   10. UTILITIES, LISTS & WARNINGS
+   ===================================================================== */
+
+#savedAssaysScreen, #guidelinesScreen, #exportScreen fieldset, #exportDatasetList {
+  overflow-y: auto;
+}
+
+/* Desktop-safe formatting for the Saved Assays items */
+.saved-assay-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--border-base);
+}
+.assay-row-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+.assay-select-checkbox {
+  margin-top: 0.2rem !important; /* aligns with text visually */
+  flex-shrink: 0;
+}
+.assay-info {
+  font-weight: 600;
+  color: var(--text-main);
+}
+.assay-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.assay-actions button {
+  flex: 1;
+  min-width: 100px;
+}
+
+/* Checkbox fixes for the Export screen */
+#exportDatasetList label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  cursor: pointer;
+  color: var(--text-main);
+}
+
+.warning {
+  color: var(--color-danger);
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+
+.noscript-warning {
+  background-color: var(--bg-warning);
+  color: var(--text-warning);
+  border-bottom: 2px solid var(--border-warning);
+  padding: 1rem;
+  text-align: center;
+}
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0;
+  margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0;
+}
+
+.warmup-display { font-size: 3rem; font-weight: bold; }
+.export-actions { display: flex; gap: 1rem; margin-top: 1rem; }
+.export-actions button, .navButtons button { flex: 1; }
+.navButtons { display: flex; gap: 1rem; margin-top: 1rem; }
+
+.toggle-label {
+  display: flex; 
+  flex-direction: row; 
+  align-items: center; 
+  gap: 0.75rem; 
+  font-size: 1rem;
+  color: var(--text-main); /* NEW: Forces high-contrast readable text */
+  cursor: pointer; /* NEW: Makes the text feel interactive */
+}
+
+.input-group { display: flex; flex-direction: column; flex: 1; }
+
+/* =====================================================================
+   11. BROWSER SPECIFIC FIXES (DISABLED STATES)
+   ===================================================================== */
+
+input:disabled, select:disabled, button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+[data-theme="dark"] input:disabled,
+[data-theme="dark"] select:disabled,
+[data-theme="dark"] button:disabled {
+  background-color: var(--bg-card) !important; 
+  color: var(--text-muted) !important; 
+  border-color: var(--border-base) !important;
+  opacity: 1 !important; 
+  -webkit-text-fill-color: var(--text-muted) !important; 
+}
+
+/* =====================================================================
+   12. CSS STATE MACHINE (VISIBILITY ARCHITECTURE)
+   ===================================================================== */
+
+#setupScreen, 
+#assayScreen, 
+#exportScreen,
+#liveProgress, 
+#visualMetronomeContainer { 
+  display: none; 
+}
+
+body.state-setup #setupScreen,
+body.state-configured #assayScreen,
+body.state-poised #assayScreen,
+body.state-running #assayScreen,
+body.state-export #exportScreen {
+  display: flex;
+}
+
+body.state-running #liveProgress {
+  display: block; 
+}
+body.state-running #visualMetronomeContainer {
+  display: flex; 
+}
+
+body.state-configured #openSavedAssays,
+body.state-poised #openSavedAssays,
+body.state-running #openSavedAssays {
+  display: none;
+}
+
+body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):not(#savedAssaysScreen) {
+  display: none !important;
+}

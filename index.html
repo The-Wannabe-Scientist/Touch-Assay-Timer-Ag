@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <title>Touch Assay Timer</title>
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1f2937">
+  
+  <link rel="stylesheet" href="styles.css">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+</head>
+    
+<body>
+  <noscript>
+    <div class="noscript-warning">
+      <strong>JavaScript is required.</strong> Please enable JavaScript to use the Touch Assay Timer.
+    </div>
+  </noscript>
+
+  <header class="appHeader">
+    <h1>Touch Assay Timer</h1>
+
+    <button id="overflowMenuButton" type="button" aria-label="Menu">
+      ⋮
+    </button>
+
+    <div id="overflowMenu" hidden>
+      <button id="openSavedAssays" type="button">Saved Assays</button>
+      <button id="openSettings" type="button">Settings</button>
+      <button id="openGuidelines" type="button">User Guidelines</button>
+    </div>
+  </header>
+
+  <main>
+      
+    <section id="setupScreen">
+      <header class="setupHeader">
+        <h2>Assay Setup</h2>
+      </header>
+
+      <p>Please enter your experimental requirements.</p>
+      
+      <form id="setupForm">
+        <fieldset>
+          <legend>Experiment</legend>
+          
+          <label for="assayName">Experiment ID</label>
+          <input type="text" id="assayName" required>
+
+          <label for="genotypes">Genotypes (comma-separated)</label>
+          <input type="text" id="genotypes" placeholder="WT, mutantA, mutantB" required>
+        </fieldset>
+
+        <fieldset>
+          <legend>Environment</legend>
+          <div class="input-row">
+            <div class="input-group">
+              <label for="temperature">Temperature (°C)</label>
+              <input type="number" id="temperature" value="20" required>
+            </div>
+
+            <div class="input-group">
+              <label for="humidity">Humidity (% RH)</label>
+              <input type="number" id="humidity" min="0" max="100" value="60" required>
+            </div>
+          </div>
+        </fieldset>
+          
+        <fieldset>
+          <legend>Stimulation</legend>
+          <div class="input-row">
+            <div class="input-group">
+              <label for="ISI">Inter-stimulus Interval (s)</label>
+              <input type="number" id="ISI" min="0.1" step="0.1" value="1" required>
+            </div>
+          
+            <div class="input-group">
+              <label for="stimCount">Total Number of Stimulations</label>
+              <input type="number" id="stimCount" min="1" step="1" value="100" required>
+            </div>
+          </div>
+        </fieldset>
+        
+        <fieldset>
+          <legend>Analysis</legend>
+          <label for="binSize">Stimulations per bin (Bin Size)</label>
+          <input type="number" id="binSize" min="1" step="1" value="10" required>
+          
+          <p id="binWarning" class="warning" hidden></p>
+        </fieldset>
+        
+        <p class="instruction">
+          Please ensure your assay setup is ready before beginning.
+        </p>
+        
+        <button type="submit" class="primary" id="beginBtn">
+          Begin Assay
+        </button>
+      </form>
+    </section>
+    
+    <section id="assayScreen" data-trial-active="false">
+      <header>
+        <label for="genotypeSelect" class="visually-hidden">Select Genotype</label>
+        <select id="genotypeSelect"> 
+          <option value="" disabled selected>Select Genotype</option>     
+        </select>
+      </header>
+          
+      <button id="toggleProgress" type="button">Hide Progress</button>
+      
+      <div id="tapZone">
+        <div id="warmupDisplay" class="warmup-display" hidden>3</div>
+        
+        <div id="liveProgress" class="live-progress">
+          Stimulus: <span id="currentStimDisplay">0</span> / <span id="totalStimDisplay">100</span>
+        </div>
+
+        <div id="visualMetronomeContainer">
+          <div id="visualMetronomeBar"></div>
+        </div>
+        
+        <button id="tapButton" type="button">Start Timer</button>
+      </div>
+
+                                       
+      <div id="assayProgress">
+        </div>
+        
+      <div id="runStatus" class="status" hidden></div> 
+          
+      <footer>
+        <button id="stopRun" type="button" class="danger" disabled>Stop Run</button>
+        <button id="finishTrial" type="button" disabled>Finish Trial</button>
+      </footer>
+    </section>
+    
+    <section id="exportScreen">
+      <h2>Assay Export</h2>
+      <p>Select datasets to include in the export.</p>
+
+      <fieldset>
+        <legend>Datasets</legend>
+        <div id="exportDatasetList">
+          </div>
+      </fieldset>
+      
+      <div class="export-actions">
+        <button id="previewExcel" class="secondary">Preview Results</button>
+        <button id="exportExcel" class="primary">Export to Excel</button>
+      </div>
+      
+      <div class="navButtons">
+        <button id="backToAssay" type="button">Start New Trial</button>
+        <button id="newAssay" type="button">New Assay</button>
+      </div>
+    </section>
+    
+ <section id="settingsScreen" hidden>
+      <h2>Settings</h2>
+
+      <fieldset>
+        <legend>Display Theme</legend>
+       
+        <label class="toggle-label" for="themeLight">
+          <input type="radio" id="themeLight" name="themeMode" value="light" checked>
+          Light Mode (Default)
+        </label>
+         <label class="toggle-label" for="themeDark"> 
+          <input type="radio" id="themeDark" name="themeMode" value="dark">
+          Dark Mode
+        </label>
+      </fieldset>
+      
+      <fieldset>
+        <legend>Timer Voiceover Options</legend>
+        <label class="toggle-label" for="voiceTick"> 
+          <input type="radio" id="voiceTick" name="voiceMode" value="tick" checked>
+          Tick every second
+        </label>
+        <label class="toggle-label" for="voiceCount">
+          <input type="radio" id="voiceCount" name="voiceMode" value="count">
+          Speak every second
+        </label>
+        <label class="toggle-label" for="voiceTens">
+          <input type="radio" id="voiceTens" name="voiceMode" value="tens">
+          Speak every ten seconds, tick in between
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Warmup Timer</legend>
+        <label class="toggle-label" for="warmupToggle">
+          <input type="checkbox" id="warmupToggle" checked>
+          Enable Warmup Timer
+        </label>
+        
+        <div id="warmupDurationContainer" class="input-group">
+          <label for="warmupDuration">Duration (seconds)</label>
+          <input type="number" id="warmupDuration" min="1" max="10" step="1" value="3">
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Diagnostics</legend>
+        <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0;">Use these tools to export technical data if you experience crashes or unexpected behavior.</p>
+        <div class="export-actions" style="margin-top: 0.5rem;">
+          <button id="downloadLogsBtn" class="secondary" type="button">Download Logs</button>
+          <button id="clearLogsBtn" class="danger" type="button">Clear Logs</button>
+        </div>
+      </fieldset>
+      
+      <button id="closeSettings" type="button" class="secondary">Back</button>
+    </section>
+      
+    
+    <section id="guidelinesScreen" hidden>
+      <h2>User Guidelines</h2>
+      <p>This tool is designed to run simple touch / stimulus–response assays.</p>
+      <ul>
+        <li>Each trial consists of multiple runs (animals).</li>
+        <li>Each run records whether a response occurred during each stimulus interval.</li>
+        <li>Taps are recorded per interval, not by reaction time.</li>
+        <li>Runs stopped early or trials abandoned are marked as ineligible for analysis.</li>
+        <li>All data can be exported to Excel.</li>
+      </ul>
+
+      <p><strong>Important:</strong></p>
+      <ul>
+        <li>Deleting an assay permanently removes all associated data.</li>
+        <li>Deleted assays cannot be recovered.</li>
+        <li>Export data before deleting if you wish to keep a record.</li>
+      </ul>
+
+      <button id="closeGuidelines" type="button">Back</button>
+    </section>
+
+  <section id="savedAssaysScreen" hidden>
+      <h2>Saved Assays</h2>
+      
+      <div class="bulk-actions" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border-base);">
+        <label class="toggle-label" style="font-size: 0.9rem; margin: 0;">
+          <input type="checkbox" id="selectAllAssays"> Select All
+        </label>
+        <button id="deleteSelectedAssays" type="button" class="danger" disabled style="padding: 0.4rem 0.8rem; font-size: 0.9rem; width: auto; flex: none;">Delete Selected</button>
+      </div>
+
+      <div id="savedAssaysList">
+        </div>
+      <button id="closeSavedAssays" type="button" class="secondary" style="margin-top: 1rem;">Back</button>
+    </section>
+
+  </main>
+ 
+  <div id="previewModal" class="modal-overlay" hidden>
+    <div class="modal-content">
+      <header class="modal-header">
+        <h2>Data Preview</h2>
+        <button id="closePreview" type="button" aria-label="Close">✕</button>
+      </header>
+      
+      <div id="previewContainer">
+        </div>
+      
+      <div class="modal-actions">
+        <button id="exportFromPreview" class="primary">Export to Excel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+  
+  <script type="module" src="./js/main.js"></script>
+
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("service-worker.js")
+          .then(() => console.log("Service Worker registered"))
+          .catch(err => console.error("SW registration failed:", err));
+      });
+    }
+  </script>
+
+</body>
+</html>
