@@ -7,6 +7,7 @@
 
   --bg-body: #f4f6f8;
   --bg-card: #ffffff;
+  --bg-glass: rgba(255, 255, 255, 0.85);
   --bg-header: #1f2937;
   --bg-input: #f9fafb;
   --bg-input-focus: #ffffff;
@@ -45,6 +46,7 @@
 
   --bg-body: #111827;
   --bg-card: #1f2937;
+  --bg-glass: rgba(31, 41, 55, 0.85);
   --bg-header: #111827;
   --bg-input: #374151; 
   --bg-input-focus: #111827;
@@ -134,7 +136,9 @@ body {
   top: 60px;
   /* Aligns the menu natively with the constrained header column */
   right: max(12px, calc(50vw - 400px));
-  background: var(--bg-card);
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border-base);
   border-radius: 10px;
   box-shadow: 0 10px 25px rgba(0,0,0,0.2);
@@ -544,7 +548,9 @@ th {
 }
 
 .modal-content {
-  background: var(--bg-card);
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border-radius: 14px;
   width: 100%; max-width: 900px;
   max-height: 90vh;
