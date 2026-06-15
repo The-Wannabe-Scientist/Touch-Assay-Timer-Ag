@@ -322,6 +322,14 @@ document.addEventListener("DOMContentLoaded", async () => {
    * @param {string} nextState - Target state constant from STATES.
    */
   function setState(nextState) {
+    if (document.startViewTransition) {
+      document.startViewTransition(() => applyState(nextState));
+    } else {
+      applyState(nextState);
+    }
+  }
+
+  function applyState(nextState) {
     currentState           = nextState;
     document.body.className = `state-${currentState}`;
 
@@ -378,15 +386,23 @@ document.addEventListener("DOMContentLoaded", async () => {
    * @param {HTMLElement} screenElement - The section element to show.
    */
   function showScreen(screenElement) {
-    UI.Displays.overflowMenu.hidden = true;
-    document.body.classList.add("state-overlay");
+    const updateDOM = () => {
+      UI.Displays.overflowMenu.hidden = true;
+      document.body.classList.add("state-overlay");
 
-    // Collapse all overlay screens first to avoid stacking
-    UI.Screens.settings.hidden    = true;
-    UI.Screens.guidelines.hidden  = true;
-    UI.Screens.savedAssays.hidden = true;
+      // Collapse all overlay screens first to avoid stacking
+      UI.Screens.settings.hidden    = true;
+      UI.Screens.guidelines.hidden  = true;
+      UI.Screens.savedAssays.hidden = true;
 
-    screenElement.hidden = false;
+      screenElement.hidden = false;
+    };
+
+    if (document.startViewTransition) {
+      document.startViewTransition(updateDOM);
+    } else {
+      updateDOM();
+    }
   }
 
   /**
@@ -395,8 +411,16 @@ document.addEventListener("DOMContentLoaded", async () => {
    * @param {HTMLElement} screenElement - The section element to hide.
    */
   function hideScreenAndRestore(screenElement) {
-    screenElement.hidden = true;
-    document.body.classList.remove("state-overlay");
+    const updateDOM = () => {
+      screenElement.hidden = true;
+      document.body.classList.remove("state-overlay");
+    };
+
+    if (document.startViewTransition) {
+      document.startViewTransition(updateDOM);
+    } else {
+      updateDOM();
+    }
   }
 
 
