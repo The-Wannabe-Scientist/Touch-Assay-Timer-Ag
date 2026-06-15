@@ -740,3 +740,22 @@ body.state-running #openSavedAssays {
 body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):not(#savedAssaysScreen) {
   display: none !important;
 }
+
+/* Footer styling */
+.setup-footer {
+  margin-top: 2rem;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.setup-footer p {
+  margin: 0;
+  line-height: 1.4;
+}
+.setup-footer a {
+  color: var(--primary);
+  text-decoration: none;
+}
+.setup-footer a:hover {
+  text-decoration: underline;
+}
