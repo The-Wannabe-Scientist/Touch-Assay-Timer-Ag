@@ -1,4 +1,4 @@
-const CACHE_NAME = "touch-assay-cache-v1.1.4.3";
+const CACHE_NAME = "touch-assay-cache-v1.1.4.4";
 
 // Ensure paths match your actual directory structure!
 const ASSETS_TO_CACHE = [
