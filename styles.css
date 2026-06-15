@@ -743,7 +743,7 @@ body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):
 
 /* Footer styling */
 .setup-footer {
-  margin-top: 2rem;
+  margin-top: 1rem;
   text-align: center;
   font-size: 0.85rem;
   color: var(--text-muted);
