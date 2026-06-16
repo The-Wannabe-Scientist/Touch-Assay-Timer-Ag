@@ -24,7 +24,7 @@
  *                                            │
  *                                          EXPORT
  *
- * Scheduling pipeline (fires ~40×/sec via timer-worker.js):
+ * Scheduling pipeline (fires ~125×/sec via timer-worker.js):
  *
  *   Worker "tick" → scheduler() {
  *     Step 0: Gap check — auto-stop if timing gap > 2×ISI (backgrounding detected)
@@ -34,7 +34,7 @@
  *   }
  */
 
-import { initLogger, downloadLogs, clearLogs, getLogCount } from "./logger.js";
+
 import { validateInputs, generateAutoID, binRunValues } from "./utils.js";
 import {
   createAssay, createTrial, createRun,
@@ -43,25 +43,18 @@ import {
 import {
   saveAssay, loadAllAssays, hydrateAssay, deleteAssay,
   saveTrial, markTrialCompleted, markTrialAbandoned,
-  saveRun, abandonAllActiveTrialsInDB
+  saveRun, abandonAllActiveTrialsInDB, markOrphanRunsStopped, getIdbAvailable
 }                                                      from "./db.js";
 import {
   isAudioReady, setVoiceMode, loadVoices, speak, stopSpeech,
   warmUpAudio, playWarmupTone, scheduleWebAudioTick,
-  triggerImmediateSpeech, getAudioTime, playCompletionTone
+  triggerImmediateSpeech, getAudioTime, playCompletionTone,
+  setVolume, setTickPitch, getTickPitch, primeSpeechEngine, setBinSpeak
 }                                                      from "./audio.js";
 import {
   performExcelExport, performCSVExport, generatePreviewHTML
 }                                                      from "./export.js";
 import { showToast, dismissLatestToast }                from "./toast.js";
-
-
-/* ==========================================================================
-   Module Initialisation
-   ========================================================================== */
-
-// Start the persistent logger before anything else so startup errors are captured
-initLogger();
 
 
 /* ==========================================================================
@@ -126,10 +119,52 @@ let nextAudioStimulusIndex = 0;
 
 /**
  * Array of AudioContext timestamps for every tap recorded in the current run.
- * Taps outside the current interval window are pruned after each data step.
+ * Consumed via tapReadIndex — no per-interval array reallocation needed.
  * @type {number[]}
  */
 let tapTimestamps = [];
+
+/**
+ * Read pointer into tapTimestamps[].
+ * All entries at indices < tapReadIndex have already been consumed by a
+ * closed stimulus window and will not be checked again. This replaces
+ * the previous `.some()` + `.filter()` pattern, avoiding closure and
+ * array allocation on every ISI tick.
+ * @type {number}
+ */
+let tapReadIndex = 0;
+
+/**
+ * Cached reference to the currently active run object.
+ * Set once at the start of a run (startCueLoop) and cleared when the run ends.
+ * Eliminates the `.find()` scan inside scheduler() which otherwise runs ~125×/sec.
+ * @type {Object|null}
+ */
+let activeRun = null;
+
+/**
+ * Cached ISI (inter-stimulus interval) for the current run, in seconds.
+ * Copied from currentAssay.isi at the start of each run so the hot path
+ * in scheduler() never needs to dereference the assay object.
+ * @type {number}
+ */
+let runISI = 0;
+
+/**
+ * Cached stimulus count for the current run.
+ * Copied from currentAssay.stimCount at the start of each run.
+ * @type {number}
+ */
+let runStimCount = 0;
+
+/**
+ * Cached bin size for the current run.
+ * Copied from currentAssay.binSize at the start of each run and forwarded
+ * to audio.js via setBinSpeak() so "bins" voice mode speaks on the correct
+ * stimulus boundaries without dereferencing the assay object in the hot path.
+ * @type {number}
+ */
+let runBinSize = 10;
 
 /** @type {number} AudioContext time when the next speech/UI update should fire. */
 let nextSpeechTime = 0.0;
@@ -142,11 +177,13 @@ let nextAudioScheduleTime = 0.0;
 
 /**
  * How far ahead (in seconds) the audio scheduler pre-books hardware ticks.
- * 100ms gives enough headroom without causing audible stutters on devices
- * that have main-thread pauses up to ~80ms.
+ * 200ms gives enough headroom for budget Android devices where main-thread
+ * pauses of 100–150ms are common (background GC, compositing, etc.).
+ * Still well below any ISI used in practice (≥ 500ms) so ticks won't
+ * sound early.
  * @type {number}
  */
-const SCHEDULE_AHEAD_TIME = 0.1;
+const SCHEDULE_AHEAD_TIME = 0.20;
 
 /**
  * AudioContext timestamp of the last scheduler() invocation.
@@ -154,6 +191,18 @@ const SCHEDULE_AHEAD_TIME = 0.1;
  * @type {number}
  */
 let lastSchedulerTime = 0;
+
+/**
+ * How many milliseconds before the stimulus opens to fire the TTS command,
+ * to compensate for browser speech-engine cold-path latency (typically 50–120 ms).
+ * Loaded from localStorage so users can tune it per-device in Settings.
+ * @type {number}
+ */
+let speechLeadMs = parseInt(localStorage.getItem("touchAssaySpeechLeadMs"), 10);
+// Clamp to [0, 490] ms: values ≥ 500 ms would push nextSpeechTime before
+// AudioContext t0, causing the first cue to fire immediately on start.
+if (isNaN(speechLeadMs) || speechLeadMs < 0) speechLeadMs = 80;  // 80 ms default
+speechLeadMs = Math.min(speechLeadMs, 490);
 
 /**
  * How many stimuli were recorded at the time of the last IDB batch save.
@@ -182,8 +231,7 @@ let lastTapTime = 0;
  */
 const TAP_COOLDOWN_MS = 80;
 
-/** @type {number} Unix timestamp of when the current run started (for elapsed time). */
-let runStartTime = null;
+// runStartTime removed — was set but never read; startup time is not needed by any consumer.
 
 
 /* ==========================================================================
@@ -192,6 +240,15 @@ let runStartTime = null;
 
 /** @type {WakeLockSentinel|null} Active screen Wake Lock, or null if not held. */
 let wakeLock = null;
+
+/**
+ * Tracks whether a Wake Lock is currently desired.
+ * Using a separate boolean (instead of checking `wakeLock !== null`) ensures the
+ * visibilitychange re-acquire logic works correctly even after releaseWakeLock()
+ * synchronously nulls `wakeLock` before `.release()` resolves.
+ * @type {boolean}
+ */
+let wantsWakeLock = false;
 
 /**
  * Whether the countdown warmup is enabled before each run.
@@ -204,7 +261,7 @@ let isWarmupEnabled = localStorage.getItem("touchAssayWarmupEnabled") !== "false
  * Duration of the warmup countdown in seconds.
  * @type {number}
  */
-let warmupDuration = parseInt(localStorage.getItem("touchAssayWarmupDuration"), 10) || 3;
+let warmupDuration = Math.min(60, Math.max(1, parseInt(localStorage.getItem("touchAssayWarmupDuration"), 10) || 3));
 
 /**
  * True while the warmup countdown is actively ticking.
@@ -259,6 +316,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       newAssay:             document.getElementById("newAssay"),
       progress:             document.getElementById("toggleProgress"),
       exportExcel:          document.getElementById("exportExcel"),
+      exportCSV:            document.getElementById("exportCSV"),
       previewExcel:         document.getElementById("previewExcel"),
       exportFromPreview:    document.getElementById("exportFromPreview"),
       openSettings:         document.getElementById("openSettings"),
@@ -268,8 +326,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       openSavedAssays:      document.getElementById("openSavedAssays"),
       closeSavedAssays:     document.getElementById("closeSavedAssays"),
       overflowMenu:         document.getElementById("overflowMenuButton"),
-      downloadLogs:         document.getElementById("downloadLogsBtn"),
-      clearLogs:            document.getElementById("clearLogsBtn"),
+
       deleteSelectedAssays: document.getElementById("deleteSelectedAssays"),
       headerHome:           document.getElementById("headerHomeBtn"),
     },
@@ -284,14 +341,22 @@ document.addEventListener("DOMContentLoaded", async () => {
       previewContainer: document.getElementById("previewContainer"),
       closePreview:     document.getElementById("closePreview"),
       overflowMenu:     document.getElementById("overflowMenu"),
+      // Cached once to avoid repeated getElementById calls inside the hot scheduler loop
+      metronomeBar:     document.getElementById("visualMetronomeBar"),
     },
     Forms: {
       setup: document.getElementById("setupForm"),
     },
     Settings: {
-      warmupToggle:           document.getElementById("warmupToggle"),
-      warmupDurationInput:    document.getElementById("warmupDuration"),
-      warmupDurationContainer: document.getElementById("warmupDurationContainer"),
+      warmupToggle:             document.getElementById("warmupToggle"),
+      warmupDurationInput:      document.getElementById("warmupDuration"),
+      warmupDurationContainer:  document.getElementById("warmupDurationContainer"),
+      tickVolume:               document.getElementById("tickVolume"),
+      tickVolumeDisplay:        document.getElementById("tickVolumeDisplay"),
+      tickPitch:                document.getElementById("tickPitch"),
+      tickPitchDisplay:         document.getElementById("tickPitchDisplay"),
+      speechLead:               document.getElementById("speechLead"),
+      speechLeadDisplay:        document.getElementById("speechLeadDisplay"),
     }
   };
 
@@ -302,11 +367,28 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   formatRequiredLabels();                    // Add * to required form fields
   UI.Inputs.assayName.value = generateAutoID(); // Pre-fill with timestamp-based ID
-  abandonAllActiveTrialsInDB().catch(err =>  // Clean up any crashed session leftovers
-    console.warn("Background cleanup failed:", err)
-  );
+  restoreSetupDraft();                       // #1: Restore any unsaved form draft
   initializeSettings();                      // Restore saved preferences from localStorage
   setState(STATES.SETUP);                    // Render the initial state
+
+  // Clean up orphan sessions from previous crashes, then check IDB availability.
+  // Merged into one Promise.allSettled so the two cleanup functions are not called
+  // twice (previously a fire-and-forget pair ran alongside this block, causing
+  // parallel IDB transactions that could silently abort each other).
+  Promise.allSettled([
+    abandonAllActiveTrialsInDB(),
+    markOrphanRunsStopped()
+  ]).then(() => {
+    if (!getIdbAvailable()) {
+      const banner = document.getElementById("idbWarningBanner");
+      if (banner) banner.removeAttribute("hidden");
+      showToast(
+        "Storage unavailable — data will not be saved. Check browser settings.",
+        "error",
+        0  // persistent
+      );
+    }
+  });
 
 
   /* -----------------------------------------------------------------------
@@ -361,6 +443,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Buttons.progress.disabled      = true;
         UI.Buttons.tap.disabled           = false;
         UI.Buttons.stopRun.disabled       = false;
+        // The "do not leave" beforeunload dialog is handled by the event listener
+        // registered below — no additional setup is needed here.
         break;
 
       case STATES.EXPORT:
@@ -412,6 +496,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    * an active run. Silently no-ops on browsers that don't support the API.
    */
   async function requestWakeLock() {
+    wantsWakeLock = true;
     try {
       if ("wakeLock" in navigator) {
         wakeLock = await navigator.wakeLock.request("screen");
@@ -426,8 +511,11 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Safe to call when no lock is held.
    */
   function releaseWakeLock() {
+    wantsWakeLock = false;
     if (wakeLock) {
-      wakeLock.release().then(() => { wakeLock = null; });
+      const lock = wakeLock;
+      wakeLock = null;
+      lock.release().catch(() => {});
     }
   }
 
@@ -474,7 +562,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.totalStim.textContent = currentAssay.stimCount;
     UI.Displays.currentStim.textContent = "1";
 
-    runStartTime = Date.now();
     requestWakeLock();
     startCueLoop();
   }
@@ -485,23 +572,49 @@ document.addEventListener("DOMContentLoaded", async () => {
    *
    * The 0.5s offset gives the audio context time to warm up before the first
    * tick fires, preventing the first beep from being clipped or delayed.
+   *
+   * Also captures the active run reference and stable assay parameters into
+   * module-level cache variables so scheduler() never dereferences currentAssay
+   * or scans the runs array during its hot path.
    */
   function startCueLoop() {
+    // Capture the active run reference once — scheduler() will use this directly
+    const activeTrial = getActiveTrial(currentAssay);
+    activeRun         = activeTrial?.runs.find(r => r.status === "active") ?? null;
+
+    // Cache stable run parameters to avoid repeated property lookups in scheduler()
+    runISI        = currentAssay.isi;
+    runStimCount  = currentAssay.stimCount;
+    runBinSize    = currentAssay.binSize || 10;
+
+    // Forward bin size to audio module for "bins" voice mode
+    setBinSpeak(runBinSize);
+
     // Reset all scheduling counters
     currentStimulusIndex    = 0;
     nextSpeechIndex         = 0;
     nextAudioStimulusIndex  = 0;
     tapTimestamps           = [];
+    tapReadIndex            = 0;
     lastSchedulerTime       = 0;
     lastBatchSaveIndex      = 0;
 
-    const startTime = getAudioTime() + 0.5;  // 500ms warm-up delay
+    const t0 = getAudioTime();
+    const startTime = t0 + 0.5;  // 500ms warm-up delay
 
     nextAudioScheduleTime  = startTime;
-    nextSpeechTime         = startTime;
-    nextDataIntervalTime   = startTime + currentAssay.isi;  // First window closes after one ISI
+    // Fire the TTS command slightly before the stimulus opens to compensate
+    // for browser speech-engine latency (speechLeadMs, default 80 ms).
+    nextSpeechTime         = startTime - (speechLeadMs / 1000);
+    nextDataIntervalTime   = startTime + runISI;  // First window closes after one ISI
 
     timerWorker.postMessage("start");
+
+    // Cancel any stale animation frame before starting a fresh one
+    // (guards against rapid stop→start sequences stacking rAF callbacks)
+    if (visualAnimationFrame !== null) {
+      cancelAnimationFrame(visualAnimationFrame);
+    }
     visualAnimationFrame = requestAnimationFrame(renderVisualMetronome);
   }
 
@@ -511,7 +624,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   ----------------------------------------------------------------------- */
 
   /**
-   * The main scheduler function — called on every Worker "tick" (~40×/sec).
+   * The main scheduler function — called on every Worker "tick" (~125×/sec).
    *
    * Runs three sequential layers:
    *
@@ -535,8 +648,8 @@ document.addEventListener("DOMContentLoaded", async () => {
    *     clock to guarantee timing accuracy independent of JS thread load.
    */
   function scheduler() {
-    const activeTrial = getActiveTrial(currentAssay);
-    const run         = activeTrial?.runs.find(r => r.status === "active");
+    // Use cached run reference — avoids a linear .find() scan (~125×/sec)
+    const run = activeRun;
 
     // Safety: if there's no active run, halt the loop
     if (!run) {
@@ -547,9 +660,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     const currentTime = getAudioTime();
 
     // ── Step 0: Timing gap detection ───────────────────────────────────────
+    // Note: lastSchedulerTime is set *after* this check so that on the very
+    // first tick (lastSchedulerTime === 0) the guard is intentionally skipped.
+    // On a recovered return from background, the first tick post-resume will
+    // correctly fire the gap guard and abort the run before any data is lost.
     if (lastSchedulerTime > 0) {
-      const gap            = currentTime - lastSchedulerTime;
-      const maxAllowedGap  = Math.max(currentAssay.isi * 2, 1.0);
+      const gap           = currentTime - lastSchedulerTime;
+      const maxAllowedGap = Math.max(runISI * 2, 1.0);
 
       if (gap > maxAllowedGap) {
         console.error(
@@ -563,53 +680,83 @@ document.addEventListener("DOMContentLoaded", async () => {
     lastSchedulerTime = currentTime;
 
     // ── Step 1: Speech & UI sync (fires at stimulus open) ──────────────────
-    while (currentTime >= nextSpeechTime && nextSpeechIndex < currentAssay.stimCount) {
-      const displayIndex = nextSpeechIndex + 1;  // 1-based for display
+    // Optimisation: when the scheduler misses several ticks (e.g. a brief JS
+    // pause), the while-loop would catch up by firing triggerImmediateSpeech()
+    // for every missed beat. Each call does cancel() + speak(), so only the
+    // last utterance survives — the intermediate ones are pure churn (~5-10ms
+    // each). Instead, we advance through all missed beats, update the UI to
+    // the latest, and fire speech exactly once for the most recent stimulus.
+    {
+      let speechFired = false;
+      while (currentTime >= nextSpeechTime && nextSpeechIndex < runStimCount) {
+        const displayIndex = nextSpeechIndex + 1;  // 1-based for display
 
-      UI.Displays.currentStim.textContent = displayIndex;
-      triggerImmediateSpeech(displayIndex, currentAssay.isi);
+        // Always update the counter — it must reflect the latest stimulus
+        UI.Displays.currentStim.textContent = displayIndex;
 
-      nextSpeechTime += currentAssay.isi;
-      nextSpeechIndex++;
+        // Only fire speech on the last iteration of this catch-up loop.
+        // Peek ahead: if the *next* beat is also due, skip speech for this one.
+        const nextBeatAlsoDue = (currentTime >= nextSpeechTime + runISI)
+                             && (nextSpeechIndex + 1 < runStimCount);
+        if (!nextBeatAlsoDue) {
+          triggerImmediateSpeech(displayIndex, runISI);
+          speechFired = true;
+        }
+
+        nextSpeechTime += runISI;
+        nextSpeechIndex++;
+      }
+      // If we skipped all speech calls (shouldn't happen, but defensive),
+      // the counter is still up-to-date from the last iteration above.
+      void speechFired;  // Suppress unused-variable linters
     }
 
     // ── Step 2: Data recording (fires at stimulus close) ───────────────────
-    while (currentTime >= nextDataIntervalTime && currentStimulusIndex < currentAssay.stimCount) {
-      const intervalStart = nextDataIntervalTime - currentAssay.isi;
+    while (currentTime >= nextDataIntervalTime && currentStimulusIndex < runStimCount) {
+      const intervalStart = nextDataIntervalTime - runISI;
       const intervalEnd   = nextDataIntervalTime;
 
-      // Check if the experimenter tapped within this stimulus window
-      const tapOccurred = tapTimestamps.some(t => t >= intervalStart && t < intervalEnd);
+      // Check if the experimenter tapped within this stimulus window.
+      // Uses an index pointer (tapReadIndex) to scan only unconsumed entries,
+      // avoiding the previous .some() + .filter() pattern that allocated a new
+      // array and closures on every ISI tick.
+      let tapOccurred = false;
+      while (tapReadIndex < tapTimestamps.length) {
+        const t = tapTimestamps[tapReadIndex];
+        if (t >= intervalEnd) break;            // belongs to a future window
+        if (t >= intervalStart) tapOccurred = true;  // inside this window
+        tapReadIndex++;                         // consume (past or matched)
+      }
 
       // Encoding:
       //   1 = animal responded (default — experimenter did NOT tap)
       //   0 = animal did not respond (experimenter tapped to record non-response)
       run.values.push(tapOccurred ? 0 : 1);
 
-      // Batch save: flush to IDB periodically to reduce transaction overhead
-      const stimsSinceLastSave = currentStimulusIndex - lastBatchSaveIndex;
-      if (stimsSinceLastSave >= BATCH_SAVE_INTERVAL) {
-        saveRun(currentAssay.assayId, activeTrial.trialId, run).catch(err =>
+      // Reset visual "bucket fulfilled" indicators for the next interval
+      UI.Buttons.tap.classList.remove("bucket-fulfilled");
+      if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.remove("fulfilled");
+
+      currentStimulusIndex++;
+      nextDataIntervalTime += runISI;
+
+      // Batch save: flush to IDB periodically to reduce transaction overhead.
+      // Index updated *after* increment so the count reflects stimuli fully recorded.
+      if (currentStimulusIndex - lastBatchSaveIndex >= BATCH_SAVE_INTERVAL) {
+        const trial = getActiveTrial(currentAssay);  // Only called at save boundaries
+        saveRun(currentAssay.assayId, trial.trialId, run).catch(err =>
           console.error("Batch save failed:", err)
         );
         lastBatchSaveIndex = currentStimulusIndex;
       }
 
-      // Prune timestamps that are now in the past (before this window's end)
-      tapTimestamps = tapTimestamps.filter(t => t >= intervalEnd);
-
-      // Reset visual "bucket fulfilled" indicators for the next interval
-      UI.Buttons.tap.classList.remove("bucket-fulfilled");
-      const metronomeBar = document.getElementById("visualMetronomeBar");
-      if (metronomeBar) metronomeBar.classList.remove("fulfilled");
-
-      currentStimulusIndex++;
-      nextDataIntervalTime += currentAssay.isi;
-
       // Check if all stimuli for this run are recorded
       if (run.values.length === run.expectedStimCount) {
+        // Capture the run reference BEFORE stopCueLoop() sets activeRun = null,
+        // so completeRunNormally() receives it directly without a fragile .find() re-scan.
+        const completedRun = run;
         stopCueLoop();
-        completeRunNormally();
+        completeRunNormally(completedRun);
         return;  // Exit scheduler immediately — run is over
       }
     }
@@ -617,10 +764,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // ── Step 3: Audio pre-scheduling (fires slightly ahead of time) ────────
     while (
       nextAudioScheduleTime < currentTime + SCHEDULE_AHEAD_TIME &&
-      nextAudioStimulusIndex < currentAssay.stimCount
+      nextAudioStimulusIndex < runStimCount
     ) {
-      scheduleWebAudioTick(nextAudioStimulusIndex + 1, currentAssay.isi, nextAudioScheduleTime);
-      nextAudioScheduleTime += currentAssay.isi;
+      scheduleWebAudioTick(nextAudioStimulusIndex + 1, runISI, nextAudioScheduleTime);
+      nextAudioScheduleTime += runISI;
       nextAudioStimulusIndex++;
     }
   }
@@ -632,10 +779,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Halts the Worker heartbeat and cancels the visual animation frame.
+   * Also clears the cached activeRun reference so scheduler() cannot fire
+   * against a stale run object if a tick arrives after stop.
    * Does not modify any data — call before any run-ending function.
    */
   function stopCueLoop() {
     timerWorker.postMessage("stop");
+    activeRun = null;  // Defensive: prevent scheduler() processing stale run
     if (visualAnimationFrame !== null) {
       cancelAnimationFrame(visualAnimationFrame);
       visualAnimationFrame = null;
@@ -649,9 +799,10 @@ document.addEventListener("DOMContentLoaded", async () => {
    * saves the final state to IDB, plays the completion chime, and
    * returns the UI to POISED state so the next run can begin.
    */
-  async function completeRunNormally() {
+  async function completeRunNormally(run) {
     const activeTrial = getActiveTrial(currentAssay);
-    const run         = activeTrial.runs.find(r => r.status === "active");
+    // run is passed directly from the scheduler — no .find() needed.
+    // (activeRun is already null at this point because stopCueLoop() was called first.)
     if (!run) return;
 
     completeRun(run);
@@ -677,18 +828,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Final save: ensures all values are in IDB regardless of batch timing
     await saveRun(currentAssay.assayId, activeTrial.trialId, run);
 
+    // Update last-modified timestamp so metadata exports reflect the latest activity
+    currentAssay.lastModifiedAt = Date.now();
+    saveAssay(currentAssay).catch(err => console.error("Failed to update assay metadata:", err));
+
     // Completion feedback
     playCompletionTone();
     try {
       if (navigator.vibrate) navigator.vibrate([100, 50, 200]);  // Ascending haptic pattern
     } catch (e) { /* Haptics not supported — silently ignore */ }
 
-    // Update the UI and return to POISED state for the next run
+    // Update the UI and return to POISED state for the next run.
+    // applyProgressVisibilityPreference() below sets both .hidden and the button
+    // label correctly — no need to pre-set them here (that would override the pref).
     updateProgressTable();
-    document.getElementById("assayProgress").hidden = false;
-    UI.Buttons.progress.textContent = "Hide Progress";
     refreshGenotypeDropdownCounts();
     releaseWakeLock();
+    // Respect the user's saved visibility preference for the progress table
+    // (set via the "Hide/Show Progress" toggle in the assay screen).
+    applyProgressVisibilityPreference();
     setState(STATES.POISED);
     showToast("Run complete — all stimulations recorded.", "success");
   }
@@ -701,11 +859,20 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function stopRunEarly(reason = "Run stopped early by user") {
     isWarmingUp = false;
+    // Snapshot activeRun BEFORE stopCueLoop() nulls it. This prevents a double-stop
+    // race where a final Worker tick arrives after stopCueLoop() clears activeRun,
+    // causing a second call that would tag and re-save an already-tagged run.
+    const snapshotRun = activeRun;
     stopCueLoop();
     stopSpeech();
 
+    // Bug 5: guard against currentAssay being null (e.g. corrupted state or a
+    // spurious call after resetToSetup). Without this, saveRun(currentAssay.assayId, ...)
+    // below would throw TypeError: Cannot read properties of null.
+    if (!currentAssay) return;
+
     const activeTrial = getActiveTrial(currentAssay);
-    const run         = activeTrial?.runs.find(r => r.status === "active");
+    const run         = snapshotRun || activeTrial?.runs.find(r => r.status === "active");
     if (!run) return;
 
     // Tag the run with ineligibility information
@@ -718,12 +885,17 @@ document.addEventListener("DOMContentLoaded", async () => {
       console.error("Failed to save stopped run:", err)
     );
 
-    // Update UI and return to POISED state
+    // Update last-modified timestamp so metadata exports reflect the latest activity
+    currentAssay.lastModifiedAt = Date.now();
+    saveAssay(currentAssay).catch(err => console.error("Failed to update assay metadata:", err));
+
+    // Update UI and return to POISED state.
+    // applyProgressVisibilityPreference() handles both .hidden and the label.
     updateProgressTable();
-    document.getElementById("assayProgress").hidden = false;
-    UI.Buttons.progress.textContent = "Hide Progress";
     refreshGenotypeDropdownCounts();
     releaseWakeLock();
+    // Respect the user's saved visibility preference for the progress table.
+    applyProgressVisibilityPreference();
     setState(STATES.POISED);
     showToast(
       reason === "Run stopped early by user"
@@ -787,7 +959,15 @@ document.addEventListener("DOMContentLoaded", async () => {
         startTimeout = setTimeout(() => {
           pendingStart = false;
           if (currentState === STATES.CONFIGURED || currentState === STATES.POISED) {
-            UI.Buttons.tap.textContent = `Start ${selectedGenotype} (Animal ${nextIndex})`;
+            // Recompute freshly — do not use the closure-captured nextIndex which was
+            // calculated at first-tap time and may be stale if a run completed in between.
+            const activeTrial = getActiveTrial(currentAssay);
+            const freshIndex = (activeTrial?.runs.filter(
+              r => r.genotype === selectedGenotype &&
+                   r.status === "completed" &&
+                   r.eligibleForAnalysis
+            ).length ?? 0) + 1;
+            UI.Buttons.tap.textContent = `Start ${selectedGenotype} (Animal ${freshIndex})`;
           }
         }, 2000);
 
@@ -799,10 +979,25 @@ document.addEventListener("DOMContentLoaded", async () => {
       clearTimeout(startTimeout);
     }
 
-    // ── Audio warm-up (first interaction) ────────────────────────────────
+    // ── Audio warm-up (first interaction) ────────────────────────────────────
     if (!isAudioReady()) {
-      warmUpAudio();
-      speak("");  // Unblocks the speech engine on iOS
+      // Bug 3: warmUpAudio() now re-throws on failure. Catch here so we can
+      // show a user-facing error and abort instead of continuing with a
+      // suspended AudioContext where getAudioTime() returns 0.
+      try {
+        await warmUpAudio();
+      } catch {
+        showToast(
+          "Audio could not start — check your browser's autoplay/audio settings and try again.",
+          "error",
+          7000
+        );
+        return;
+      }
+      // Bug 7 (audio): speak("") with an empty string can break iOS speechSynthesis.
+      // primeSpeechEngine() uses a silent space utterance (" ") for the same purpose
+      // and is already used during warmup for exactly this reason.
+      primeSpeechEngine();
     }
 
     // ── Visual & haptic feedback ──────────────────────────────────────────
@@ -822,8 +1017,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // Visual indicator: "bucket fulfilled" shows the tap was registered
       UI.Buttons.tap.classList.add("bucket-fulfilled");
-      const metronomeBar = document.getElementById("visualMetronomeBar");
-      if (metronomeBar) metronomeBar.classList.add("fulfilled");
+      // Use cached reference — avoids getElementById on every tap during a run
+      if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.add("fulfilled");
 
     } else if (isStartingNewRun) {
       // Start the warmup countdown (which then calls startRun)
@@ -850,7 +1045,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (isWarmingUp) return;
 
     if (!isWarmupEnabled) {
-      startRun();
+      primeSpeechEngine();  // Warm the TTS engine even when skipping the countdown
+      // Bug 2: wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
+      try {
+        await startRun();
+      } catch (err) {
+        console.error("Failed to start run:", err);
+        showToast("Failed to start run — storage error. Please try again.", "error");
+      }
       return;
     }
 
@@ -858,12 +1060,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.warmup.hidden      = false;
     UI.Buttons.tap.hidden          = true;
 
+    // Prime the TTS engine with a silent utterance so the synthesis pipeline
+    // is warm before the first real voiced cue fires during the run.
+    primeSpeechEngine();
+
     for (let i = warmupDuration; i > 0; i--) {
       // Cancel if the state has changed externally (e.g. stop was clicked)
       if (!isWarmingUp || (currentState !== STATES.CONFIGURED && currentState !== STATES.POISED)) {
         isWarmingUp               = false;
         UI.Displays.warmup.hidden = true;
         UI.Buttons.tap.hidden     = false;
+        // Restore the tap button label so it doesn't show the stale "Tap again…" text.
+        const sel = UI.Inputs.genotypeSelect.value;
+        if (sel && (currentState === STATES.CONFIGURED || currentState === STATES.POISED)) {
+          const at = getActiveTrial(currentAssay);
+          const n  = (at?.runs.filter(r => r.genotype === sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
+          UI.Buttons.tap.textContent = `Start ${sel} (Animal ${n})`;
+        }
         return;
       }
 
@@ -871,12 +1084,33 @@ document.addEventListener("DOMContentLoaded", async () => {
       playWarmupTone(1200);  // High beep each countdown second
 
       await new Promise(r => setTimeout(r, 1000));
+
+      // #7: Re-check after the await — warmup may have been cancelled while suspended
+      if (!isWarmingUp) {
+        UI.Displays.warmup.hidden = true;
+        UI.Buttons.tap.hidden     = false;
+        // Restore the tap button label after a mid-countdown cancel.
+        const sel = UI.Inputs.genotypeSelect.value;
+        if (sel) {
+          const at = getActiveTrial(currentAssay);
+          const n  = (at?.runs.filter(r => r.genotype === sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
+          UI.Buttons.tap.textContent = `Start ${sel} (Animal ${n})`;
+        }
+        return;
+      }
     }
 
     isWarmingUp               = false;
     UI.Displays.warmup.hidden = true;
     UI.Buttons.tap.hidden     = false;
-    await startRun();
+
+    // Bug 2: wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
+    try {
+      await startRun();
+    } catch (err) {
+      console.error("Failed to start run:", err);
+      showToast("Failed to start run — storage error. Please try again.", "error");
+    }
   }
 
 
@@ -893,17 +1127,27 @@ document.addEventListener("DOMContentLoaded", async () => {
    * so it stays perfectly in sync with audio regardless of frame rate.
    */
   function renderVisualMetronome() {
-    if (currentState !== STATES.RUNNING || !currentAssay) return;
+    if (currentState !== STATES.RUNNING || !currentAssay) {
+      // Clear the stale handle so stopCueLoop()'s cancelAnimationFrame guard stays
+      // consistent — otherwise a handle created by a re-queued rAF after stopCueLoop
+      // would never be stored and could run indefinitely.
+      visualAnimationFrame = null;
+      return;
+    }
 
+    // Snapshot nextDataIntervalTime once to avoid a race with scheduler(), which can
+    // increment it between consecutive rAF callbacks and cause the bar to flash to 100%
+    // or reset to 0% mid-interval before the next frame corrects it.
+    const intervalEnd   = nextDataIntervalTime;
     const currentTime   = getAudioTime();
-    const intervalStart = nextDataIntervalTime - currentAssay.isi;
+    const intervalStart = intervalEnd - runISI;  // Use cached ISI
 
     // Progress: 0.0 at interval start → 1.0 at interval end
-    let progress = (currentTime - intervalStart) / currentAssay.isi;
+    let progress = (currentTime - intervalStart) / runISI;  // Use cached ISI
     progress     = Math.max(0, Math.min(1, progress));  // Clamp to [0, 1]
 
-    const bar = document.getElementById("visualMetronomeBar");
-    if (bar) bar.style.width = `${progress * 100}%`;
+    // Use cached DOM reference from UI — avoids getElementById on every frame
+    if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.style.width = `${progress * 100}%`;
 
     // Schedule the next frame
     visualAnimationFrame = requestAnimationFrame(renderVisualMetronome);
@@ -949,8 +1193,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Settings.warmupDurationContainer.style.display = isWarmupEnabled ? "flex" : "none";
 
     // Theme
-    const savedTheme = localStorage.getItem("touchAssayTheme") || "light";
+    // Mirror the inline script's OS-preference fallback: if no theme has ever been saved,
+    // use prefers-color-scheme rather than hardcoding "light". Without this,
+    // initializeSettings() would overwrite the dark theme the inline script just applied
+    // (via the same OS-preference check) back to "light" on first load.
+    const savedTheme = localStorage.getItem("touchAssayTheme") ||
+      (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     document.documentElement.setAttribute("data-theme", savedTheme);
+    const metaThemeColor = document.querySelector('meta[name="theme-color"]');
+    if (metaThemeColor) metaThemeColor.setAttribute('content', savedTheme === 'dark' ? '#0f172a' : '#f1f5f9');
     document.querySelectorAll('input[name="themeMode"]').forEach(input => {
       if (input.value === savedTheme) input.checked = true;
     });
@@ -961,6 +1212,53 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.querySelectorAll('input[name="voiceMode"]').forEach(input => {
       if (input.value === savedVoiceMode) input.checked = true;
     });
+
+    // #15: Tick volume
+    const savedVolume = parseFloat(localStorage.getItem("touchAssayTickVolume"));
+    const initVolume  = isNaN(savedVolume) ? 1.0 : savedVolume;
+    setVolume(initVolume);
+    if (UI.Settings.tickVolume) {
+      UI.Settings.tickVolume.value = initVolume;
+      if (UI.Settings.tickVolumeDisplay)
+        UI.Settings.tickVolumeDisplay.textContent = Math.round(initVolume * 100) + "%";
+    }
+
+    // #15: Tick pitch
+    const savedPitch = parseInt(localStorage.getItem("touchAssayTickPitch"), 10);
+    const initPitch  = isNaN(savedPitch) ? 900 : savedPitch;
+    setTickPitch(initPitch);
+    if (UI.Settings.tickPitch) {
+      UI.Settings.tickPitch.value = initPitch;
+      if (UI.Settings.tickPitchDisplay)
+        UI.Settings.tickPitchDisplay.textContent = initPitch + " Hz";
+    }
+
+    // Speech lead time (ms) — compensates for TTS engine latency
+    if (UI.Settings.speechLead) {
+      UI.Settings.speechLead.value = speechLeadMs;
+      if (UI.Settings.speechLeadDisplay)
+        UI.Settings.speechLeadDisplay.textContent = speechLeadMs + " ms";
+    }
+
+    // #21: Restore progress-table visibility preference
+    const progressPref = localStorage.getItem("touchAssayProgressVisible");
+    // We don't apply it here at startup because there's no data yet;
+    // it gets applied in completeRunNormally() / stopRunEarly() when
+    // the table is first shown (or kept hidden) according to preference.
+  }
+
+  /**
+   * Applies the user's saved progress-table visibility preference.
+   * Called after each run ends so the table respects the user's toggle setting.
+   */
+  function applyProgressVisibilityPreference() {
+    const pref      = localStorage.getItem("touchAssayProgressVisible");
+    const container = document.getElementById("assayProgress");
+    if (!container) return;
+    // Default: show the table ("true" or no stored pref = visible)
+    const shouldShow = pref !== "false";
+    container.hidden               = !shouldShow;
+    UI.Buttons.progress.textContent = shouldShow ? "Hide Progress" : "Show Progress";
   }
 
   /**
@@ -1035,6 +1333,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function updateProgressTable() {
     const container = document.getElementById("assayProgress");
+    if (!container) return;  // Bug 8: guard against missing element
     container.innerHTML = "";
 
     if (!currentAssay || !getActiveTrial(currentAssay)) return;
@@ -1091,6 +1390,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (!assay || !assay.trials) return;
 
+    // Bug 9: accumulate into a string and assign once — avoids O(n²) DOM
+    // re-parsing that happens when innerHTML += is called inside a loop
+    // (each append reads the entire current DOM, re-serialises it, and
+    // re-parses the concatenated result).
+    let html = "";
+
     assay.trials.forEach(trial => {
       const isCompleted = trial.status === "completed";
       const isAbandoned = trial.status === "abandoned";
@@ -1106,9 +1411,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         .filter(Boolean)
         .join(", ");
 
-      container.innerHTML +=
+      html +=
         `<label>` +
         `<input type="checkbox" data-dataset-type="trial" data-trial-id="${trial.trialId}"` +
+        ` aria-label="Trial ${trial.trialIndex}, ${eligible} eligible of ${total} total${isAbandoned ? ', abandoned' : ''}"` +
         ` ${isCompleted ? "checked" : ""}>` +
         ` Trial ${trial.trialIndex}` +
         ` — ${eligible} eligible (${total} total)` +
@@ -1117,13 +1423,16 @@ document.addEventListener("DOMContentLoaded", async () => {
         `</label>`;
     });
 
-    container.innerHTML +=
+    html +=
       `<label><input type="checkbox" data-dataset-type="pooled" ` +
       `data-include-abandoned="false" checked> Pooled (completed trials only)</label>`;
 
-    container.innerHTML +=
+    html +=
       `<label><input type="checkbox" data-dataset-type="pooled" ` +
       `data-include-abandoned="true"> Pooled (include abandoned)</label>`;
+
+    // Single assignment — all trial rows are parsed in one pass
+    container.innerHTML = html;
 
     // Sync select-all state and button enabled state after rebuilding the list
     syncExportSelectAll();
@@ -1139,6 +1448,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.querySelectorAll("#exportDatasetList input[type='checkbox']:checked").length > 0;
     UI.Buttons.exportExcel.disabled  = !anyChecked;
     UI.Buttons.previewExcel.disabled = !anyChecked;
+    if (UI.Buttons.exportCSV) UI.Buttons.exportCSV.disabled = !anyChecked;
   }
 
   /**
@@ -1167,7 +1477,67 @@ document.addEventListener("DOMContentLoaded", async () => {
       .replace(/&/g, "&amp;")
       .replace(/</g,  "&lt;")
       .replace(/>/g,  "&gt;")
-      .replace(/"/g,  "&quot;");
+      .replace(/"/g,  "&quot;")
+      .replace(/'/g,  "&#39;");
+  }
+
+  /**
+   * Builds and renders the trial summary card on the export screen.
+   * Shows eligible run counts and mean overall response rate per genotype
+   * for the most recently completed trial.
+   *
+   * @param {Object} assay - The fully hydrated assay (after hydrateAssay()).
+   */
+  function renderTrialSummaryCard(assay) {
+    const card = document.getElementById("trialSummaryCard");
+    if (!card) return;
+
+    // Find the most recently completed trial
+    const completedTrials = assay.trials
+      .filter(t => t.status === "completed")
+      .sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0));
+
+    if (completedTrials.length === 0) { card.hidden = true; return; }
+
+    const trial = completedTrials[0];
+    const eligibleRuns = trial.runs.filter(r => r.eligibleForAnalysis);
+
+    let genotypesHTML = "";
+    assay.genotypes.forEach(g => {
+      const gRuns = eligibleRuns.filter(r => r.genotype === g);
+      const n     = gRuns.length;
+
+      // Mean overall response rate across all stimuli for this genotype
+      let meanRate = "—";
+      if (n > 0) {
+        const allVals    = gRuns.flatMap(r => r.values || []);
+        const totalOnes  = allVals.reduce((s, v) => s + v, 0);
+        meanRate = allVals.length > 0
+          ? Math.round((totalOnes / allVals.length) * 100) + "%"
+          : "—";
+      }
+
+      genotypesHTML += `
+        <div class="trial-summary-genotype-block">
+          <div class="genotype-name" title="${escapeHTML(g)}">${escapeHTML(g)}</div>
+          <div class="genotype-stat">${n}</div>
+          <div class="genotype-label">eligible run${n !== 1 ? "s" : ""}</div>
+          <div class="genotype-stat" style="font-size:1rem; margin-top:0.3rem">${meanRate}</div>
+          <div class="genotype-label">mean response</div>
+        </div>`;
+    });
+
+    card.innerHTML = `
+      <h3>
+        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
+             fill="none" stroke="currentColor" stroke-width="2.5"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        Trial ${trial.trialIndex} Summary
+      </h3>
+      <div class="trial-summary-genotypes">${genotypesHTML}</div>`;
+    card.hidden = false;
   }
 
   /**
@@ -1180,7 +1550,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.savedAssaysList.innerHTML = "";
 
     if (assays.length === 0) {
-      UI.Displays.savedAssaysList.textContent = "No saved assays.";
+      // #31: Styled empty state with icon instead of plain text
+      UI.Displays.savedAssaysList.innerHTML = `
+        <div class="saved-assays-empty">
+          <svg xmlns="http://www.w3.org/2000/svg" width="52" height="52" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="1.5"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            <line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/>
+          </svg>
+          <p><strong>No saved assays yet</strong>Complete an assay setup to get started. Your experiments will appear here.</p>
+        </div>`;
       return;
     }
 
@@ -1243,12 +1623,25 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   document.addEventListener("visibilitychange", async () => {
     if (document.visibilityState === "hidden" && currentState === STATES.RUNNING && currentAssay) {
-      console.log("App backgrounded: automatically stopping active run.");
-      stopRunEarly("Timing interrupted — device was backgrounded or throttled");
+      // Emergency flush: persist whatever is recorded so far before the browser suspends us.
+      // Do NOT call stopRunEarly() here — the scheduler's gap check (Step 0) will stop the
+      // run cleanly when the app resumes once the gap exceeds 2×ISI. Calling stopRunEarly()
+      // here AND letting the gap check fire on resume creates a double-stop race where two
+      // concurrent IDB writes target the same run record.
+      const activeTrial = getActiveTrial(currentAssay);
+      const run = activeRun || activeTrial?.runs.find(r => r.status === "active");
+      if (run && activeTrial) {
+        saveRun(currentAssay.assayId, activeTrial.trialId, run).catch(() => {});
+      }
     }
 
-    // Wake Locks are released when hidden; re-acquire when visible
-    if (wakeLock !== null && document.visibilityState === "visible") {
+    // Wake Locks are released when hidden; re-acquire when visible, but only
+    // if a run is still active — there is no point holding the lock otherwise.
+    // Bug 4: also check activeRun !== null. On slow devices the timing-gap auto-stop
+    // in scheduler() fires on the first tick after resume, which means currentState
+    // is still RUNNING when this handler fires. Without the activeRun guard, we
+    // re-acquire a lock that will be released again moments later.
+    if (wantsWakeLock && document.visibilityState === "visible" && currentState === STATES.RUNNING && activeRun !== null) {
       await requestWakeLock();
     }
   });
@@ -1261,19 +1654,21 @@ document.addEventListener("DOMContentLoaded", async () => {
    * not complete before the page is torn down. The abandonAllActiveTrialsInDB()
    * cleanup on next launch catches any that slip through.
    */
-  window.addEventListener("beforeunload", () => {
+  window.addEventListener("beforeunload", e => {
     if (currentState !== STATES.RUNNING || !currentAssay) return;
 
-    const activeTrial = getActiveTrial(currentAssay);
-    const run         = activeTrial?.runs.find(r => r.status === "active");
+    // #5: Show the browser's native "Leave site?" dialog when a run is active.
+    // Setting returnValue triggers the confirmation on all modern browsers.
+    e.preventDefault();
+    e.returnValue = "";  // Required for Chrome/Edge (legacy spec)
 
-    if (run) {
-      run.status               = "stoppedEarly";
-      run.endedAt              = Date.now();
-      run.eligibleForAnalysis  = false;
-      run.ineligibleReason     = "App closed during active run";
-      saveRun(currentAssay.assayId, activeTrial.trialId, run).catch(() => {});
-    }
+    // Bug 4 fix: call stopRunEarly() instead of manually tagging the run.
+    // This stops the Worker heartbeat and scheduler so that if the user
+    // clicks "Stay" on the Leave dialog the scheduler does not continue
+    // running against a run that was already marked stoppedEarly.
+    // stopRunEarly() is idempotent — if the timing-gap auto-stop already
+    // fired, activeRun is null and the function returns early.
+    stopRunEarly("App closing — run stopped for data safety");
   });
 
 
@@ -1287,17 +1682,194 @@ document.addEventListener("DOMContentLoaded", async () => {
    * to prevent spurious processing during other states.
    */
   timerWorker.onmessage = function (e) {
-    if (e.data === "tick" && currentState === STATES.RUNNING && currentAssay) {
+    // Also guard on activeRun: stopCueLoop() nulls activeRun synchronously, but
+    // a tick message already queued in the event loop can still arrive before
+    // completeRunNormally() calls setState(POISED). Checking activeRun here means
+    // those late ticks exit immediately without re-entering scheduler().
+    if (e.data === "tick" && currentState === STATES.RUNNING && currentAssay && activeRun) {
       scheduler();
     }
   };
 
 
   /* -----------------------------------------------------------------------
+     Navigation Helpers (shared between newAssay and headerHome)
+  ----------------------------------------------------------------------- */
+
+  /**
+   * Zeroes all scheduling and timing counters so a fresh run cannot be
+   * corrupted by values left over from a previous session.
+   *
+   * Also resets the warmup guard — navigating away mid-countdown would
+   * otherwise leave `isWarmingUp = true`, blocking the next run from starting.
+   */
+  function resetTimingState() {
+    isWarmingUp            = false;
+    currentStimulusIndex   = 0;
+    // Bug 4: also reset the two speech/audio index counters so a fresh session after
+    // resetToSetup() cannot inherit stale values from a previous run.
+    nextSpeechIndex        = 0;
+    nextAudioStimulusIndex = 0;
+    tapTimestamps          = [];
+    tapReadIndex           = 0;
+    lastSchedulerTime      = 0;
+    lastBatchSaveIndex     = 0;
+    nextAudioScheduleTime  = 0.0;
+    nextSpeechTime         = 0.0;
+    nextDataIntervalTime   = 0.0;
+  }
+
+  /**
+   * Tears down the active assay and returns the app to the Setup screen.
+   *
+   * Resets the form, clears the progress table, and zeroes all
+   * timing/scheduling counters. Called by both the "New Assay" button
+   * and the header logo/home button.
+   */
+  function resetToSetup() {
+    currentAssay = null;
+    UI.Forms.setup.reset();
+    UI.Inputs.assayName.value     = generateAutoID();
+    UI.Displays.binWarning.hidden = true;
+
+    // Bug 4: form.reset() clears the hidden #genotypes input value but does NOT
+    // clear the chip DOM elements — chips from the previous assay would remain
+    // visually, while the hidden input is empty, causing a confusing validation
+    // error on next submit. Clear the chip list explicitly.
+    const chipList = document.getElementById("chipList");
+    if (chipList) chipList.innerHTML = "";
+
+    // Clear progress table from the previous assay
+    const progressContainer = document.getElementById("assayProgress");
+    progressContainer.innerHTML = "";
+    progressContainer.hidden    = true;
+    UI.Buttons.progress.textContent = "Show Progress";
+
+    resetTimingState();
+    setState(STATES.SETUP);
+  }
+
+
+  /* -----------------------------------------------------------------------
      Event Bindings
   ----------------------------------------------------------------------- */
 
-  // ── Form submission (assay setup) ───────────────────────────────────────
+  /**
+   * Saves all current setup-form field values as a JSON draft in localStorage.
+   * Called on every input event (debounced) so partial entries survive a
+   * tab close or navigation away.
+   *
+   * Uses a 400ms debounce so rapid keystrokes only trigger one write per burst.
+   */
+  let _draftSaveTimer = null;
+  function scheduleDraftSave() {
+    clearTimeout(_draftSaveTimer);
+    _draftSaveTimer = setTimeout(() => {
+      try {
+        const draft = {
+          assayName:   UI.Inputs.assayName?.value?.trim() || "",
+          genotypes:   UI.Inputs.genotypes?.value || "",
+          isi:         UI.Inputs.isi?.value        || "",
+          stimCount:   UI.Inputs.stimCount?.value  || "",
+          binSize:     UI.Inputs.binSize?.value    || "",
+          temperature: UI.Inputs.temperature?.value || "",
+          humidity:    UI.Inputs.humidity?.value   || ""
+        };
+        localStorage.setItem("touchAssaySetupDraft", JSON.stringify(draft));
+      } catch { /* storage not available */ }
+    }, 400);  // 400ms debounce
+  }
+
+  /**
+   * Restores a saved setup draft into the form fields and genotype chips.
+   * Only runs if there is a non-empty draft in localStorage.
+   */
+  function restoreSetupDraft() {
+    let draft;
+    try {
+      const raw = localStorage.getItem("touchAssaySetupDraft");
+      if (!raw) return;
+      draft = JSON.parse(raw);
+    } catch { return; }
+
+    if (draft.assayName)                          UI.Inputs.assayName.value   = draft.assayName;
+    if (draft.isi)                                 UI.Inputs.isi.value          = draft.isi;
+    if (draft.stimCount)                           UI.Inputs.stimCount.value    = draft.stimCount;
+    if (draft.binSize)                             UI.Inputs.binSize.value      = draft.binSize;
+    // Use != null (not truthiness) so that valid values of 0 (e.g. 0 °C, 0% RH) are restored.
+    if (draft.temperature != null && draft.temperature !== "") UI.Inputs.temperature.value  = draft.temperature;
+    if (draft.humidity    != null && draft.humidity    !== "") UI.Inputs.humidity.value     = draft.humidity;
+
+    // Restore genotype chips via the hidden input + chip script
+    // Trigger the same addChip logic by setting the hidden input value
+    // and populating chips through the existing chip-input infrastructure.
+    if (draft.genotypes) {
+      UI.Inputs.genotypes.value = draft.genotypes;
+      const chipList = document.getElementById("chipList");
+      if (chipList) {
+        // Clear any existing chips first
+        chipList.innerHTML = "";
+        const genArr = draft.genotypes.split(",").map(g => g.trim()).filter(Boolean);
+        genArr.forEach(val => {
+          // Manually create chips matching the inline chip script's format
+          const chip = document.createElement("span");
+          chip.className    = "chip";
+          chip.dataset.value = val;
+          const label       = document.createElement("span");
+          label.className   = "chip-label";
+          label.textContent = val;
+          const removeBtn   = document.createElement("button");
+          removeBtn.type    = "button";
+          removeBtn.className = "chip-remove";
+          removeBtn.setAttribute("aria-label", "Remove " + val);
+          removeBtn.textContent = "✕";
+          removeBtn.addEventListener("click", () => {
+            chip.remove();
+            // Mirror syncHidden() from the inline chip-input script in index.html.
+            // That function is private to its IIFE scope so we replicate the logic here.
+            // If syncHidden() changes in the inline script, update this block to match.
+            UI.Inputs.genotypes.value = Array.from(
+              document.querySelectorAll("#chipList .chip")
+            ).map(c => c.dataset.value).join(",");
+            scheduleDraftSave();  // Bug 6: persist the updated genotype list after chip removal
+          });
+          chip.appendChild(label);
+          chip.appendChild(removeBtn);
+          chipList.appendChild(chip);
+        });
+      }
+    }
+
+    // Trigger bin warning recalculation after restoring values
+    updateBinWarning();
+  }
+
+  /** Clears the setup draft from localStorage. Called after a successful Begin. (#1) */
+  function clearSetupDraft() {
+    try { localStorage.removeItem("touchAssaySetupDraft"); } catch { /* noop */ }
+  }
+
+
+
+  // ── Draft auto-save: wire all setup form fields (#1) ────────────────────
+  // Any change to a setup field is debounced and written to localStorage so
+  // the form survives accidental navigation or a page refresh.
+  [
+    UI.Inputs.assayName,
+    UI.Inputs.isi,
+    UI.Inputs.stimCount,
+    UI.Inputs.binSize,
+    UI.Inputs.temperature,
+    UI.Inputs.humidity,
+  ].forEach(el => {
+    if (el) el.addEventListener("input", scheduleDraftSave);
+  });
+
+  // Also save when the hidden genotypes field changes (updated by chip script)
+  if (UI.Inputs.genotypes) {
+    UI.Inputs.genotypes.addEventListener("change", scheduleDraftSave);
+  }
+
   UI.Forms.setup.addEventListener("submit", async function (event) {
     event.preventDefault();
 
@@ -1321,6 +1893,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
+    // #2: Show non-blocking advisory for very short ISI
+    if (validation.warnings && validation.warnings.length > 0) {
+      validation.warnings.forEach(w => showToast(w, "warning", 7000));
+    }
+
     // Create and persist the assay and its first trial
     currentAssay = createAssay(setupValues);
     await saveAssay(currentAssay);
@@ -1328,6 +1905,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     const firstTrial = createTrial(1);
     currentAssay.trials.push(firstTrial);
     await saveTrial(currentAssay.assayId, firstTrial);
+
+    // #1: Clear the draft now that the assay has been saved
+    clearSetupDraft();
 
     populateGenotypeSelect(setupValues.genotypes);
     setState(STATES.CONFIGURED);
@@ -1356,6 +1936,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Ignore held-down keys (auto-repeat)
     if (event.repeat) return;
 
+    // Bug 13 fix: allow Escape to cancel a warmup countdown in progress.
+    // Setting isWarmingUp = false causes the runWarmup() loop to exit on its
+    // next iteration, restoring the tap button and cleaning up the display.
+    if (event.key === "Escape" && isWarmingUp) {
+      isWarmingUp = false;
+      return;
+    }
+
     const onAssayScreen = currentState === STATES.CONFIGURED
                        || currentState === STATES.POISED
                        || currentState === STATES.RUNNING;
@@ -1372,8 +1960,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Non-activation keys (Tab, arrow keys, etc.) pass through unaffected.
       if (event.key !== " " && event.key !== "Enter") return;
 
-      // Enter is silently swallowed — no tap, no button activation.
-      if (event.key !== " ") return;
+      // Bug 11: Enter is silently swallowed — no tap, no button activation.
+      // (The previous code used `if (event.key !== " ") return` which was
+      // unreachable dead code: the guard above already ensures key is " " or
+      // "Enter", so the only case that would pass this check is "Enter".)
+      if (event.key === "Enter") return;
 
       // RUNNING: tap unconditionally takes priority over everything
       if (currentState === STATES.RUNNING) {
@@ -1414,6 +2005,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const activeTrial = getActiveTrial(currentAssay);
 
+    // Bug 3: guard against null (can occur if the trial was already completed via another
+    // path, e.g. a rapid double-click or a race with the crash-guard cleanup).
+    if (!activeTrial) {
+      showToast("No active trial to finish.", "warning", 4000);
+      return;
+    }
+
     if (activeTrial.runs.length === 0) {
       await markTrialAbandoned(currentAssay.assayId, activeTrial.trialId, "No runs recorded");
     } else {
@@ -1422,6 +2020,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Hydrate FIRST so the export list reflects the updated trial status
     currentAssay = await hydrateAssay(currentAssay.assayId);
+    // #14: Render summary card for the just-completed trial
+    renderTrialSummaryCard(currentAssay);
     populateExportDatasetList(currentAssay);
     setState(STATES.EXPORT);
   });
@@ -1431,6 +2031,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     const progressContainer            = document.getElementById("assayProgress");
     progressContainer.hidden           = !progressContainer.hidden;
     UI.Buttons.progress.textContent    = progressContainer.hidden ? "Show Progress" : "Hide Progress";
+    // #21: Persist the user's visibility preference
+    localStorage.setItem("touchAssayProgressVisible", String(!progressContainer.hidden));
   });
 
   // ── Genotype selection change — update tap button label ─────────────────
@@ -1452,6 +2054,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Start new trial (from export screen) ───────────────────────────────
   UI.Buttons.backToAssay.addEventListener("click", async () => {
+    // Re-hydrate from IDB so trialIndex is always correct, even if the user has
+    // looped through export → backToAssay multiple times, and to pick up any
+    // run records written since the last hydrateAssay() call.
+    currentAssay = await hydrateAssay(currentAssay.assayId);
     const trial = createTrial(currentAssay.trials.length + 1);
     currentAssay.trials.push(trial);
     await saveTrial(currentAssay.assayId, trial);  // await: run start must not race DB write
@@ -1464,56 +2070,26 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── New assay ───────────────────────────────────────────────────────────
   UI.Buttons.newAssay.addEventListener("click", () => {
-    currentAssay = null;
-    UI.Forms.setup.reset();
-    UI.Inputs.assayName.value    = generateAutoID();
-    UI.Displays.binWarning.hidden = true;
+    // Warn if there is completed trial data that has not yet been exported,
+    // so the experimenter does not lose track of results saved in IndexedDB.
+    if (currentAssay) {
+      const completedTrials = (currentAssay.trials || []).filter(t => t.status === "completed");
+      if (completedTrials.length > 0) {
+        if (!confirm(
+          "You have unsaved data. Export your results before starting a new assay, " +
+          "or they may be difficult to find later.\n\nStart a new assay anyway?"
+        )) return;
+      }
+    }
 
-    // Clear progress table from the previous assay
-    const progressContainer = document.getElementById("assayProgress");
-    progressContainer.innerHTML = "";
-    progressContainer.hidden    = true;
-    UI.Buttons.progress.textContent = "Show Progress";
-
-    // Reset all timing/scheduling state to prevent stale values
-    // from a previous run affecting the next one
-    currentStimulusIndex   = 0;
-    tapTimestamps          = [];
-    lastSchedulerTime      = 0;
-    lastBatchSaveIndex     = 0;
-    nextAudioScheduleTime  = 0.0;
-    nextSpeechTime         = 0.0;
-    nextDataIntervalTime   = 0.0;
-
-    setState(STATES.SETUP);
+    resetToSetup();
   });
 
   // ── Header home (logo / title) → back to setup ─────────────────────────
   UI.Buttons.headerHome.addEventListener("click", () => {
     // Do not navigate away while a run is actively recording data
     if (currentState === STATES.RUNNING) return;
-
-    currentAssay = null;
-    UI.Forms.setup.reset();
-    UI.Inputs.assayName.value     = generateAutoID();
-    UI.Displays.binWarning.hidden = true;
-
-    // Clear progress table from any previous assay
-    const progressContainer = document.getElementById("assayProgress");
-    progressContainer.innerHTML = "";
-    progressContainer.hidden    = true;
-    UI.Buttons.progress.textContent = "Show Progress";
-
-    // Reset timing/scheduling state
-    currentStimulusIndex   = 0;
-    tapTimestamps          = [];
-    lastSchedulerTime      = 0;
-    lastBatchSaveIndex     = 0;
-    nextAudioScheduleTime  = 0.0;
-    nextSpeechTime         = 0.0;
-    nextDataIntervalTime   = 0.0;
-
-    setState(STATES.SETUP);
+    resetToSetup();
   });
 
   // ── Overlay navigation ──────────────────────────────────────────────────
@@ -1559,6 +2135,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       const active = getActiveTrial(currentAssay);
       if (active) {
         await markTrialAbandoned(currentAssay.assayId, active.trialId, "Started new trial from saved assays");
+        // Bug 5 fix: update the in-memory trial object to match what was
+        // just written to IDB. Without this, getActiveTrial() would still
+        // find this trial (status is "active" in memory), causing the new
+        // trial created below to be shadowed.
+        active.status          = "abandoned";
+        active.abandonedReason = "Started new trial from saved assays";
+        active.endedAt         = Date.now();
       }
 
       const newTrial = createTrial(currentAssay.trials.length + 1);
@@ -1629,20 +2212,26 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Delete sequentially — parallel deletes on the same cached IDB connection
     // can interleave their write transactions and cause silent aborts.
-    for (const id of idsToDelete) {
-      try {
-        await deleteAssay(id);
-      } catch (err) {
-        console.error(`Failed to delete assay ${id}:`, err);
-        failCount++;
+    // Bug 3: use try/finally so the button label is always restored, even if
+    // populateSavedAssaysList() throws after a partial deletion failure.
+    try {
+      for (const id of idsToDelete) {
+        try {
+          await deleteAssay(id);
+        } catch (err) {
+          console.error(`Failed to delete assay ${id}:`, err);
+          failCount++;
+        }
       }
+
+      if (failCount > 0) {
+        alert(`${failCount} assay(s) could not be deleted. The rest were removed.`);
+      }
+    } finally {
+      // Always restore the button — even if populateSavedAssaysList() throws.
+      UI.Buttons.deleteSelectedAssays.textContent = "Delete Selected";
     }
 
-    if (failCount > 0) {
-      alert(`${failCount} assay(s) could not be deleted. The rest were removed.`);
-    }
-
-    UI.Buttons.deleteSelectedAssays.textContent = "Delete Selected";
     await populateSavedAssaysList();
   });
 
@@ -1653,11 +2242,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Settings.warmupDurationContainer.style.display = isWarmupEnabled ? "flex" : "none";
   });
 
-  UI.Settings.warmupDurationInput.addEventListener("change", e => {
-    warmupDuration = Math.min(60, Math.max(1, parseInt(e.target.value, 10)));
+  // Clamp and persist on both "input" (live typing / spinner) and "change" (blur)
+  // so the displayed value always matches the JS variable and never shows 0.
+  function applyWarmupDuration(e) {
+    const parsed = parseInt(e.target.value, 10);
+    if (isNaN(parsed)) return;  // Don't update while field is empty
+    warmupDuration = Math.min(60, Math.max(1, parsed));
     UI.Settings.warmupDurationInput.value = warmupDuration;  // Reflect clamped value back
     localStorage.setItem("touchAssayWarmupDuration", warmupDuration);
-  });
+  }
+  UI.Settings.warmupDurationInput.addEventListener("input",  applyWarmupDuration);
+  UI.Settings.warmupDurationInput.addEventListener("change", applyWarmupDuration);
 
   document.querySelectorAll('input[name="themeMode"]').forEach(input => {
     input.addEventListener("change", e => {
@@ -1680,7 +2275,60 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
+  // ── Settings: audio controls (#15) ──────────────────────────────────────
+  if (UI.Settings.tickVolume) {
+    UI.Settings.tickVolume.addEventListener("input", e => {
+      const v = parseFloat(e.target.value);
+      setVolume(v);
+      localStorage.setItem("touchAssayTickVolume", v);
+      if (UI.Settings.tickVolumeDisplay)
+        UI.Settings.tickVolumeDisplay.textContent = Math.round(v * 100) + "%";
+    });
+  }
+
+  if (UI.Settings.tickPitch) {
+    UI.Settings.tickPitch.addEventListener("input", e => {
+      const hz = parseInt(e.target.value, 10);
+      setTickPitch(hz);
+      localStorage.setItem("touchAssayTickPitch", hz);
+      if (UI.Settings.tickPitchDisplay)
+        UI.Settings.tickPitchDisplay.textContent = hz + " Hz";
+    });
+  }
+
+  // ── Settings: speech lead time ─────────────────────────────────────────
+  if (UI.Settings.speechLead) {
+    UI.Settings.speechLead.addEventListener("input", e => {
+      // Apply the same [0, 490] clamp used at startup — values ≥ 500 ms would
+      // push nextSpeechTime before AudioContext t0, misfiring the first speech cue.
+      speechLeadMs = Math.max(0, Math.min(490, parseInt(e.target.value, 10)));
+      localStorage.setItem("touchAssaySpeechLeadMs", speechLeadMs);
+      if (UI.Settings.speechLeadDisplay)
+        UI.Settings.speechLeadDisplay.textContent = speechLeadMs + " ms";
+    });
+  }
+
+
   // ── Export ──────────────────────────────────────────────────────────────
+  /**
+   * Wraps an export action with a loading spinner state on the button.
+   * Yields to the browser paint cycle before running the (potentially slow)
+   * synchronous export to ensure the spinner appears before blocking.
+   * (#30)
+   */
+  async function runWithSpinner(btn, label, fn) {
+    const original = btn.textContent;
+    btn.textContent = label;
+    btn.classList.add("btn-loading");
+    try {
+      await new Promise(r => setTimeout(r, 0));  // yield one frame
+      await fn();
+    } finally {
+      btn.textContent = original;
+      btn.classList.remove("btn-loading");
+    }
+  }
+
   UI.Buttons.exportExcel.addEventListener("click", () => {
     if (!currentAssay) return;
 
@@ -1692,18 +2340,38 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // If SheetJS isn't loaded (offline / CDN failure), fall back to CSV silently
     if (typeof XLSX === "undefined") {
-      const result = performCSVExport(currentAssay, configs);
-      if (!result.success) alert("Export failed: " + result.error);
+      runWithSpinner(UI.Buttons.exportExcel, "Exporting…", () => {
+        const result = performCSVExport(currentAssay, configs);
+        if (!result.success) alert("Export failed: " + result.error);
+      });
       return;
     }
 
-    const result = performExcelExport(currentAssay, configs);
-    if (!result.success) {
-      if (confirm(`Excel export failed: ${result.error}\n\nWould you like to export as CSV instead?`)) {
-        performCSVExport(currentAssay, configs);
+    runWithSpinner(UI.Buttons.exportExcel, "Exporting…", () => {
+      const result = performExcelExport(currentAssay, configs);
+      if (!result.success) {
+        if (confirm(`Excel export failed: ${result.error}\n\nWould you like to export as CSV instead?`)) {
+          performCSVExport(currentAssay, configs);
+        }
       }
-    }
+    });
   });
+
+  // #13: Dedicated CSV export button
+  if (UI.Buttons.exportCSV) {
+    UI.Buttons.exportCSV.addEventListener("click", () => {
+      if (!currentAssay) return;
+      const configs = getExportConfigs();
+      if (configs.length === 0) {
+        alert("Please select a dataset.");
+        return;
+      }
+      runWithSpinner(UI.Buttons.exportCSV, "Exporting…", () => {
+        const result = performCSVExport(currentAssay, configs);
+        if (!result.success) alert("CSV export failed: " + result.error);
+      });
+    });
+  }
 
   UI.Buttons.previewExcel.addEventListener("click", () => {
     if (!currentAssay) return;
@@ -1714,8 +2382,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    UI.Displays.previewContainer.innerHTML = generatePreviewHTML(currentAssay, configs);
-    UI.Displays.previewModal.hidden        = false;
+    runWithSpinner(UI.Buttons.previewExcel, "Loading…", () => {
+      UI.Displays.previewContainer.innerHTML = generatePreviewHTML(currentAssay, configs);
+      UI.Displays.previewModal.hidden        = false;
+    });
   });
 
   // Close preview modal via button or backdrop click
@@ -1774,60 +2444,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   window.addEventListener("load", updateExportButtonLabels);
 
-  // ── Diagnostic logging ───────────────────────────────────────────────────
 
-  /** Refreshes the log-count badge shown next to the Diagnostics buttons. */
-  async function refreshLogCount() {
-    try {
-      const count = await getLogCount();
-      const badge = document.getElementById("logCountBadge");
-      if (badge) badge.textContent = `${count} entr${count === 1 ? "y" : "ies"} stored`;
-    } catch {
-      // Non-critical — silently ignore if the DB is unavailable
-    }
-  }
-
-  UI.Buttons.downloadLogs.addEventListener("click", async () => {
-    const btn = UI.Buttons.downloadLogs;
-    const originalText = btn.textContent;
-    btn.textContent = "Processing…";
-    btn.disabled = true;
-    try {
-      const count = await downloadLogs();
-      if (count === 0) {
-        showToast("No logs recorded yet.", "info");
-      } else {
-        showToast(`Downloaded ${count} log entr${count === 1 ? "y" : "ies"}.`, "success");
-      }
-    } catch (err) {
-      console.error("Log download failed:", err);
-      showToast("Failed to read logs from storage.", "error");
-    } finally {
-      btn.textContent = originalText;
-      btn.disabled = false;
-    }
-  });
-
-  UI.Buttons.clearLogs.addEventListener("click", async () => {
-    if (!confirm("Permanently delete all system logs? This cannot be undone.")) return;
-    try {
-      await clearLogs();
-      await refreshLogCount();
-      showToast("System logs cleared.", "success");
-    } catch (err) {
-      console.error("Log clear failed:", err);
-      showToast("Failed to clear logs.", "error");
-    }
-  });
-
-  // Refresh the count badge every time the settings screen becomes visible
-  const settingsScreen = document.getElementById("settingsScreen");
-  if (settingsScreen) {
-    new MutationObserver(() => {
-      if (!settingsScreen.hidden) refreshLogCount();
-    }).observe(settingsScreen, { attributeFilter: ["hidden"] });
-  }
-  // Also populate on first load
-  refreshLogCount();
 
 });  // end DOMContentLoaded

@@ -1,6 +1,13 @@
-const CACHE_NAME = "touch-assay-cache-v1.1.6.1.3.2";
+// Bug 12: bump this version string on EVERY deployment so existing PWA installs
+// pick up updated JS/CSS on the next page load instead of serving stale cached files.
+// The activate handler below automatically deletes all caches whose name does not
+// match CACHE_NAME, which forces clients to re-fetch all assets after an update.
+const CACHE_NAME = "touch-assay-cache-v2.0.0";
 
 // Ensure paths match your actual directory structure!
+// Bug 12: removed "./js/logger.js" — that file was deleted in a prior refactor
+// but remained here, causing SW install failures (network error for a 404 response)
+// on browsers that enforce addAll() atomicity (Chrome, Firefox).
 const ASSETS_TO_CACHE = [
   "./",
   "./index.html",
@@ -12,7 +19,7 @@ const ASSETS_TO_CACHE = [
   "./js/export.js",
   "./js/db.js",
   "./js/timer-worker.js",
-  "./js/logger.js",
+  "./js/toast.js",
   "./manifest.json",
   "./icon-192.png",
   "./icon-512.png",
@@ -49,14 +56,15 @@ self.addEventListener("fetch", (event) => {
     caches.match(event.request).then((cachedResponse) => {
       // The network fetch that will update the cache in the background
       const fetchPromise = fetch(event.request).then((networkResponse) => {
-        // Cache successful and opaque (cross-origin) responses
-        if (networkResponse && (networkResponse.status === 200 || networkResponse.type === 'opaque')) {
+        // Cache only successful same-origin responses; skip opaque (cross-origin)
+        // responses to avoid inflated storage costs (~7 MB padding per entry)
+        if (networkResponse && networkResponse.status === 200) {
           caches.open(CACHE_NAME).then((cache) => {
             cache.put(event.request, networkResponse.clone());
           });
         }
         return networkResponse;
-      });
+      }).catch(() => cachedResponse);  // Gracefully fall back if offline
 
       // Return cached response if available, otherwise hit the network
       return cachedResponse || fetchPromise;

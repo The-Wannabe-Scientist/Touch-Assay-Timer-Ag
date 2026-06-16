@@ -17,6 +17,11 @@
  *   Enter / Space — dismisses a toast that currently has focus.
  */
 
+/**
+ * Inline SVG icon strings for each toast type.
+ * Keyed by type name so showToast() can look them up in O(1).
+ * @type {Object.<string, string>}
+ */
 const ICONS = {
   success: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
     stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -127,9 +132,11 @@ export function showToast(message, type = "info", duration = 3500) {
   // Make the toast focusable so keyboard users can tab to it
   toast.tabIndex = 0;
 
+  // Inject only static, trusted HTML (icons + button skeleton); user-supplied `message`
+  // is set via textContent below to prevent XSS from assay names or reason strings (Bug 1).
   toast.innerHTML = `
     <span class="toast__icon">${ICONS[type] ?? ICONS.info}</span>
-    <span class="toast__message">${message}</span>
+    <span class="toast__message"></span>
     <button class="toast__close" type="button" aria-label="Dismiss notification">
       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
         stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -138,6 +145,8 @@ export function showToast(message, type = "info", duration = 3500) {
     </button>
     ${duration > 0 ? `<div class="toast__progress" style="animation-duration:${duration}ms"></div>` : ""}
   `;
+  // Set the user-supplied text safely — never via innerHTML
+  toast.querySelector(".toast__message").textContent = message;
 
   // Dismiss on close button click
   toast.querySelector(".toast__close").addEventListener("click", () => dismiss(toast));
@@ -172,7 +181,11 @@ export function showToast(message, type = "info", duration = 3500) {
     timer = setTimeout(() => dismiss(toast), duration);
   }
 
-  // Pause auto-dismiss while the user hovers over the toast
+  // Pause auto-dismiss while the user hovers over the toast.
+  // Note: the timer variable is also held by the close-button and Escape handlers
+  // via closure, but those paths call dismiss() which guards against double-dismiss
+  // using the `toast--exiting` class check. The stale timer firing after an early
+  // dismiss is therefore harmless — dismiss() becomes a no-op on the second call.
   toast.addEventListener("mouseenter", () => clearTimeout(timer));
   toast.addEventListener("mouseleave", () => {
     if (duration > 0) timer = setTimeout(() => dismiss(toast), 1000);
@@ -190,14 +203,21 @@ function dismiss(toast) {
   if (toast.classList.contains("toast--exiting")) return;
   toast.classList.add("toast--exiting");
 
-  toast.addEventListener("animationend", () => {
+  function cleanup() {
     toast.remove();
-
     // If the container is now empty, remove the global listener
     const root = container;
     if (root && root.querySelectorAll(".toast:not(.toast--exiting)").length === 0) {
       document.removeEventListener("keydown", handleGlobalKeydown);
       keyListenerActive = false;
     }
+  }
+
+  // Fallback timeout in case the CSS exit animation is missing or instant
+  // (e.g. prefers-reduced-motion: reduce without a duration override)
+  const fallback = setTimeout(cleanup, 500);
+  toast.addEventListener("animationend", () => {
+    clearTimeout(fallback);
+    cleanup();
   }, { once: true });
 }

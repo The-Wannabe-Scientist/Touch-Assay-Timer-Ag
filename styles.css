@@ -1291,3 +1291,577 @@ body.state-running #visualMetronomeContainer {
     max-width: none;
   }
 }
+
+
+/* =====================================================================
+   15. PERSISTENT NOTIFICATION BANNERS
+   ===================================================================== */
+
+/* Shared banner base */
+#runBanner,
+#idbWarningBanner {
+  display: none;  /* shown via JS / body class */
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.6rem max(1rem, calc(50vw - 400px));
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: center;
+  line-height: 1.4;
+}
+
+/* #5 — Recording banner (shown only while RUNNING) */
+#runBanner {
+  background: #fef3c7;
+  color: #92400e;
+  border-bottom: 1px solid #fcd34d;
+}
+[data-theme="dark"] #runBanner {
+  background: #451a03;
+  color: #fbbf24;
+  border-bottom-color: #78350f;
+}
+/* CSS-driven visibility: show only when state-running */
+body.state-running #runBanner {
+  display: flex;
+}
+
+/* #9 — IDB unavailability banner */
+#idbWarningBanner {
+  background: #fef2f2;
+  color: #991b1b;
+  border-bottom: 1px solid #fca5a5;
+}
+[data-theme="dark"] #idbWarningBanner {
+  background: #450a0a;
+  color: #f87171;
+  border-bottom-color: #7f1d1d;
+}
+/* When JS removes [hidden], display:flex takes effect */
+#idbWarningBanner:not([hidden]) {
+  display: flex;
+}
+
+/* Banner icons */
+#runBanner svg,
+#idbWarningBanner svg {
+  flex-shrink: 0;
+}
+
+/* =====================================================================
+   16. TRIAL SUMMARY CARD  (#14)
+   ===================================================================== */
+
+#trialSummaryCard {
+  background: var(--bg-progress);
+  border: 1px solid var(--border-base);
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  animation: screenFadeIn 0.2s ease both;
+}
+#trialSummaryCard:not([hidden]) {
+  display: block;
+}
+
+#trialSummaryCard h3 {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.trial-summary-genotypes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.trial-summary-genotype-block {
+  flex: 1 1 140px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+}
+
+.trial-summary-genotype-block .genotype-name {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.3rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trial-summary-genotype-block .genotype-stat {
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: var(--color-primary);
+  line-height: 1.1;
+}
+
+.trial-summary-genotype-block .genotype-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}
+
+
+/* =====================================================================
+   17. RANGE SLIDERS  (#15)
+   ===================================================================== */
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.slider-value {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  min-width: 52px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border-base);
+  border: none;
+  padding: 0;
+  outline: none;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  box-shadow: none;
+}
+input[type="range"]:focus {
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  box-shadow: 0 1px 4px rgba(79,70,229,0.4);
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+  box-shadow: 0 2px 8px rgba(79,70,229,0.55);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  border: none;
+  cursor: pointer;
+}
+[data-theme="dark"] input[type="range"] {
+  background: var(--border-input);
+}
+
+/* =====================================================================
+   18. EXPORT BUTTON LOADING STATE  (#30)
+   ===================================================================== */
+
+button.btn-loading {
+  opacity: 0.7;
+  pointer-events: none;
+  position: relative;
+  padding-left: 2.4rem;
+}
+
+button.btn-loading::before {
+  content: "";
+  position: absolute;
+  left: 0.85rem;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin-top: -7px;
+  border: 2px solid rgba(255,255,255,0.4);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: btnSpin 0.7s linear infinite;
+}
+
+@keyframes btnSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* Secondary buttons have dark spinner */
+button.secondary.btn-loading::before {
+  border-color: rgba(0,0,0,0.2);
+  border-top-color: var(--text-main);
+}
+
+
+/* =====================================================================
+   19. SAVED ASSAYS EMPTY STATE  (#31)
+   ===================================================================== */
+
+.saved-assays-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  color: var(--text-muted);
+  gap: 0.75rem;
+}
+
+.saved-assays-empty svg {
+  opacity: 0.35;
+}
+
+.saved-assays-empty p {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.saved-assays-empty strong {
+  display: block;
+  font-size: 1.05rem;
+  color: var(--text-main);
+  margin-bottom: 0.25rem;
+}
+
+
+/* =====================================================================
+   20. EXPORT SCREEN: CSV BUTTON LAYOUT TWEAK
+   ===================================================================== */
+
+.export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.export-actions button {
+  flex: 1 1 auto;
+}
+
+
+/* =====================================================================
+   21. MOBILE RESPONSIVENESS
+   ===================================================================== */
+
+/* ── Global touch-friendly sizing ─────────────────────────────────────── */
+@media (pointer: coarse) {
+  /* All interactive elements get minimum 44px touch targets on touch devices */
+  button, select, input[type="checkbox"], input[type="radio"] {
+    min-height: 44px;
+  }
+
+  /* Larger stepper buttons for fat fingers */
+  .stepper-btn {
+    width: 48px;
+    font-size: 1.25rem;
+  }
+
+  /* Bigger slider thumbs on touch */
+  input[type="range"]::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
+  }
+
+  /* Slightly bigger chip remove buttons */
+  .chip-remove {
+    width: 22px;
+    height: 22px;
+    font-size: 0.75rem;
+  }
+}
+
+/* ── Small screens (phones, ≤ 480px) ──────────────────────────────────── */
+@media (max-width: 480px) {
+  /* Tighter main padding */
+  main {
+    padding: 0.5rem;
+  }
+
+  /* Section cards: less border radius, tighter padding */
+  section {
+    border-radius: 10px;
+    padding: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  /* Header: compact padding */
+  .appHeader {
+    padding: 0.65rem 0.75rem;
+    padding-left: max(0.75rem, env(safe-area-inset-left));
+    padding-right: max(0.75rem, env(safe-area-inset-right));
+  }
+
+  /* Slightly smaller header title on phones */
+  .header-home-btn {
+    font-size: 0.95rem;
+  }
+  .header-logo {
+    width: 22px;
+    height: 22px;
+  }
+
+  /* Overflow menu full-width on small screens */
+  #overflowMenu {
+    right: 0.5rem;
+    left: 0.5rem;
+    min-width: 0;
+  }
+
+  /* Form layout: stack input rows vertically */
+  .input-row {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .input-row > .input-group {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  /* Fieldsets: slightly tighter padding */
+  #setupForm fieldset,
+  #settingsScreen fieldset {
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  /* Tap button: maximise touch area on phones */
+  #tapButton {
+    min-height: max(240px, 40vh);
+    font-size: clamp(2rem, 10vw, 3.5rem);
+    border-radius: 16px;
+  }
+
+  /* Progress panel: less height on small screens */
+  #assayProgress {
+    max-height: 25vh;
+  }
+
+  /* Export / nav buttons: stack vertically on tiny screens */
+  .export-actions {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .export-actions button {
+    flex: none;
+    width: 100%;
+  }
+  .navButtons {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .navButtons button {
+    flex: none;
+    width: 100%;
+  }
+
+  /* Assay screen footer: stack buttons if space is tight */
+  #assayScreen > footer {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  #assayScreen > footer button {
+    flex: 1 1 45%;
+    min-width: 120px;
+  }
+
+  /* Modal: edge-to-edge on mobile */
+  .modal-overlay {
+    padding: 0;
+    align-items: flex-end;
+  }
+  .modal-content {
+    border-radius: 14px 14px 0 0;
+    max-height: 92vh;
+    max-width: none;
+    width: 100%;
+  }
+  .modal-header {
+    padding: 0.85rem 1rem;
+  }
+  #previewContainer {
+    padding: 0.75rem;
+  }
+  .modal-actions {
+    padding: 0.85rem 1rem;
+    padding-bottom: max(0.85rem, env(safe-area-inset-bottom));
+  }
+
+  /* Setup header */
+  .setupHeader h2 {
+    font-size: 1.25rem;
+  }
+
+  /* Smaller table text on phones */
+  table {
+    font-size: 0.78rem;
+  }
+  th, td {
+    padding: 0.35rem 0.25rem;
+  }
+
+  /* Saved assays: tighter layout */
+  .saved-assay-row {
+    padding: 0.75rem 0;
+    gap: 0.5rem;
+  }
+  .assay-actions {
+    gap: 0.4rem;
+  }
+  .assay-actions button {
+    min-width: 80px;
+    font-size: 0.85rem;
+    padding: 0.5rem 0.6rem;
+  }
+
+  /* Trial summary cards: single column */
+  .trial-summary-genotypes {
+    flex-direction: column;
+  }
+  .trial-summary-genotype-block {
+    flex: 1 1 100%;
+  }
+
+  /* Toggle progress button: tighter */
+  #toggleProgress {
+    font-size: 0.85rem;
+    padding: 0.4rem 0.75rem;
+  }
+
+  /* Bulk actions in Saved Assays */
+  .bulk-actions {
+    flex-direction: column !important;
+    gap: 0.5rem !important;
+    align-items: stretch !important;
+  }
+  .bulk-actions button {
+    width: 100% !important;
+  }
+}
+
+/* ── Medium screens (tablets, 481px–768px) ─────────────────────────────── */
+@media (min-width: 481px) and (max-width: 768px) {
+  main {
+    padding: 0.75rem;
+  }
+
+  /* Keep form inputs side-by-side but allow wrapping */
+  .input-row > .input-group {
+    min-width: 180px;
+  }
+
+  /* Tap button still needs a generous touch area */
+  #tapButton {
+    min-height: max(260px, 35vh);
+  }
+}
+
+/* ── Landscape orientation fixes ──────────────────────────────────────── */
+@media (orientation: landscape) and (max-height: 500px) {
+  /* Tap button: rely on flex:1 more, reduce min-height to avoid overflow */
+  #tapButton {
+    min-height: max(140px, 30vh);
+    font-size: clamp(1.5rem, 6vw, 2.5rem);
+  }
+
+  /* Compact main padding in landscape */
+  main {
+    padding: 0.5rem;
+  }
+
+  /* Shorter progress panel in landscape */
+  #assayProgress {
+    max-height: 20vh;
+  }
+
+  /* Metronome bar: thinner to save space */
+  #visualMetronomeContainer {
+    height: 8px;
+    margin-bottom: 0.25rem;
+  }
+
+  /* Warmup display: smaller in landscape */
+  .warmup-display {
+    font-size: 2rem;
+  }
+}
+
+/* ── Safe-area insets for notched / Dynamic Island devices ─────────────── */
+@supports (padding: max(0px, env(safe-area-inset-top))) {
+  .appHeader {
+    padding-top: max(0.65rem, env(safe-area-inset-top));
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+
+  main {
+    padding-left: max(0.5rem, env(safe-area-inset-left));
+    padding-right: max(0.5rem, env(safe-area-inset-right));
+  }
+
+  /* Banners also respect safe areas */
+  #runBanner,
+  #idbWarningBanner {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+}
+
+/* ── Prevent text size inflation on mobile browsers ───────────────────── */
+html {
+  -webkit-text-size-adjust: 100%;
+  -moz-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* ── Smooth scrolling within overflow containers on iOS ────────────────── */
+#assayProgress,
+#savedAssaysScreen,
+#guidelinesScreen,
+#previewContainer,
+#exportDatasetList {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── Prevent pull-to-refresh during assay (misfires during tapping) ───── */
+body.state-running {
+  overscroll-behavior-y: contain;
+}
+
+/* ── Better mobile focus styles: thicker rings on touch devices ────────── */
+@media (pointer: coarse) {
+  input:focus, select:focus, textarea:focus {
+    box-shadow: 0 0 0 4px var(--focus-ring);
+  }
+  .stepper-wrapper:focus-within {
+    box-shadow: 0 0 0 4px var(--focus-ring);
+  }
+  .chip-input-wrapper:focus-within {
+    box-shadow: 0 0 0 4px var(--focus-ring);
+  }
+}

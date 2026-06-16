@@ -30,6 +30,10 @@
  * @returns {string} A unique string ID.
  */
 function generateUniqueId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // Fallback for older browsers without crypto.randomUUID
   const randomSuffix = Math.floor(Math.random() * 100_000);
   return `${Date.now()}_${randomSuffix}`;
 }

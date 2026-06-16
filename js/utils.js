@@ -28,12 +28,15 @@
  * @param {number}   values.binSize     - Stimuli grouped per analysis bin (> 0).
  * @param {number}   values.temperature - Room temperature in °C.
  * @param {number}   values.humidity    - Relative humidity, 0–100 %.
- * @returns {{ isValid: boolean, errors: string[] }}
- *   isValid — true only when the errors array is empty.
- *   errors  — human-readable description of each failed check.
+ * @returns {{ isValid: boolean, errors: string[], warnings: string[] }}
+ *   isValid  — true only when the errors array is empty.
+ *   errors   — human-readable description of each failed validation check.
+ *   warnings — non-blocking advisories (e.g. very short ISI) that do not
+ *              prevent submission but are surfaced to the user as toasts.
  */
 export function validateInputs(values) {
-  const errors = [];
+  const errors   = [];
+  const warnings = [];
 
   if (!values.assayName) {
     errors.push("Assay name is required.");
@@ -45,6 +48,13 @@ export function validateInputs(values) {
 
   if (values.isi <= 0) {
     errors.push("Inter-stimulus interval (ISI) must be greater than zero.");
+  } else if (values.isi < 0.5) {
+    // Non-blocking advisory — very short ISIs may be below reliable scheduling
+    // resolution on slow or throttled devices, risking silent data inaccuracy.
+    warnings.push(
+      `ISI of ${values.isi}s is very short — timing accuracy may be reduced on this device. ` +
+      `Consider using ≥0.5s for reliable results.`
+    );
   }
 
   if (values.stimCount <= 0) {
@@ -65,7 +75,8 @@ export function validateInputs(values) {
 
   return {
     isValid: errors.length === 0,
-    errors
+    errors,
+    warnings
   };
 }
 
@@ -214,19 +225,28 @@ export function collectPooledRuns(assay, options = {}) {
  *   Each row: [trialIndex, genotype, animalIndex, exclusionReason]
  */
 export function collectTouchIndexExclusions(assay) {
-  return assay.trials.flatMap(trial =>
-    trial.runs
-      .filter(run => {
-        // A run is excluded if its Touch Index cannot be computed —
-        // i.e. computeTouchIndexBins returns null (baseline bin = 0).
-        const binned = binRunValues(run.values, assay.binSize);
-        return computeTouchIndexBins(binned) === null;
-      })
-      .map(run => [
-        trial.trialIndex,
-        run.genotype,
-        run.animalIndex,
-        "Baseline bin = 0 (animal had no responses in the first bin)"
-      ])
-  );
+  // Only scan completed trials — abandoned or still-active trials must not
+  // produce spurious exclusion rows in the export output.
+  return assay.trials
+    .filter(t => t.status === "completed")
+    .flatMap(trial =>
+      trial.runs
+        // Only eligible runs can be TI-excluded. Ineligible runs (stopped early,
+        // abandoned) have empty or partial values[] — their binned result is []
+        // which causes computeTouchIndexBins to return null, producing spurious
+        // exclusion rows in the export sheet.
+        .filter(run => run.eligibleForAnalysis)
+        .filter(run => {
+          // A run is excluded if its Touch Index cannot be computed —
+          // i.e. computeTouchIndexBins returns null (baseline bin = 0).
+          const binned = binRunValues(run.values, assay.binSize);
+          return computeTouchIndexBins(binned) === null;
+        })
+        .map(run => [
+          trial.trialIndex,
+          run.genotype,
+          run.animalIndex,
+          "Baseline bin = 0 (animal had no responses in the first bin)"
+        ])
+    );
 }

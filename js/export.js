@@ -48,6 +48,28 @@ export const RUN_STATUS_LABELS = {
 
 
 /* ==========================================================================
+   XSS Guard
+   ========================================================================== */
+
+/**
+ * Escapes HTML special characters in a string before inserting it into innerHTML.
+ * Prevents XSS when user-supplied values (assay names, genotype labels, etc.)
+ * are rendered into the preview modal.
+ *
+ * @param {string} str - Raw string to escape.
+ * @returns {string} Safely escaped HTML string.
+ */
+function escapeHTML(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g,  "&lt;")
+    .replace(/>/g,  "&gt;")
+    .replace(/"/g,  "&quot;")
+    .replace(/'/g,  "&#39;");
+}
+
+
+/* ==========================================================================
    Internal Helpers
    ========================================================================== */
 
@@ -103,8 +125,13 @@ function groupAndSortRuns(runs, genotypes, isPooled = false) {
 function calculateStats(values) {
   if (!values || values.length === 0) return { mean: "", sem: "" };
 
-  const n        = values.length;
-  const mean     = values.reduce((a, b) => a + b, 0) / n;
+  const n    = values.length;
+  const mean = values.reduce((a, b) => a + b, 0) / n;
+
+  // Bug 10: SEM is undefined for a single observation — return blank so the
+  // exported cell shows nothing rather than 0 (which implies zero spread).
+  if (n === 1) return { mean, sem: "" };
+
   const variance = values.reduce((a, v) => a + (v - mean) ** 2, 0) / n;
   const sem      = Math.sqrt(variance) / Math.sqrt(n);
 
@@ -144,6 +171,10 @@ function buildRunCache(runs, binSize) {
  * @param {any[][]} data  - The 2D array that was used to create the sheet.
  */
 export function applySheetLayout(sheet, data) {
+  // Bug 5: data may be empty (e.g. a trial with no runs). Guard before
+  // accessing data[0] to avoid "Cannot read properties of undefined (reading 'map')".
+  if (!data || data.length === 0) return;
+
   // Set column widths
   sheet["!cols"] = data[0].map((_, colIndex) => (
     colIndex === 0 ? { wch: 22 } : { wch: 10 }
@@ -214,7 +245,7 @@ export function buildHtmlTableFrom2D(title, data2D) {
       const content      = (cell === null || cell === undefined || cell === "") ? "" : cell;
       const displayValue = typeof content === "number"
         ? (Number.isInteger(content) ? content : content.toFixed(2))
-        : content;
+        : escapeHTML(content);  // Escape user-supplied strings to prevent XSS
 
       // Header cells: first row, or rows that start with "Bin" / "Genotype"
       const isHeaderRow = rowIndex === 0 || row[0] === "Bin" || row[0] === "Genotype";
@@ -379,6 +410,7 @@ export function buildTrialBinned2D(trial, assay) {
     const sumRow = [binLabel];
     genotypes.forEach(g => {
       const values = runsByGenotype[g]
+        .filter(run => run.eligibleForAnalysis)  // Bug 3: exclude ineligible runs from summary stats
         .map(run => binnedByRun.get(run)?.[binIndex])  // optional chain: run may not be in map
         .filter(v => v !== undefined);
       const { mean, sem } = calculateStats(values);
@@ -425,7 +457,7 @@ export function buildTrialTouchIndexBinned2D(trial, assay) {
   const binnedByRun = new Map();
   let maxBinCount   = 0;
 
-  trial.runs.forEach(run => {
+  trial.runs.filter(run => run.eligibleForAnalysis).forEach(run => {
     const binned = binRunValues(run.values, binSize);
     const ti     = computeTouchIndexBins(binned);
     // Runs with a null TI (zero baseline) are excluded from the map;
@@ -470,7 +502,7 @@ export function buildTrialTouchIndexAnalysed2D(trial, assay) {
   const runsByGenotype = {};
   genotypes.forEach(g => (runsByGenotype[g] = []));
 
-  trial.runs.forEach(run => {
+  trial.runs.filter(run => run.eligibleForAnalysis).forEach(run => {
     const binned = binRunValues(run.values, binSize);
     const ti     = computeTouchIndexBins(binned);
     // Excluded runs (null TI) are silently omitted; collectTouchIndexExclusions handles them.
@@ -647,6 +679,7 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
     const sumRow = [binLabel];
     genotypes.forEach(g => {
       const values = runsByGenotype[g]
+        .filter(run => run.eligibleForAnalysis)  // Bug 3: exclude ineligible runs from summary stats
         .map(run => binnedByRun.get(run)?.[binIndex])
         .filter(v => v !== undefined);
       const { mean, sem } = calculateStats(values);
@@ -700,13 +733,13 @@ export function buildPooledTouchIndexBinned2D(assay, options = {}, _runs = null,
 
   if (_cache) {
     _cache.forEach(({ ti }, run) => {
-      if (ti) {
+      if (ti && run.eligibleForAnalysis) {  // Bug 3: exclude ineligible runs from TI analysis
         tiBinnedByRun.set(run, ti);
         maxBinCount = Math.max(maxBinCount, ti.length);
       }
     });
   } else {
-    runs.forEach(run => {
+    runs.filter(run => run.eligibleForAnalysis).forEach(run => {
       const binned = binRunValues(run.values, binSize);
       const ti     = computeTouchIndexBins(binned);
       // Runs with a null TI (zero baseline) are excluded from the map.
@@ -757,14 +790,14 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}, _runs = nul
   genotypes.forEach(g => (tiByGenotype[g] = []));
 
   if (_cache) {
-    runs.forEach(run => {
+    runs.filter(run => run.eligibleForAnalysis).forEach(run => {
       const entry = _cache.get(run);
       if (entry?.ti && tiByGenotype[run.genotype]) {
         tiByGenotype[run.genotype].push(entry.ti);
       }
     });
   } else {
-    runs.forEach(run => {
+    runs.filter(run => run.eligibleForAnalysis).forEach(run => {
       const binned = binRunValues(run.values, binSize);
       const ti     = computeTouchIndexBins(binned);
       // Excluded runs (null TI) are silently omitted.
@@ -999,7 +1032,10 @@ export function performCSVExport(currentAssay, exportConfigs) {
     a.href     = url;
     a.download = `${currentAssay.assayName || "Assay"}_Export.csv`;
     a.click();
-    URL.revokeObjectURL(url);
+    // Bug 9: revoking synchronously can race the download initiation on mobile
+    // browsers where a.click() is asynchronous. Delay to give the browser time
+    // to start the download before the object URL is invalidated.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 
     return { success: true };
 

@@ -21,6 +21,8 @@
    Module-level State
    ========================================================================== */
 
+// ── Web Audio state ──────────────────────────────────────────────────────────
+
 /** @type {AudioContext|null} Shared audio context — created once on first use. */
 let audioCtx = null;
 
@@ -33,20 +35,34 @@ let selectedVoice = null;
 /** @type {number} Current output volume, 0.0–1.0. */
 let volume = 1.0;
 
+/** @type {number} Frequency in Hz for the metronome tick tone. */
+let tickPitch = 900;
+
 /**
  * Controls which audio cues are emitted per stimulus.
  * "tick"  — play a short beep every stimulus.
  * "count" — speak the stimulus number aloud every stimulus.
  * "tens"  — speak only on multiples of 10; tick otherwise.
- * @type {"tick"|"count"|"tens"}
+ * "bins"  — tick every stimulus; speak only at each bin-size boundary.
+ * @type {"tick"|"count"|"tens"|"bins"}
  */
 let voiceMode = "tick";
+
+/**
+ * Bin size used by "bins" voice mode — speaks once every N stimuli.
+ * Updated at the start of each run via setBinSpeak() so it always
+ * reflects the active assay's bin size.
+ * @type {number}
+ */
+let binSpeakSize = 10;
 
 /** @type {{ rate: number, pitch: number, lang: string }} TTS configuration. */
 let speechConfig = { rate: 1.0, pitch: 1.0, lang: "en" };
 
 /** @type {boolean} True once the AudioContext has been resumed after a user gesture. */
 let isReady = false;
+
+// ── Speech state ─────────────────────────────────────────────────────────────
 
 
 /* ==========================================================================
@@ -68,11 +84,33 @@ export function setVolume(level) {
 
 /**
  * Changes the active voice/cue mode.
- * @param {"tick"|"count"|"tens"} mode - The desired cue mode.
+ * @param {"tick"|"count"|"tens"|"bins"} mode - The desired cue mode.
  */
 export function setVoiceMode(mode) {
   voiceMode = mode;
 }
+
+/**
+ * Sets the bin-boundary interval used by "bins" voice mode.
+ * Call this at the start of each run with the active assay's binSize so
+ * spoken cues land exactly on bin boundaries regardless of the assay config.
+ * @param {number} n - Number of stimuli per bin (must be >= 1).
+ */
+export function setBinSpeak(n) {
+  binSpeakSize = Math.max(1, n);
+}
+
+/**
+ * Sets the tick tone frequency.
+ * Clamped to [100, 4000] Hz to stay within useful audible range.
+ * @param {number} hz - Desired frequency in Hz.
+ */
+export function setTickPitch(hz) {
+  tickPitch = Math.max(100, Math.min(4000, hz));
+}
+
+/** @returns {number} The current tick frequency in Hz. */
+export function getTickPitch() { return tickPitch; }
 
 /**
  * Merges new speech settings and refreshes the selected voice.
@@ -141,24 +179,48 @@ function getAudioContext() {
  * Resumes the AudioContext after a user gesture.
  * Browsers suspend the context by default until user interaction.
  * Should be called on the first tap/keypress.
+ *
+ * @returns {Promise<void>} Resolves when the context is running.
  */
 export function warmUpAudio() {
-  if (isReady) return;  // Already running — no-op
+  if (isReady) return Promise.resolve();  // Already running — no-op
   const ctx = getAudioContext();
-  ctx.resume()
+  return ctx.resume()
     .then(() => { isReady = true; })
-    .catch(err => console.warn("Audio context resume blocked by browser policy.", err));
+    .catch(err => {
+      // Log the cause but re-throw so callers can surface a user-facing error.
+      // Swallowing here would let execution continue with a suspended context,
+      // causing getAudioTime() to return 0 and all scheduled ticks to misfire.
+      console.warn("Audio context resume blocked by browser policy.", err);
+      throw err;
+    });
 }
+
+/**
+ * Monotonic high-water mark for AudioContext time.
+ * Some browser implementations can briefly return a stale or regressed
+ * currentTime after suspend → resume. This variable ensures getAudioTime()
+ * never returns a value smaller than a previously returned one.
+ * @type {number}
+ */
+let lastMonotonicTime = 0;
 
 /**
  * Returns the current hardware clock time from the AudioContext.
  * This is used as the reference for all scheduled audio events and
  * for recording tap timestamps in sync with audio.
  *
- * @returns {number} Current AudioContext time in seconds.
+ * Includes a monotonic guard: if AudioContext.currentTime briefly regresses
+ * (e.g. after a suspend → resume cycle on some WebKit builds), the last
+ * known-good value is returned instead. This prevents the scheduler's gap
+ * detector from firing a false positive and aborting the run.
+ *
+ * @returns {number} Current AudioContext time in seconds (monotonically non-decreasing).
  */
 export function getAudioTime() {
-  return getAudioContext().currentTime;
+  const t = getAudioContext().currentTime;
+  if (t > lastMonotonicTime) lastMonotonicTime = t;
+  return lastMonotonicTime;
 }
 
 // When the app returns to the foreground after backgrounding, the
@@ -194,12 +256,39 @@ export function speak(text) {
 
   speechSynthesis.cancel();  // Flush any queued utterances to prevent lag drift
 
-  const utterance = new SpeechSynthesisUtterance(text);
-  if (selectedVoice)         utterance.voice = selectedVoice;
-  utterance.rate  = speechConfig.rate;
-  utterance.pitch = speechConfig.pitch;
+  // Safari (and some Chromium builds) silently drop a speak() call issued in
+  // the same task as cancel(). Deferring via queueMicrotask ensures the cancel
+  // completes before the new utterance is enqueued, while avoiding the 1–16 ms
+  // latency penalty of setTimeout(fn, 0) which is subject to browser clamping.
+  // Microtasks run at the end of the current task — effectively ~0 ms delay —
+  // and are more than offset by the SPEECH_LEAD_TIME advance in main.js.
+  queueMicrotask(() => {
+    const utterance = new SpeechSynthesisUtterance(text);
+    if (selectedVoice)         utterance.voice = selectedVoice;
+    utterance.rate  = speechConfig.rate;
+    utterance.pitch = speechConfig.pitch;
+    speechSynthesis.speak(utterance);
+  });
+}
 
-  speechSynthesis.speak(utterance);
+/**
+ * Primes the TTS engine with a silent, zero-volume utterance so the browser
+ * initialises its synthesis pipeline before the first real cue fires.
+ *
+ * The very first speechSynthesis.speak() call incurs a cold-start penalty of
+ * 50–300 ms on most platforms (Chrome Android, iOS Safari, etc.). Calling
+ * primeSpeechEngine() during the warmup countdown absorbs this latency so
+ * all run-time utterances benefit from a warm engine.
+ *
+ * Call this once at the start of the warmup countdown (or immediately before
+ * startCueLoop() when warmup is disabled).
+ */
+export function primeSpeechEngine() {
+  if (!selectedVoice) loadVoices();
+  const u = new SpeechSynthesisUtterance(" ");  // Single space — inaudible
+  if (selectedVoice) u.voice = selectedVoice;
+  u.volume = 0;  // Silent
+  speechSynthesis.speak(u);
 }
 
 /**
@@ -231,7 +320,7 @@ export function playTick(exactTime = null) {
   const time = exactTime !== null ? exactTime : ctx.currentTime;
 
   osc.type            = "sine";
-  osc.frequency.value = 900;  // Hz — clear and distinct from ambient noise
+  osc.frequency.value = tickPitch;  // Configurable via setTickPitch()
 
   gain.gain.setValueAtTime(0.25, time);
   gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);  // 50ms decay
@@ -333,13 +422,21 @@ export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime) {
       playTick(exactTime);
       break;
 
+    case "count":
+      // No hardware tick in count mode — speech fires in triggerImmediateSpeech.
+      // (Fast-ISI override above already plays a tick when speech can't keep up.)
+      break;
+
     case "tens":
       // Tick on all stimuli that are NOT multiples of 10
       // (multiples will have speech instead, scheduled in triggerImmediateSpeech)
       if (stimulusIndex % 10 !== 0) playTick(exactTime);
       break;
 
-    // "count" mode: no tick — speech fires in triggerImmediateSpeech
+    case "bins":
+      // Always tick every stimulus — speech fires separately at bin boundaries
+      playTick(exactTime);
+      break;
   }
 }
 
@@ -364,8 +461,32 @@ export function triggerImmediateSpeech(stimulusIndex, assayIsi) {
       break;
 
     case "tens":
-      // Speak only on multiples of 10 (all others get a tick from scheduleWebAudioTick)
-      if (stimulusIndex % 10 === 0) speak(String(stimulusIndex));
+      if (stimulusIndex % 10 === 0) {
+        // Speak on multiples of 10
+        speak(String(stimulusIndex));
+      } else if (speechSynthesis.speaking || speechSynthesis.pending) {
+        // Flush any overrunning speech from the previous multiple-of-10.
+        // Without this, a spoken "10" or "20" can still be playing when the
+        // next tick fires on short ISIs (≈ 1 s), causing audible overlap.
+        // Guarded behind speaking/pending check to avoid no-op cancel() churn
+        // which can cause the speech engine to needlessly re-initialise on
+        // some platforms.
+        speechSynthesis.cancel();
+      }
+      break;
+
+    case "bins":
+      // Speak the stimulus number only when it lands exactly on a bin boundary
+      // (i.e. is a multiple of binSpeakSize). All other stimuli just get the
+      // hardware tick scheduled by scheduleWebAudioTick — no speech needed.
+      if (stimulusIndex % binSpeakSize === 0) {
+        speak(String(stimulusIndex));
+      } else if (speechSynthesis.speaking || speechSynthesis.pending) {
+        // Flush any overrun from the previous bin-boundary utterance so it
+        // doesn't bleed into the following tick interval.
+        // Guarded to avoid needless cancel() calls on every non-boundary tick.
+        speechSynthesis.cancel();
+      }
       break;
 
     // "tick" mode: no speech — tick only, handled in scheduleWebAudioTick

@@ -10,7 +10,6 @@
  * │ assays    │ assayId    │ —                    │ Assay config     │
  * │ trials    │ trialId    │ assayId, status       │ Trial metadata   │
  * │ runs      │ runId      │ trialId, genotype    │ Run data+values  │
- * │ logs      │ id (auto)  │ —                    │ Diagnostic logs  │
  * └──────────────────────────────────────────────────────────────────┘
  *
  * Connection caching:
@@ -32,20 +31,32 @@
    ========================================================================== */
 
 const DB_NAME    = "touch-assay-db";
-const DB_VERSION = 3;  // Increment this when changing the schema
+const DB_VERSION = 4;  // Increment this when changing the schema
 
 /** @enum {string} Object store name constants — used everywhere to avoid typos. */
 const STORES = {
   ASSAYS: "assays",
   TRIALS: "trials",
-  RUNS:   "runs",
-  LOGS:   "logs"
+  RUNS:   "runs"
 };
 
 
 /* ==========================================================================
    Connection Management
    ========================================================================== */
+
+/**
+ * Whether IndexedDB is available in this browser context.
+ * Set to false when openDB() fails (e.g. private browsing, storage quota exceeded).
+ * @type {boolean}
+ */
+let idbAvailable = true;
+
+/**
+ * Returns whether IndexedDB was successfully opened on startup.
+ * @returns {boolean}
+ */
+export function getIdbAvailable() { return idbAvailable; }
 
 /**
  * Cached IDBDatabase connection.
@@ -70,32 +81,38 @@ export function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
 
-    // Schema setup — runs only on first launch or version upgrade
+    // Schema setup — runs only on first launch or version upgrade.
+    // Each `if (event.oldVersion < N)` block is idempotent and only runs
+    // when migrating from an older version, ensuring safe incremental upgrades.
     req.onupgradeneeded = event => {
-      const db = event.target.result;
+      const db  = event.target.result;
+      const oldV = event.oldVersion;  // 0 = fresh install
 
+      // ── Version 1–3 stores (create on fresh install or old upgrade) ────
       if (!db.objectStoreNames.contains(STORES.ASSAYS)) {
         db.createObjectStore(STORES.ASSAYS, { keyPath: "assayId" });
       }
 
       if (!db.objectStoreNames.contains(STORES.TRIALS)) {
         const trialStore = db.createObjectStore(STORES.TRIALS, { keyPath: "trialId" });
-        // Index by assayId to efficiently fetch all trials for a given assay
         trialStore.createIndex("assayId", "assayId", { unique: false });
-        // Index by status to efficiently find all active trials on startup
         trialStore.createIndex("status",  "status",  { unique: false });
       }
 
       if (!db.objectStoreNames.contains(STORES.RUNS)) {
         const runStore = db.createObjectStore(STORES.RUNS, { keyPath: "runId" });
-        // Index by trialId to fetch all runs for a given trial
         runStore.createIndex("trialId",  "trialId",  { unique: false });
         runStore.createIndex("genotype", "genotype", { unique: false });
       }
 
-      if (!db.objectStoreNames.contains(STORES.LOGS)) {
-        // autoIncrement so log entries always get a unique key without us managing IDs
-        db.createObjectStore(STORES.LOGS, { keyPath: "id", autoIncrement: true });
+
+      // ── Version 4: add "status" index to runs store ──────────────────
+      // Enables efficient orphan-run scanning on startup without a full table scan.
+      if (oldV < 4 && db.objectStoreNames.contains(STORES.RUNS)) {
+        const runStore = event.target.transaction.objectStore(STORES.RUNS);
+        if (!runStore.indexNames.contains("status")) {
+          runStore.createIndex("status", "status", { unique: false });
+        }
       }
     };
 
@@ -107,7 +124,10 @@ export function openDB() {
       resolve(cachedDB);
     };
 
-    req.onerror = () => reject(req.error);
+    req.onerror = () => {
+      idbAvailable = false;
+      reject(req.error);
+    };
   });
 }
 
@@ -143,8 +163,12 @@ export async function loadAllAssays() {
   const db  = await openDB();
   const tx  = db.transaction(STORES.ASSAYS, "readonly");
   const req = tx.objectStore(STORES.ASSAYS).getAll();
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result || []);
+    // Without these handlers the Promise would leak forever on an IDB error,
+    // causing the Saved Assays panel to hang with no feedback.
+    req.onerror   = () => reject(req.error);
+    tx.onerror    = () => reject(tx.error);
   });
 }
 
@@ -196,12 +220,15 @@ export async function hydrateAssay(assayId) {
 
   // Step 3: Load all runs for each trial
   for (const trial of trials) {
-    trial.runs = await new Promise((resolve, reject) => {
+    const runs = await new Promise((resolve, reject) => {
       const tx  = db.transaction(STORES.RUNS, "readonly");
       const req = tx.objectStore(STORES.RUNS).index("trialId").getAll(trial.trialId);
       req.onsuccess = () => resolve(req.result || []);
       req.onerror   = () => reject(req.error);
     });
+    // Sort chronologically — IDB getAll() returns records in insertion order, which
+    // may not match startedAt after aborted/retried transactions on some browsers.
+    trial.runs = runs.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   }
 
   assay.trials = trials;
@@ -230,10 +257,16 @@ export async function hydrateAssay(assayId) {
 export async function deleteAssay(assayId) {
   const db = await openDB();
 
-  // ── Phase 0: Resolve true ID type (string vs number) ────────────────────
+  // ── Phase 0: Resolve true ID type (string vs number) ───────────────────────────
   // Older versions may have used purely numeric IDs (like Date.now()).
   // DOM dataset attributes always cast these to strings, so we must
   // check if a numeric version exists in the DB if the string fails.
+  //
+  // Note: this fallback block is intentionally duplicated from hydrateAssay()
+  // rather than extracted into a shared helper because both functions open their
+  // own transactions at different points. A shared async helper would require an
+  // extra round-trip to IDB and could open a transaction in a context where
+  // auto-commit has already fired in the caller.
   let trueAssayId = assayId;
   const assayExists = await new Promise((resolve, reject) => {
     const tx = db.transaction(STORES.ASSAYS, "readonly");
@@ -324,8 +357,11 @@ export async function deleteAssay(assayId) {
 export async function saveTrial(assayId, trial) {
   const db = await openDB();
   const tx = db.transaction(STORES.TRIALS, "readwrite");
-  // Spread assayId in so the index can look up trials by parent assay
-  tx.objectStore(STORES.TRIALS).put({ ...trial, assayId });
+  // Exclude the in-memory runs array — runs live in their own store (saveRun).
+  // Spreading trial directly would write duplicate run data into the trials record,
+  // bloating IDB storage and potentially overwriting in-progress run state.
+  const { runs: _runs, ...trialData } = trial;
+  tx.objectStore(STORES.TRIALS).put({ ...trialData, assayId });
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
     tx.onerror    = reject;
@@ -336,7 +372,10 @@ export async function saveTrial(assayId, trial) {
  * Marks a trial as completed and records the end timestamp.
  * Performs a read-modify-write within a single transaction for atomicity.
  *
- * @param {string} _assayId - Unused — kept for API consistency.
+ * @param {string} _assayId - Not used internally; kept for API consistency with
+ *   saveTrial(). Can be removed in a future breaking change once all callers
+ *   are updated.
+ * @deprecated The `_assayId` parameter is unused. Future callers should omit it.
  * @param {string} trialId  - The ID of the trial to complete.
  * @returns {Promise<void>} Resolves when the transaction commits.
  */
@@ -364,7 +403,10 @@ export async function markTrialCompleted(_assayId, trialId) {
  * Marks a trial as abandoned with an explanatory reason and records the end timestamp.
  * Performs a read-modify-write within a single transaction for atomicity.
  *
- * @param {string} _assayId - Unused — kept for API consistency.
+ * @param {string} _assayId - Not used internally; kept for API consistency with
+ *   saveTrial(). Can be removed in a future breaking change once all callers
+ *   are updated.
+ * @deprecated The `_assayId` parameter is unused. Future callers should omit it.
  * @param {string} trialId  - The ID of the trial to abandon.
  * @param {string} [reason="App closed or reloaded"] - Human-readable explanation.
  * @returns {Promise<void>} Resolves when the transaction commits.
@@ -401,7 +443,9 @@ export async function markTrialAbandoned(_assayId, trialId, reason = "App closed
  *
  * Called both during a run (batch saves) and at completion/abandonment.
  *
- * @param {string} _assayId - Unused — kept for API consistency.
+ * @param {string} _assayId - Not used internally; the run is keyed by trialId
+ *   alone. Kept for API consistency — can be removed in a future breaking change.
+ * @deprecated The `_assayId` parameter is unused. Future callers should omit it.
  * @param {string} trialId  - Parent trial ID (stored as a field for indexing).
  * @param {Object} run      - The run object to persist (including its values array).
  * @returns {Promise<void>} Resolves when the transaction commits.
@@ -491,122 +535,67 @@ export async function abandonAllActiveTrialsInDB() {
 
 
 /* ==========================================================================
-   Log Operations
+   Orphan Run Cleanup
    ========================================================================== */
 
 /**
- * Appends a log entry to the LOGS store.
+ * Scans ALL runs (regardless of their parent trial's status) for any that
+ * were left in "active" state from a previous session — e.g. if a run was
+ * in-progress inside a trial that was already marked abandoned by
+ * abandonAllActiveTrialsInDB(), or if the DB write raced with an app crash.
  *
- * Uses add() (not put()) so the autoIncrement key is always generated fresh.
- * Any pre-existing `id` field on the entry object is stripped first to
- * prevent it being used as the key (which would overwrite an existing record).
+ * Uses the "status" index on the runs store (added in DB_VERSION 4) for
+ * efficiency; falls back to a full table scan on older schema versions.
  *
- * @param {Object}                   entry           - The log data to persist.
- * @param {number}                   entry.timestamp - Unix timestamp.
- * @param {"INFO"|"WARN"|"ERROR"|"FATAL"} entry.level - Severity level.
- * @param {string}                   entry.message   - Formatted log message.
- * @param {string}                   entry.url       - Page URL at time of log.
- * @returns {Promise<void>} Resolves when the transaction commits.
- */
-export async function saveLog(entry) {
-  const db = await openDB();
-  const tx = db.transaction(STORES.LOGS, "readwrite");
-
-  // Strip any existing 'id' so add() always generates a fresh autoIncrement key
-  const { id: _ignored, ...entryWithoutId } = entry;
-  tx.objectStore(STORES.LOGS).add(entryWithoutId);
-
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = resolve;
-    tx.onerror    = reject;
-  });
-}
-
-/**
- * Returns all stored log entries, ordered by their autoIncrement key
- * (i.e. insertion order, oldest first).
+ * Called once at startup alongside abandonAllActiveTrialsInDB().
  *
- * @returns {Promise<Object[]>} Array of log entry objects.
- */
-export async function getAllLogs() {
-  const db  = await openDB();
-  const tx  = db.transaction(STORES.LOGS, "readonly");
-  const req = tx.objectStore(STORES.LOGS).getAll();
-  return new Promise(resolve => {
-    req.onsuccess = () => resolve(req.result || []);
-  });
-}
-
-/**
- * Removes all entries from the LOGS store.
- * Called from the Settings screen after user confirmation.
- *
- * @returns {Promise<void>} Resolves when the transaction commits.
- */
-export async function clearAllLogs() {
-  const db = await openDB();
-  const tx = db.transaction(STORES.LOGS, "readwrite");
-  tx.objectStore(STORES.LOGS).clear();
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = resolve;
-    tx.onerror    = reject;
-  });
-}
-
-/**
- * Returns the total number of log entries currently stored.
- * Uses a count() cursor which is faster than getAll() for large stores.
- *
- * @returns {Promise<number>}
- */
-export async function getLogCount() {
-  const db  = await openDB();
-  const tx  = db.transaction(STORES.LOGS, "readonly");
-  const req = tx.objectStore(STORES.LOGS).count();
-  return new Promise((resolve, reject) => {
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
-}
-
-/**
- * Deletes the oldest log entries so that at most `keepCount` remain.
- * Iterates a cursor (ascending autoIncrement key order) and deletes until
- * the store is within the desired limit.
- *
- * @param {number} keepCount - Maximum number of entries to retain.
  * @returns {Promise<void>}
  */
-export async function pruneOldestLogs(keepCount) {
-  const db    = await openDB();
-  const tx    = db.transaction(STORES.LOGS, "readwrite");
-  const store = tx.objectStore(STORES.LOGS);
+export async function markOrphanRunsStopped() {
+  let db;
+  try {
+    db = await openDB();
+  } catch {
+    return;  // IDB unavailable — nothing we can do
+  }
 
-  const total = await new Promise((resolve, reject) => {
-    const req = store.count();
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
+  // Fetch all runs with status "active"
+  let activeRuns = [];
+  try {
+    activeRuns = await new Promise((resolve, reject) => {
+      const tx    = db.transaction(STORES.RUNS, "readonly");
+      const store = tx.objectStore(STORES.RUNS);
+      // Use status index if available (DB_VERSION 4+); fall back to getAll filter
+      if (store.indexNames.contains("status")) {
+        const req = store.index("status").getAll("active");
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror   = () => reject(req.error);
+      } else {
+        const req = store.getAll();
+        req.onsuccess = () => resolve((req.result || []).filter(r => r.status === "active"));
+        req.onerror   = () => reject(req.error);
+      }
+    });
+  } catch (err) {
+    console.warn("markOrphanRunsStopped: could not scan runs:", err);
+    return;
+  }
 
-  const deleteCount = total - keepCount;
-  if (deleteCount <= 0) return; // Nothing to prune
+  if (activeRuns.length === 0) return;
 
-  let deleted = 0;
-  const cursorReq = store.openCursor(); // ascending by key → oldest first
+  // Mark each orphan as stoppedEarly in one atomic transaction
   await new Promise((resolve, reject) => {
-    cursorReq.onsuccess = e => {
-      const cursor = e.target.result;
-      if (!cursor || deleted >= deleteCount) { resolve(); return; }
-      cursor.delete();
-      deleted++;
-      cursor.continue();
-    };
-    cursorReq.onerror = () => reject(cursorReq.error);
-  });
-
-  // Wait for the overall transaction to commit
-  await new Promise((resolve, reject) => {
+    const tx    = db.transaction(STORES.RUNS, "readwrite");
+    const store = tx.objectStore(STORES.RUNS);
     tx.oncomplete = resolve;
     tx.onerror    = () => reject(tx.error);
+
+    activeRuns.forEach(run => {
+      run.status              = "stoppedEarly";
+      run.endedAt             = Date.now();
+      run.eligibleForAnalysis = false;
+      run.ineligibleReason    = "App restarted unexpectedly";
+      store.put(run);
+    });
   });
 }

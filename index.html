@@ -4,9 +4,11 @@
   <meta charset="UTF-8">
   <title>Touch Assay Timer</title>
 
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0f172a">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#f1f5f9">
   <meta name="description" content="Touch Assay Timer — precision stimulus–response timing for C. elegans touch assay experiments.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
   <!-- Inter font for premium typography -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -35,8 +37,8 @@
     <div class="header-actions">
       <!-- Quick dark/light mode toggle -->
       <button id="themeToggleBtn" type="button" aria-label="Toggle dark mode" class="header-icon-btn" title="Toggle theme">
-        <!-- Sun icon (shown in dark mode to switch to light) -->
-        <svg id="themeIconSun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <!-- Sun icon (shown in dark mode to switch to light); hidden initially since default theme is light -->
+        <svg id="themeIconSun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
           <circle cx="12" cy="12" r="5"/>
           <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
           <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
@@ -63,6 +65,29 @@
       <button id="openGuidelines" type="button">User Guidelines</button>
     </div>
   </header>
+
+  <!-- #5: "Recording in progress" banner — shown only during active runs via CSS -->
+  <div id="runBanner" aria-live="assertive" aria-atomic="true">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+         aria-hidden="true">
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+      <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+    Recording in progress — do not leave this page.
+  </div>
+
+  <!-- #9: Persistent storage-unavailable warning -->
+  <div id="idbWarningBanner" hidden aria-live="assertive">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+         aria-hidden="true">
+      <circle cx="12" cy="12" r="10"/>
+      <line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    Storage unavailable — data will <strong>not</strong> be saved. Check your browser’s privacy/storage settings.
+  </div>
+
 
   <main>
       
@@ -107,7 +132,7 @@
               <label for="temperature">Temperature (°C)</label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="temperature" data-delta="-1" aria-label="Decrease temperature">−</button>
-                <input type="number" id="temperature" value="20" required inputmode="decimal">
+                <input type="number" id="temperature" min="-10" max="60" value="20" required inputmode="decimal">
                 <button type="button" class="stepper-btn" data-target="temperature" data-delta="1" aria-label="Increase temperature">+</button>
               </div>
             </div>
@@ -170,7 +195,7 @@
         <p>Adapted by <a href="https://github.com/The-Wannabe-Scientist" target="_blank" rel="noopener">Ag</a>  from <a href="https://github.com/dv-welp/touch-assay-timer" target="_blank" rel="noopener">touch-assay-timer</a> by <a href="https://github.com/dv-welp/" target="_blank" rel="noopener">DV</a></p>
       </footer>
     </section>
-    <section id="assayScreen" data-trial-active="false">
+    <section id="assayScreen">
       <header>
         <label for="genotypeSelect" class="visually-hidden">Select Genotype</label>
         <select id="genotypeSelect"> 
@@ -194,10 +219,8 @@
         <button id="tapButton" type="button">Start Timer</button>
       </div>
 
-                                       
       <div id="assayProgress">
         </div>
-        
       <div id="runStatus" class="status" hidden></div> 
           
       <footer>
@@ -208,7 +231,12 @@
     
     <section id="exportScreen">
       <h2>Assay Export</h2>
+
+      <!-- #14: Per-trial summary card, populated by JS after finishTrial -->
+      <div id="trialSummaryCard" hidden></div>
+
       <p>Select datasets to include in the export.</p>
+
 
       <fieldset>
         <legend>Datasets</legend>
@@ -222,7 +250,9 @@
       <div class="export-actions">
         <button id="previewExcel" class="secondary">Preview Results</button>
         <button id="exportExcel" class="primary">Export to Excel</button>
+        <button id="exportCSV" class="secondary" title="Export comma-separated values (works offline)">Export CSV</button>
       </div>
+
       
       <div class="navButtons">
         <button id="backToAssay" type="button">Start New Trial</button>
@@ -247,7 +277,40 @@
       </fieldset>
       
       <fieldset>
+        <legend>Audio</legend>
+
+        <div class="input-group">
+          <label for="tickVolume">Tick Volume</label>
+          <div class="slider-row">
+            <input type="range" id="tickVolume" min="0" max="1" step="0.05" value="1">
+            <span id="tickVolumeDisplay" class="slider-value">100%</span>
+          </div>
+        </div>
+
+        <div class="input-group">
+          <label for="tickPitch">Tick Pitch (Hz)</label>
+          <div class="slider-row">
+            <input type="range" id="tickPitch" min="200" max="2000" step="50" value="900">
+            <span id="tickPitchDisplay" class="slider-value">900 Hz</span>
+          </div>
+        </div>
+
+        <div class="input-group">
+          <label for="speechLead">Speech Lead (ms)</label>
+          <p style="font-size:0.8rem;color:var(--text-muted);margin:0 0 0.4rem;">
+            How early the spoken cue fires before each stimulus. Increase if speech
+            arrives late on your device (typical range: 60–150 ms).
+          </p>
+          <div class="slider-row">
+            <input type="range" id="speechLead" min="0" max="490" step="10" value="80">
+            <span id="speechLeadDisplay" class="slider-value">80 ms</span>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
         <legend>Timer Voiceover Options</legend>
+
         <label class="toggle-label" for="voiceTick"> 
           <input type="radio" id="voiceTick" name="voiceMode" value="tick" checked>
           Tick every second
@@ -260,6 +323,10 @@
           <input type="radio" id="voiceTens" name="voiceMode" value="tens">
           Speak every ten seconds, tick in between
         </label>
+        <label class="toggle-label" for="voiceBins">
+          <input type="radio" id="voiceBins" name="voiceMode" value="bins">
+          Tick every stimulus, speak at each bin boundary
+        </label>
       </fieldset>
 
       <fieldset>
@@ -271,19 +338,11 @@
         
         <div id="warmupDurationContainer" class="input-group">
           <label for="warmupDuration">Duration (seconds)</label>
-          <input type="number" id="warmupDuration" min="1" max="10" step="1" value="3">
+          <input type="number" id="warmupDuration" min="1" max="60" step="1" value="3">
         </div>
       </fieldset>
 
-      <fieldset>
-        <legend>Diagnostics</legend>
-        <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0;">Use these tools to export technical data if you experience crashes or unexpected behavior.</p>
-        <div class="export-actions" style="margin-top: 0.5rem;">
-          <button id="downloadLogsBtn" class="secondary" type="button">Download Logs</button>
-          <button id="clearLogsBtn" class="danger" type="button">Clear Logs</button>
-        </div>
-        <p id="logCountBadge" style="font-size: 0.8rem; color: var(--text-muted); margin: 0.4rem 0 0;"></p>
-      </fieldset>
+
 
       
       <button id="closeSettings" type="button" class="secondary">Back</button>
@@ -314,6 +373,7 @@
   <section id="savedAssaysScreen" hidden>
       <h2>Saved Assays</h2>
       
+      <!-- TODO: move inline styles below into styles.css for consistency -->
       <div class="bulk-actions" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border-base);">
         <label class="toggle-label" style="font-size: 0.9rem; margin: 0;">
           <input type="checkbox" id="selectAllAssays"> Select All
@@ -344,12 +404,16 @@
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer crossorigin="anonymous"></script>
 
   <script type="module" src="./js/main.js"></script>
 
   <script>
-  /* ─── Chip / Tag input for Genotypes ─────────────────────────────────────── */
+  // Chip / tag input for the Genotypes field.
+  // Wraps the visible text input and hidden comma-list input so users can type
+  // genotype labels one at a time. Each label becomes a removable chip tag.
+  // The hidden `#genotypes` input always holds the canonical comma-separated list
+  // that main.js reads on form submit.
   (function () {
     const wrapper    = document.getElementById('chipInputWrapper');
     const chipList   = document.getElementById('chipList');
@@ -386,6 +450,11 @@
       removeBtn.addEventListener('click', function () {
         chip.remove();
         syncHidden();
+        // Notify main.js's scheduleDraftSave listener so the updated genotype list
+        // is persisted to localStorage. Without this dispatch, removing a chip here
+        // only updates the hidden input value in memory — the draft is never written,
+        // so the removed chip reappears on the next page load.
+        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
       });
 
       chip.appendChild(label);
@@ -401,8 +470,12 @@
         textInput.value = '';
       }
       if (e.key === 'Backspace' && textInput.value === '') {
-        const chips = chipList.querySelectorAll('.chip');
-        if (chips.length) { chips[chips.length - 1].remove(); syncHidden(); }
+        var chips = chipList.querySelectorAll('.chip');
+        if (chips.length) {
+          chips[chips.length - 1].remove();
+          syncHidden();
+          hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+        }
       }
     });
 
@@ -424,7 +497,11 @@
     wrapper.addEventListener('click', function () { textInput.focus(); });
   })();
 
-  /* ─── Custom ± Stepper buttons ───────────────────────────────────────────── */
+  // Stepper buttons (− / +) for numeric inputs.
+  // Each button carries `data-target` (the ID of the linked <input>) and
+  // `data-delta` (the signed amount to add on each click, e.g. +1 or -0.1).
+  // After updating the value the handler fires both `input` and `change`
+  // events so downstream listeners (e.g. bin-warning recalculation) respond.
   document.querySelectorAll('.stepper-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var target = document.getElementById(btn.dataset.target);
@@ -440,7 +517,10 @@
     });
   });
 
-  /* ─── Quick header theme toggle ──────────────────────────────────────────── */
+  // Theme toggle button in the header (quick-access light/dark switch).
+  // Syncs with both the Settings-screen radio group and the OS prefers-color-scheme
+  // media query on first load. Persists the choice to localStorage under the key
+  // 'touchAssayTheme' — the same key main.js reads in initializeSettings().
   (function () {
     var btn      = document.getElementById('themeToggleBtn');
     var iconSun  = document.getElementById('themeIconSun');
@@ -469,9 +549,10 @@
       applyTheme(next);
       // Use the same localStorage key as main.js
       try { localStorage.setItem('touchAssayTheme', next); } catch(e) {}
-      // Fire change on the matching radio so main.js listeners also trigger
-      var radio = document.querySelector('input[name="themeMode"][value="' + next + '"]');
-      if (radio) radio.dispatchEvent(new Event('change', { bubbles: true }));
+      // Bug 2: Do NOT dispatch a synthetic 'change' event on the radio here.
+      // applyTheme() already sets data-theme, meta theme-color, and radio.checked.
+      // Dispatching 'change' would additionally trigger the main.js Settings radio
+      // listener, causing duplicate localStorage writes and DOM mutations.
     });
 
     // Keep icon in sync when Settings radios are changed by the user
@@ -481,8 +562,11 @@
       });
     });
 
-    // Initialise icon to match whatever theme main.js will load
+    // #29: On first load, fall back to OS prefers-color-scheme when no preference is saved
     var saved = (function() { try { return localStorage.getItem('touchAssayTheme'); } catch(e) { return null; } })();
+    if (!saved && window.matchMedia) {
+      saved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
     applyTheme(saved === 'dark' ? 'dark' : 'light');
   })();
   </script>
