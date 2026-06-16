@@ -270,6 +270,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       downloadLogs:         document.getElementById("downloadLogsBtn"),
       clearLogs:            document.getElementById("clearLogsBtn"),
       deleteSelectedAssays: document.getElementById("deleteSelectedAssays"),
+      headerHome:           document.getElementById("headerHomeBtn"),
     },
     Displays: {
       liveProgress:     document.getElementById("liveProgress"),
@@ -1426,6 +1427,34 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Reset all timing/scheduling state to prevent stale values
     // from a previous run affecting the next one
+    currentStimulusIndex   = 0;
+    tapTimestamps          = [];
+    lastSchedulerTime      = 0;
+    lastBatchSaveIndex     = 0;
+    nextAudioScheduleTime  = 0.0;
+    nextSpeechTime         = 0.0;
+    nextDataIntervalTime   = 0.0;
+
+    setState(STATES.SETUP);
+  });
+
+  // ── Header home (logo / title) → back to setup ─────────────────────────
+  UI.Buttons.headerHome.addEventListener("click", () => {
+    // Do not navigate away while a run is actively recording data
+    if (currentState === STATES.RUNNING) return;
+
+    currentAssay = null;
+    UI.Forms.setup.reset();
+    UI.Inputs.assayName.value     = generateAutoID();
+    UI.Displays.binWarning.hidden = true;
+
+    // Clear progress table from any previous assay
+    const progressContainer = document.getElementById("assayProgress");
+    progressContainer.innerHTML = "";
+    progressContainer.hidden    = true;
+    UI.Buttons.progress.textContent = "Show Progress";
+
+    // Reset timing/scheduling state
     currentStimulusIndex   = 0;
     tapTimestamps          = [];
     lastSchedulerTime      = 0;
