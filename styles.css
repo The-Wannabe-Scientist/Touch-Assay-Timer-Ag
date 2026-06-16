@@ -28,6 +28,7 @@
   --color-danger:        #dc2626;
   --color-danger-shadow: rgba(220, 38, 38, 0.25);
   --color-secondary-bg:  #e2e8f0;
+  --color-secondary-hover: #cbd5e1;
 
   --bg-warning:    #fef2f2;
   --border-warning:#fecaca;
@@ -93,6 +94,12 @@
 
   --stepper-btn-bg:    #1e293b;
   --stepper-btn-hover: #334155;
+
+  /* Dark-mode button overrides */
+  --color-secondary-bg:    #1e293b;
+  --color-secondary-hover: #334155;
+  --color-primary-shadow:  rgba(99, 102, 241, 0.45);
+  --color-danger-shadow:   rgba(239, 68, 68, 0.4);
 }
 
 /* =====================================================================
@@ -576,15 +583,15 @@ button.primary:active {
 button.secondary {
   background: var(--color-secondary-bg);
   color: var(--text-main);
-  border: none;
+  border: 1px solid var(--border-base);
   transition: background 0.18s ease, transform 0.14s ease;
 }
 button.secondary:hover {
-  background: var(--border-input);
+  background: var(--color-secondary-hover);
   transform: translateY(-1px);
 }
 button.secondary:active {
-  background: var(--border-input);
+  background: var(--color-secondary-hover);
   transform: translateY(0);
 }
 
@@ -932,13 +939,21 @@ input:disabled, select:disabled, button:disabled {
 }
 
 [data-theme="dark"] input:disabled,
-[data-theme="dark"] select:disabled,
-[data-theme="dark"] button:disabled {
-  background-color: var(--bg-card) !important; 
-  color: var(--text-muted) !important; 
+[data-theme="dark"] select:disabled {
+  background-color: var(--bg-card) !important;
+  color: var(--text-muted) !important;
   border-color: var(--border-base) !important;
-  opacity: 1 !important; 
-  -webkit-text-fill-color: var(--text-muted) !important; 
+  opacity: 1 !important;
+  -webkit-text-fill-color: var(--text-muted) !important;
+}
+
+/* Disabled buttons keep a readable surface distinct from the card background */
+[data-theme="dark"] button:disabled {
+  background-color: var(--bg-input) !important;
+  color: var(--text-muted) !important;
+  border-color: var(--border-base) !important;
+  opacity: 0.55 !important;
+  -webkit-text-fill-color: var(--text-muted) !important;
 }
 
 /* =====================================================================

@@ -1302,15 +1302,28 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Space bar shortcut ──────────────────────────────────────────────────
   document.addEventListener("keydown", event => {
-    // Ignore if a form field is focused or if the key is being held down
+    // Ignore held-down keys (auto-repeat)
     if (event.repeat) return;
+    // Always allow normal keyboard input in form fields
     if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "SELECT") return;
 
-    if (event.key === " ") {
-      event.preventDefault();
+    const onAssayScreen = currentState === STATES.CONFIGURED
+                       || currentState === STATES.POISED
+                       || currentState === STATES.RUNNING;
 
-      // When a run is active, tap always takes priority — never let a toast
-      // intercept Space and miss a data point mid-experiment
+    if (onAssayScreen) {
+      // On the assay screen, intercept both Space and Enter so no focused
+      // button (Stop Run, Finish Trial, Hide Progress…) can be accidentally
+      // activated via keyboard — only tap and toast dismissal are permitted.
+      if (event.key !== " " && event.key !== "Enter") return;
+
+      event.preventDefault();  // Block the browser from activating any focused element
+
+      // Enter is silently swallowed — it prevents accidental button activation
+      // but does not trigger a tap (Space is the only tap key).
+      if (event.key !== " ") return;
+
+      // RUNNING: tap unconditionally takes priority over everything
       if (currentState === STATES.RUNNING) {
         if (!UI.Buttons.tap.disabled) executeTapAction();
         return;
@@ -1320,9 +1333,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       // dismiss it (already wired in toast.js) — don't also trigger a tap
       if (document.activeElement?.classList.contains("toast")) return;
 
-      // Outside of a run: Space dismisses the newest visible toast first
+      // Outside a run: Space dismisses the newest visible toast first
       if (dismissLatestToast()) return;
 
+      if (!UI.Buttons.tap.disabled) executeTapAction();
+      return;
+    }
+
+    // ── Non-assay screens: Space only ────────────────────────────────────
+    if (event.key === " ") {
+      event.preventDefault();
+      if (document.activeElement?.classList.contains("toast")) return;
+      if (dismissLatestToast()) return;
       if (!UI.Buttons.tap.disabled) executeTapAction();
     }
   });
