@@ -85,6 +85,22 @@ function handleGlobalKeydown(e) {
 }
 
 /**
+ * Dismisses the newest visible toast, if any.
+ * Returns true if a toast was dismissed, false if there were none.
+ * Exported so external keydown handlers can call this before routing
+ * their own key action (e.g. Space-bar tap) when a toast is on screen.
+ *
+ * @returns {boolean}
+ */
+export function dismissLatestToast() {
+  const root   = getContainer();
+  const active = Array.from(root.querySelectorAll(".toast:not(.toast--exiting)"));
+  if (active.length === 0) return false;
+  dismiss(active[active.length - 1]);
+  return true;
+}
+
+/**
  * Ensures the module-level Escape listener is registered (once).
  */
 function ensureKeyListener() {

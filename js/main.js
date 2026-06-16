@@ -53,7 +53,7 @@ import {
 import {
   performExcelExport, performCSVExport, generatePreviewHTML
 }                                                      from "./export.js";
-import { showToast }                                   from "./toast.js";
+import { showToast, dismissLatestToast }                from "./toast.js";
 
 
 /* ==========================================================================
@@ -451,10 +451,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const selectedGenotype = UI.Inputs.genotypeSelect.value;
 
-    // Count only non-active (completed / abandoned) runs for this genotype
-    // to avoid double-counting if a previous run stalled mid-flight
+    // Count only eligible runs for this genotype to determine the next animal index,
+    // consistent with the tap-button and genotype-dropdown counters
     const animalIndex = activeTrial.runs.filter(
-      run => run.genotype === selectedGenotype && run.status !== "active"
+      run => run.genotype === selectedGenotype && run.status === "completed" && run.eligibleForAnalysis
     ).length + 1;
 
     const run = createRun({
@@ -874,7 +874,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     isWarmingUp               = false;
     UI.Displays.warmup.hidden = true;
     UI.Buttons.tap.hidden     = false;
-    startRun();
+    await startRun();
   }
 
 
@@ -1045,13 +1045,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       summary[g] = { total: 0, eligible: 0, ineligible: 0 };
     });
 
-    // Tally runs into the appropriate bucket
+    // Tally runs into the appropriate bucket (skip active/in-progress runs)
     trial.runs.forEach(r => {
       if (!summary[r.genotype]) return;
+      if (r.status === "active") return;  // Don't count in-progress runs
       summary[r.genotype].total++;
       if (r.status === "completed" && r.eligibleForAnalysis) {
         summary[r.genotype].eligible++;
-      } else if (r.status !== "active") {
+      } else {
         summary[r.genotype].ineligible++;
       }
     });
@@ -1200,7 +1201,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.addEventListener("visibilitychange", async () => {
     if (document.visibilityState === "hidden" && currentState === STATES.RUNNING && currentAssay) {
       console.log("App backgrounded: automatically stopping active run.");
-      endRun();
+      stopRunEarly("Timing interrupted — device was backgrounded or throttled");
     }
 
     // Wake Locks are released when hidden; re-acquire when visible
@@ -1304,11 +1305,24 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Ignore if a form field is focused or if the key is being held down
     if (event.repeat) return;
     if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "SELECT") return;
-    // Ignore if a toast has focus (Space/Enter should dismiss the toast, not trigger a tap)
-    if (document.activeElement?.classList.contains("toast")) return;
 
     if (event.key === " ") {
       event.preventDefault();
+
+      // When a run is active, tap always takes priority — never let a toast
+      // intercept Space and miss a data point mid-experiment
+      if (currentState === STATES.RUNNING) {
+        if (!UI.Buttons.tap.disabled) executeTapAction();
+        return;
+      }
+
+      // If a toast has keyboard focus, let the toast's own keydown handler
+      // dismiss it (already wired in toast.js) — don't also trigger a tap
+      if (document.activeElement?.classList.contains("toast")) return;
+
+      // Outside of a run: Space dismisses the newest visible toast first
+      if (dismissLatestToast()) return;
+
       if (!UI.Buttons.tap.disabled) executeTapAction();
     }
   });
@@ -1534,7 +1548,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   UI.Settings.warmupDurationInput.addEventListener("change", e => {
-    warmupDuration = Math.max(1, parseInt(e.target.value, 10));
+    warmupDuration = Math.min(60, Math.max(1, parseInt(e.target.value, 10)));
+    UI.Settings.warmupDurationInput.value = warmupDuration;  // Reflect clamped value back
     localStorage.setItem("touchAssayWarmupDuration", warmupDuration);
   });
 
