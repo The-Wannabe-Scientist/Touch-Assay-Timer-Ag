@@ -1312,14 +1312,19 @@ document.addEventListener("DOMContentLoaded", async () => {
                        || currentState === STATES.RUNNING;
 
     if (onAssayScreen) {
-      // On the assay screen, intercept both Space and Enter so no focused
-      // button (Stop Run, Finish Trial, Hide Progress…) can be accidentally
-      // activated via keyboard — only tap and toast dismissal are permitted.
+      // On the assay screen, Space and Enter must NEVER activate any focused
+      // element (Stop Run, Finish Trial, Hide Progress, Select Genotype, etc.).
+      // Prevent the browser's default button/select activation immediately,
+      // before any early return, so no focused control can be triggered.
+      if (event.key === " " || event.key === "Enter") {
+        event.preventDefault();
+      }
+
+      // Non-activation keys (e.g. Tab for focus movement) pass through —
+      // but Space and Enter are fully owned by this handler on the assay screen.
       if (event.key !== " " && event.key !== "Enter") return;
 
-      event.preventDefault();  // Block the browser from activating any focused element
-
-      // Enter is silently swallowed — it prevents accidental button activation
+      // Enter is silently swallowed — prevents accidental button activation
       // but does not trigger a tap (Space is the only tap key).
       if (event.key !== " ") return;
 
