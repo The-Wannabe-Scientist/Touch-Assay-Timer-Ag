@@ -53,6 +53,7 @@ import {
 import {
   performExcelExport, performCSVExport, generatePreviewHTML
 }                                                      from "./export.js";
+import { showToast }                                   from "./toast.js";
 
 
 /* ==========================================================================
@@ -687,6 +688,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     refreshGenotypeDropdownCounts();
     releaseWakeLock();
     setState(STATES.POISED);
+    showToast("Run complete — all stimulations recorded.", "success");
   }
 
   /**
@@ -721,6 +723,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     refreshGenotypeDropdownCounts();
     releaseWakeLock();
     setState(STATES.POISED);
+    showToast(
+      reason === "Run stopped early by user"
+        ? "Run stopped \u2014 marked ineligible for analysis."
+        : `Run interrupted: ${reason}`,
+      "warning",
+      5000
+    );
   }
 
 
@@ -756,7 +765,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const selectedGenotype = UI.Inputs.genotypeSelect.value;
 
       if (!selectedGenotype) {
-        alert("Please select a genotype before starting the timer.");
+        showToast("Please select a genotype before starting.", "info", 3000);
         return;
       }
 
@@ -764,10 +773,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         // First tap: show confirmation prompt and set a 2-second reset timer
         pendingStart = true;
 
-        // Count only finished runs so the displayed index is accurate
+        // Count only eligible runs so the displayed index reflects valid animals
         const activeTrial = getActiveTrial(currentAssay);
         const nextIndex   = activeTrial.runs.filter(
-          r => r.genotype === selectedGenotype && r.status !== "active"
+          r => r.genotype === selectedGenotype && r.status === "completed" && r.eligibleForAnalysis
         ).length + 1;
 
         UI.Buttons.tap.textContent = `Tap again to start ${selectedGenotype} (Animal ${nextIndex})`;
@@ -993,12 +1002,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       const option  = document.createElement("option");
       option.value  = g;
 
-      // Count completed (non-active) runs for this genotype
+      // Count only eligible (completed + eligible for analysis) runs for this genotype
       const count   = trial
-        ? trial.runs.filter(r => r.genotype === g && r.status !== "active").length
+        ? trial.runs.filter(r => r.genotype === g && r.status === "completed" && r.eligibleForAnalysis).length
         : 0;
 
-      option.textContent = count > 0 ? `${g} (${count} done)` : g;
+      option.textContent = count > 0 ? `${g} (${count} eligible)` : g;
       UI.Inputs.genotypeSelect.appendChild(option);
     });
 
@@ -1260,7 +1269,11 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const validation = validateInputs(setupValues);
     if (!validation.isValid) {
-      alert("Please fix the following errors:\n\n• " + validation.errors.join("\n• "));
+      showToast(
+        "Please fix: " + validation.errors.join(" • "),
+        "error",
+        6000
+      );
       return;
     }
 
@@ -1291,6 +1304,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Ignore if a form field is focused or if the key is being held down
     if (event.repeat) return;
     if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "SELECT") return;
+    // Ignore if a toast has focus (Space/Enter should dismiss the toast, not trigger a tap)
+    if (document.activeElement?.classList.contains("toast")) return;
 
     if (event.key === " ") {
       event.preventDefault();
@@ -1332,7 +1347,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const selected    = e.target.value;
       const activeTrial = getActiveTrial(currentAssay);
       const nextIndex   = activeTrial.runs.filter(
-        r => r.genotype === selected && r.status !== "active"
+        r => r.genotype === selected && r.status === "completed" && r.eligibleForAnalysis
       ).length + 1;
 
       UI.Buttons.tap.textContent = `Start ${selected} (Animal ${nextIndex})`;
@@ -1361,6 +1376,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Forms.setup.reset();
     UI.Inputs.assayName.value    = generateAutoID();
     UI.Displays.binWarning.hidden = true;
+
+    // Clear progress table from the previous assay
+    const progressContainer = document.getElementById("assayProgress");
+    progressContainer.innerHTML = "";
+    progressContainer.hidden    = true;
+    UI.Buttons.progress.textContent = "Show Progress";
 
     // Reset all timing/scheduling state to prevent stale values
     // from a previous run affecting the next one
@@ -1424,6 +1445,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       currentAssay.trials.push(newTrial);
       await saveTrial(currentAssay.assayId, newTrial);
 
+      // Clear progress table from any previously loaded assay
+      const progressContainer = document.getElementById("assayProgress");
+      progressContainer.innerHTML = "";
+      progressContainer.hidden    = true;
+      UI.Buttons.progress.textContent = "Show Progress";
+
       hideScreenAndRestore(UI.Screens.savedAssays);
       setState(STATES.POISED);
 
@@ -1439,9 +1466,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         try {
           await deleteAssay(assayId);
           await populateSavedAssaysList();
+          showToast(`"${name}" deleted.`, "success", 3000);
         } catch (err) {
           console.error("Delete failed:", err);
-          alert(`Failed to delete "${name}". Please try again.`);
+          showToast(`Failed to delete "${name}". Please try again.`, "error");
         }
       }
     }  // end action routing

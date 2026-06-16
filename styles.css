@@ -5,73 +5,94 @@
 :root {
   color-scheme: light;
 
-  --bg-body: #f4f6f8;
-  --bg-card: #ffffff;
-  --bg-header: #1f2937;
-  --bg-input: #f9fafb;
-  --bg-input-focus: #ffffff;
-  --bg-progress: #fafafa;
-  --bg-table-header: #f3f4f6;
+  --bg-body:          #f1f5f9;
+  --bg-card:          #ffffff;
+  --bg-header:        #0f172a;
+  --bg-input:         #f8fafc;
+  --bg-input-focus:   #ffffff;
+  --bg-progress:      #f8fafc;
+  --bg-table-header:  #f1f5f9;
 
-  --text-main: #111827;
-  --text-muted: #4b5563;
-  --text-header: #ffffff;
-  --text-placeholder: #9ca3af;
+  --text-main:        #0f172a;
+  --text-muted:       #475569;
+  --text-header:      #f8fafc;
+  --text-placeholder: #94a3b8;
 
-  --border-base: #e5e7eb;
-  --border-input: #d1d5db;
-  --focus-ring: rgba(59, 130, 246, 0.15);
-  
-  --color-primary: #2563eb;
-  --color-primary-hover: #1d4ed8;
-  --color-danger: #dc2626;
+  --border-base:  #e2e8f0;
+  --border-input: #cbd5e1;
+  --focus-ring:   rgba(99, 102, 241, 0.18);
 
-  --bg-warning: #fef2f2;
-  --border-warning: #fecaca;
-  --text-warning: #b91c1c;
+  --color-primary:       #4f46e5;
+  --color-primary-hover: #4338ca;
+  --color-primary-shadow: rgba(79, 70, 229, 0.28);
+  --color-danger:        #dc2626;
+  --color-danger-shadow: rgba(220, 38, 38, 0.25);
+  --color-secondary-bg:  #e2e8f0;
 
-  --tap-bg: linear-gradient(145deg, #f9fafb, #e5e7eb);
-  --tap-text: #111;
-  --tap-active: #e3e8f0;
-  --tap-flash: #dbeafe;
-  --color-success: #16a34a;
-  --tap-fulfilled: #dcfce7;
-  --tap-fulfilled-border: #86efac;
-  --tap-fulfilled-flash: #bbf7d0; 
+  --bg-warning:    #fef2f2;
+  --border-warning:#fecaca;
+  --text-warning:  #b91c1c;
+
+  --tap-bg:              linear-gradient(145deg, #f8fafc, #e2e8f0);
+  --tap-text:            #0f172a;
+  --tap-active:          #dde3ef;
+  --tap-flash:           #e0e7ff;
+  --color-success:       #16a34a;
+  --tap-fulfilled:       #dcfce7;
+  --tap-fulfilled-border:#86efac;
+  --tap-fulfilled-flash: #bbf7d0;
+
+  /* Chip colours */
+  --chip-bg:      #e0e7ff;
+  --chip-text:    #3730a3;
+  --chip-border:  #c7d2fe;
+  --chip-remove:  #818cf8;
+
+  /* Stepper */
+  --stepper-btn-bg:    #e2e8f0;
+  --stepper-btn-hover: #cbd5e1;
 }
 
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --bg-body: #111827;
-  --bg-card: #1f2937;
-  --bg-header: #111827;
-  --bg-input: #374151; 
-  --bg-input-focus: #111827;
-  --bg-progress: #1f2937;
-  --bg-table-header: #374151;
+  --bg-body:         #0b1120;
+  --bg-card:         #111827;
+  --bg-header:       #060d1a;
+  --bg-input:        #1e293b;
+  --bg-input-focus:  #0f172a;
+  --bg-progress:     #111827;
+  --bg-table-header: #1e293b;
 
-  --text-main: #f9fafb;
-  --text-muted: #d1d5db;
-  --text-header: #f9fafb;
-  --text-placeholder: #9ca3af;
+  --text-main:       #f1f5f9;
+  --text-muted:      #94a3b8;
+  --text-header:     #f1f5f9;
+  --text-placeholder:#475569;
 
-  --border-base: #374151;
-  --border-input: #4b5563;
-  --focus-ring: rgba(59, 130, 246, 0.2);
+  --border-base:  #1e293b;
+  --border-input: #334155;
+  --focus-ring:   rgba(99, 102, 241, 0.25);
 
-  --bg-warning: #450a0a;
-  --border-warning: #7f1d1d;
-  --text-warning: #fca5a5;
+  --bg-warning:    #450a0a;
+  --border-warning:#7f1d1d;
+  --text-warning:  #fca5a5;
 
-  --tap-bg: #374151;
-  --tap-text: #f9fafb;
-  --tap-active: #1f2937;
-  --tap-flash: #1e3a8a;
-  --color-success: #22c55e;
-  --tap-fulfilled: #064e3b;
-  --tap-fulfilled-border: #047857;
-  --tap-fulfilled-flash: #065f46; 
+  --tap-bg:              #1e293b;
+  --tap-text:            #f1f5f9;
+  --tap-active:          #0f172a;
+  --tap-flash:           #1e1b4b;
+  --color-success:       #22c55e;
+  --tap-fulfilled:       #052e16;
+  --tap-fulfilled-border:#15803d;
+  --tap-fulfilled-flash: #065f46;
+
+  --chip-bg:     #1e1b4b;
+  --chip-text:   #a5b4fc;
+  --chip-border: #312e81;
+  --chip-remove: #6366f1;
+
+  --stepper-btn-bg:    #1e293b;
+  --stepper-btn-hover: #334155;
 }
 
 /* =====================================================================
@@ -89,11 +110,14 @@ html, body {
 }
 
 body {
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   background: var(--bg-body);
   color: var(--text-main);
   line-height: 1.5;
   padding-bottom: env(safe-area-inset-bottom);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 [hidden] {
@@ -108,25 +132,56 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  /* Centering trick: Anchors the header content to the 800px main column */
-  padding: 1rem max(1rem, calc(50vw - 400px));
+  padding: 0.9rem max(1rem, calc(50vw - 400px));
   background: var(--bg-header);
   color: var(--text-header);
-  position: relative; 
+  position: relative;
+  /* Glassmorphism — subtle depth on dark header */
+  box-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 4px 24px rgba(0,0,0,0.35);
 }
 
 .appHeader h1 {
-  font-size: 1.1rem;
-  font-weight: 600;
+  font-size: 1.05rem;
+  font-weight: 700;
   margin: 0;
+  letter-spacing: -0.01em;
 }
 
-#overflowMenuButton {
-  background: none;
-  border: none;
+/* ── Header action buttons group (theme toggle + overflow) ────────────── */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.header-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.1);
   color: var(--text-header);
-  font-size: 1.4rem;
   cursor: pointer;
+  transition: background 0.18s ease, transform 0.14s ease, box-shadow 0.18s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.header-icon-btn:hover {
+  background: rgba(255,255,255,0.15);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.header-icon-btn:active {
+  transform: scale(0.93);
+  background: rgba(255,255,255,0.05);
+}
+
+/* Legacy fallback removed — #overflowMenuButton now uses .header-icon-btn */
+#overflowMenuButton {
+  font-size: inherit;
 }
 
 #overflowMenu {
@@ -321,8 +376,8 @@ select option:disabled {
 [data-theme="dark"] input:-webkit-autofill:hover,
 [data-theme="dark"] input:-webkit-autofill:focus,
 [data-theme="dark"] input:-webkit-autofill:active {
-  -webkit-box-shadow: 0 0 0 30px #374151 inset !important; 
-  -webkit-text-fill-color: #f9fafb !important; 
+  -webkit-box-shadow: 0 0 0 30px #1e293b inset !important;
+  -webkit-text-fill-color: #f1f5f9 !important;
   transition: background-color 5000s ease-in-out 0s;
 }
 
@@ -344,6 +399,155 @@ select option:disabled {
 }
 
 /* =====================================================================
+   5b. CHIP / TAG INPUT  (Genotypes)
+   ===================================================================== */
+
+.chip-input-wrapper {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border-input);
+  border-radius: 10px;
+  cursor: text;
+  min-height: 44px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.chip-input-wrapper:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+  background: var(--bg-input-focus);
+}
+
+.chip-list {
+  display: contents; /* chips flow inline with the text input */
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  border: 1px solid var(--chip-border);
+  border-radius: 20px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+  animation: chipIn 0.18s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+@keyframes chipIn {
+  from { opacity: 0; transform: scale(0.7); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.chip-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  font-size: 0.65rem;
+  line-height: 1;
+  background: none;
+  border: none;
+  border-radius: 50%;
+  color: var(--chip-remove);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.chip-remove:hover {
+  background: rgba(0,0,0,0.12);
+  color: var(--color-danger);
+}
+
+.chip-text-input {
+  flex: 1;
+  min-width: 140px;
+  border: none;
+  background: transparent;
+  font-size: 0.9rem;
+  color: var(--text-main);
+  outline: none;
+  padding: 0.15rem 0;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.chip-text-input::placeholder {
+  color: var(--text-placeholder);
+}
+
+/* ── Stepper (custom ± number controls) ────────────────────────────── */
+.stepper-wrapper {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border-input);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-input);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.stepper-wrapper:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.stepper-btn {
+  flex-shrink: 0;
+  width: 40px;
+  padding: 0;
+  font-size: 1.1rem;
+  font-weight: 500;
+  line-height: 1;
+  background: var(--stepper-btn-bg);
+  border: none;
+  border-radius: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+.stepper-btn:hover { background: var(--stepper-btn-hover); color: var(--text-main); }
+.stepper-btn:active { background: var(--border-input); }
+
+/* number input inside stepper: hide native spin arrows, fill remaining width */
+.stepper-wrapper input[type="number"] {
+  flex: 1;
+  border: none;
+  border-left: 1px solid var(--border-input);
+  border-right: 1px solid var(--border-input);
+  border-radius: 0;
+  background: var(--bg-input-focus);
+  text-align: center;
+  font-weight: 600;
+  padding: 0.65rem 0.25rem;
+  min-width: 0;
+  box-shadow: none !important;
+}
+.stepper-wrapper input[type="number"]:focus {
+  outline: none;
+  box-shadow: none !important;
+  border-color: var(--border-input);
+}
+/* Hide spinner arrows */
+.stepper-wrapper input[type="number"]::-webkit-inner-spin-button,
+.stepper-wrapper input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+.stepper-wrapper input[type="number"] { -moz-appearance: textfield; }
+
+[data-theme="dark"] .stepper-wrapper input[type="number"] {
+  background-color: var(--bg-input-focus) !important;
+  color: var(--text-main) !important;
+  border-color: var(--border-input) !important;
+}
+
+/* =====================================================================
    6. STANDARD BUTTONS
    ===================================================================== */
 
@@ -356,37 +560,70 @@ button.primary {
   background: var(--color-primary);
   color: white;
   border: none;
+  transition: background 0.18s ease, transform 0.14s ease, box-shadow 0.18s ease;
+}
+button.primary:hover {
+  background: var(--color-primary-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px var(--color-primary-shadow);
 }
 button.primary:active {
   background: var(--color-primary-hover);
+  transform: translateY(0);
+  box-shadow: none;
 }
 
 button.secondary {
-  background: var(--border-base);
+  background: var(--color-secondary-bg);
   color: var(--text-main);
   border: none;
+  transition: background 0.18s ease, transform 0.14s ease;
+}
+button.secondary:hover {
+  background: var(--border-input);
+  transform: translateY(-1px);
 }
 button.secondary:active {
   background: var(--border-input);
+  transform: translateY(0);
 }
 
 button.danger {
   background: var(--color-danger);
   color: white;
   border: none;
+  transition: background 0.18s ease, transform 0.14s ease, box-shadow 0.18s ease;
+}
+button.danger:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px var(--color-danger-shadow);
+}
+button.danger:active {
+  transform: translateY(0);
+  box-shadow: none;
 }
 
 #beginBtn {
   width: 100%;
-  padding: 0.85rem;
-  font-size: 1.15rem;
-  font-weight: 600;
+  padding: 0.9rem;
+  font-size: 1.1rem;
+  font-weight: 700;
   border-radius: 12px;
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+  letter-spacing: -0.01em;
+  box-shadow: 0 4px 16px var(--color-primary-shadow);
   margin-top: 0.5rem;
+  background: linear-gradient(135deg, var(--color-primary) 0%, #6366f1 100%);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+}
+#beginBtn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px var(--color-primary-shadow);
+  filter: brightness(1.05);
 }
 #beginBtn:active {
   transform: scale(0.98);
+  box-shadow: 0 2px 8px var(--color-primary-shadow);
 }
 
 /* =====================================================================
@@ -753,9 +990,263 @@ body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):
   line-height: 1.4;
 }
 .setup-footer a {
-  color: var(--primary);
+  color: var(--color-primary);
   text-decoration: none;
 }
 .setup-footer a:hover {
   text-decoration: underline;
+}
+
+/* =====================================================================
+   13. SCREEN TRANSITIONS
+   ===================================================================== */
+
+/*
+ * Strategy: every section that becomes visible via the CSS state machine
+ * gets a short slide-up + fade-in.  Because the state machine controls
+ * visibility via `display`, we can't animate `display` itself; instead
+ * we attach the animation to the section and let it play whenever the
+ * section enters the visual tree.
+ *
+ * The `animation-fill-mode: both` keeps the element invisible
+ * (opacity:0 / translateY offset) before the animation begins, which
+ * prevents the "flash of visible content" on slow devices.
+ */
+
+@keyframes screenSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes screenFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Primary screens — slide up */
+body.state-setup #setupScreen,
+body.state-export #exportScreen {
+  animation: screenSlideUp 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Assay screen — used across configured/poised/running, slides up once */
+body.state-configured #assayScreen,
+body.state-poised #assayScreen,
+body.state-running #assayScreen {
+  animation: screenSlideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Overlay screens (settings, guidelines, saved assays) — gentle fade */
+#settingsScreen:not([hidden]),
+#guidelinesScreen:not([hidden]),
+#savedAssaysScreen:not([hidden]) {
+  animation: screenSlideUp 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Live progress counter fades in when the run starts */
+body.state-running #liveProgress {
+  animation: screenFadeIn 0.2s ease both;
+}
+
+/* Metronome container fades in */
+body.state-running #visualMetronomeContainer {
+  animation: screenFadeIn 0.2s ease both;
+}
+
+
+/* =====================================================================
+   14. TOAST NOTIFICATIONS
+   ===================================================================== */
+
+/* Per-type colour tokens */
+:root {
+  --toast-success-bg:     #f0fdf4;
+  --toast-success-border: #86efac;
+  --toast-success-icon:   #16a34a;
+  --toast-success-bar:    #16a34a;
+
+  --toast-error-bg:       #fef2f2;
+  --toast-error-border:   #fca5a5;
+  --toast-error-icon:     #dc2626;
+  --toast-error-bar:      #dc2626;
+
+  --toast-warning-bg:     #fffbeb;
+  --toast-warning-border: #fcd34d;
+  --toast-warning-icon:   #d97706;
+  --toast-warning-bar:    #d97706;
+
+  --toast-info-bg:        #eff6ff;
+  --toast-info-border:    #93c5fd;
+  --toast-info-icon:      #2563eb;
+  --toast-info-bar:       #2563eb;
+}
+
+[data-theme="dark"] {
+  --toast-success-bg:     #052e16;
+  --toast-success-border: #15803d;
+
+  --toast-error-bg:       #450a0a;
+  --toast-error-border:   #b91c1c;
+
+  --toast-warning-bg:     #451a03;
+  --toast-warning-border: #b45309;
+
+  --toast-info-bg:        #1e1b4b;
+  --toast-info-border:    #3730a3;
+}
+
+/* Container: fixed bottom-right stack */
+#toastContainer {
+  position: fixed;
+  bottom: max(1.25rem, env(safe-area-inset-bottom, 1.25rem));
+  right: 1.25rem;
+  left: 1.25rem;
+  max-width: 420px;
+  /* Right-align on wide screens */
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  z-index: 9999;
+  pointer-events: none;  /* container transparent to pointer events */
+}
+
+/* Individual toast */
+.toast {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 0 0.65rem;
+  padding: 0.85rem 0.9rem 0.65rem;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  background: var(--bg-card);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.1);
+  position: relative;
+  overflow: hidden;
+  pointer-events: auto;
+
+  /* Enter animation */
+  opacity: 0;
+  transform: translateX(24px) scale(0.97);
+  transition: none;
+}
+
+/* Keyboard focus ring — only shown for keyboard navigation, not mouse clicks */
+.toast:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.toast--success { background: var(--toast-success-bg); border-color: var(--toast-success-border); }
+.toast--error   { background: var(--toast-error-bg);   border-color: var(--toast-error-border);   }
+.toast--warning { background: var(--toast-warning-bg); border-color: var(--toast-warning-border); }
+.toast--info    { background: var(--toast-info-bg);    border-color: var(--toast-info-border);    }
+
+/* Visible state (JS adds this class after a reflow) */
+@keyframes toastEnter {
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+.toast--visible {
+  animation: toastEnter 0.28s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* Exit state */
+@keyframes toastExit {
+  to {
+    opacity: 0;
+    transform: translateX(32px) scale(0.95);
+    max-height: 0;
+    margin-bottom: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+}
+.toast--exiting {
+  animation: toastExit 0.22s ease-in forwards;
+  overflow: hidden;
+}
+
+/* Icon */
+.toast__icon {
+  display: flex;
+  align-items: center;
+  padding-top: 0.05rem;
+  flex-shrink: 0;
+}
+.toast--success .toast__icon { color: var(--toast-success-icon); }
+.toast--error   .toast__icon { color: var(--toast-error-icon);   }
+.toast--warning .toast__icon { color: var(--toast-warning-icon); }
+.toast--info    .toast__icon { color: var(--toast-info-icon);    }
+
+/* Message text */
+.toast__message {
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-main);
+  padding-top: 0.05rem;
+  word-break: break-word;
+}
+
+/* Close button */
+.toast__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  margin: -0.1rem -0.15rem 0 0;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.toast__close:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.08);
+}
+[data-theme="dark"] .toast__close:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Auto-dismiss progress bar (spans the full width at the bottom) */
+.toast__progress {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 0 0 14px 14px;
+  margin: 0.45rem -0.9rem -0.65rem;
+  transform-origin: left center;
+  animation: toastProgress linear forwards;
+}
+.toast--success .toast__progress { background: var(--toast-success-bar); }
+.toast--error   .toast__progress { background: var(--toast-error-bar);   }
+.toast--warning .toast__progress { background: var(--toast-warning-bar); }
+.toast--info    .toast__progress { background: var(--toast-info-bar);    }
+
+@keyframes toastProgress {
+  from { transform: scaleX(1); }
+  to   { transform: scaleX(0); }
+}
+
+/* Mobile: full-width toasts at the bottom */
+@media (max-width: 480px) {
+  #toastContainer {
+    right: 0.75rem;
+    left: 0.75rem;
+    max-width: none;
+  }
 }

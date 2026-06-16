@@ -3,10 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <title>Touch Assay Timer</title>
-  
+
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#1f2937">
-  
+  <meta name="theme-color" content="#0f172a">
+  <meta name="description" content="Touch Assay Timer — precision stimulus–response timing for C. elegans touch assay experiments.">
+
+  <!-- Inter font for premium typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+
   <link rel="stylesheet" href="styles.css">
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icon-192.png">
@@ -23,9 +29,30 @@
   <header class="appHeader">
     <h1>Touch Assay Timer</h1>
 
-    <button id="overflowMenuButton" type="button" aria-label="Menu">
-      ⋮
-    </button>
+    <div class="header-actions">
+      <!-- Quick dark/light mode toggle -->
+      <button id="themeToggleBtn" type="button" aria-label="Toggle dark mode" class="header-icon-btn" title="Toggle theme">
+        <!-- Sun icon (shown in dark mode to switch to light) -->
+        <svg id="themeIconSun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="5"/>
+          <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+          <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </svg>
+        <!-- Moon icon (shown in light mode to switch to dark) -->
+        <svg id="themeIconMoon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+      </button>
+
+      <!-- Overflow menu -->
+      <button id="overflowMenuButton" type="button" aria-label="Menu" class="header-icon-btn">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
+        </svg>
+      </button>
+    </div>
 
     <div id="overflowMenu" hidden>
       <button id="openSavedAssays" type="button">Saved Assays</button>
@@ -50,8 +77,20 @@
           <label for="assayName">Experiment ID</label>
           <input type="text" id="assayName" required>
 
-          <label for="genotypes">Genotypes (comma-separated)</label>
-          <input type="text" id="genotypes" placeholder="WT, mutantA, mutantB" required>
+          <label id="genotypeInputLabel">Genotypes</label>
+          <!-- Hidden input keeps comma-list value; main.js reads this via .value.split(',') -->
+          <input type="hidden" id="genotypes">
+          <div class="chip-input-wrapper" id="chipInputWrapper" role="group" aria-labelledby="genotypeInputLabel">
+            <div id="chipList" class="chip-list" aria-live="polite"></div>
+            <input
+              type="text"
+              id="genotypeTextInput"
+              class="chip-text-input"
+              placeholder="Type & press Enter or comma…"
+              autocomplete="off"
+              spellcheck="false"
+            >
+          </div>
         </fieldset>
 
         <fieldset>
@@ -59,12 +98,20 @@
           <div class="input-row">
             <div class="input-group">
               <label for="temperature">Temperature (°C)</label>
-              <input type="number" id="temperature" value="20" required>
+              <div class="stepper-wrapper">
+                <button type="button" class="stepper-btn" data-target="temperature" data-delta="-1" aria-label="Decrease temperature">−</button>
+                <input type="number" id="temperature" value="20" required>
+                <button type="button" class="stepper-btn" data-target="temperature" data-delta="1" aria-label="Increase temperature">+</button>
+              </div>
             </div>
 
             <div class="input-group">
               <label for="humidity">Humidity (% RH)</label>
-              <input type="number" id="humidity" min="0" max="100" value="60" required>
+              <div class="stepper-wrapper">
+                <button type="button" class="stepper-btn" data-target="humidity" data-delta="-1" aria-label="Decrease humidity">−</button>
+                <input type="number" id="humidity" min="0" max="100" value="60" required>
+                <button type="button" class="stepper-btn" data-target="humidity" data-delta="1" aria-label="Increase humidity">+</button>
+              </div>
             </div>
           </div>
         </fieldset>
@@ -74,12 +121,20 @@
           <div class="input-row">
             <div class="input-group">
               <label for="ISI">Inter-stimulus Interval (s)</label>
-              <input type="number" id="ISI" min="0.1" step="0.1" value="1" required>
+              <div class="stepper-wrapper">
+                <button type="button" class="stepper-btn" data-target="ISI" data-delta="-0.1" aria-label="Decrease ISI">−</button>
+                <input type="number" id="ISI" min="0.1" step="0.1" value="1" required>
+                <button type="button" class="stepper-btn" data-target="ISI" data-delta="0.1" aria-label="Increase ISI">+</button>
+              </div>
             </div>
           
             <div class="input-group">
               <label for="stimCount">Total Number of Stimulations</label>
-              <input type="number" id="stimCount" min="1" step="1" value="100" required>
+              <div class="stepper-wrapper">
+                <button type="button" class="stepper-btn" data-target="stimCount" data-delta="-1" aria-label="Decrease stimulation count">−</button>
+                <input type="number" id="stimCount" min="1" step="1" value="100" required>
+                <button type="button" class="stepper-btn" data-target="stimCount" data-delta="1" aria-label="Increase stimulation count">+</button>
+              </div>
             </div>
           </div>
         </fieldset>
@@ -87,7 +142,11 @@
         <fieldset>
           <legend>Analysis</legend>
           <label for="binSize">Stimulations per bin (Bin Size)</label>
-          <input type="number" id="binSize" min="1" step="1" value="10" required>
+          <div class="stepper-wrapper">
+            <button type="button" class="stepper-btn" data-target="binSize" data-delta="-1" aria-label="Decrease bin size">−</button>
+            <input type="number" id="binSize" min="1" step="1" value="10" required>
+            <button type="button" class="stepper-btn" data-target="binSize" data-delta="1" aria-label="Increase bin size">+</button>
+          </div>
           
           <p id="binWarning" class="warning" hidden></p>
         </fieldset>
@@ -274,8 +333,133 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
-  
+
   <script type="module" src="./js/main.js"></script>
+
+  <script>
+  /* ─── Chip / Tag input for Genotypes ─────────────────────────────────────── */
+  (function () {
+    const wrapper    = document.getElementById('chipInputWrapper');
+    const chipList   = document.getElementById('chipList');
+    const textInput  = document.getElementById('genotypeTextInput');
+    const hiddenInput = document.getElementById('genotypes');
+
+    function getValues() {
+      return Array.from(chipList.querySelectorAll('.chip')).map(c => c.dataset.value);
+    }
+
+    function syncHidden() {
+      const vals = getValues();
+      hiddenInput.value = vals.join(',');
+    }
+
+    function addChip(raw) {
+      const val = raw.replace(/,/g, '').trim();
+      if (!val) return;
+      if (getValues().includes(val)) return; // no duplicates
+
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.dataset.value = val;
+
+      const label = document.createElement('span');
+      label.className = 'chip-label';
+      label.textContent = val;
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'chip-remove';
+      removeBtn.setAttribute('aria-label', 'Remove ' + val);
+      removeBtn.textContent = '✕';
+      removeBtn.addEventListener('click', function () {
+        chip.remove();
+        syncHidden();
+      });
+
+      chip.appendChild(label);
+      chip.appendChild(removeBtn);
+      chipList.appendChild(chip);
+      syncHidden();
+    }
+
+    textInput.addEventListener('keydown', function (e) {
+      if ((e.key === 'Enter' || e.key === ',') && textInput.value.trim()) {
+        e.preventDefault();
+        addChip(textInput.value);
+        textInput.value = '';
+      }
+      if (e.key === 'Backspace' && textInput.value === '') {
+        const chips = chipList.querySelectorAll('.chip');
+        if (chips.length) { chips[chips.length - 1].remove(); syncHidden(); }
+      }
+    });
+
+    textInput.addEventListener('blur', function () {
+      if (textInput.value.trim()) { addChip(textInput.value); textInput.value = ''; }
+    });
+
+    wrapper.addEventListener('click', function () { textInput.focus(); });
+  })();
+
+  /* ─── Custom ± Stepper buttons ───────────────────────────────────────────── */
+  document.querySelectorAll('.stepper-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = document.getElementById(btn.dataset.target);
+      if (!target) return;
+      var step = parseFloat(btn.dataset.delta);
+      var min  = target.min !== '' ? parseFloat(target.min) : -Infinity;
+      var max  = target.max !== '' ? parseFloat(target.max) :  Infinity;
+      var val  = parseFloat(target.value) || 0;
+      val = Math.min(max, Math.max(min, parseFloat((val + step).toFixed(10))));
+      target.value = val;
+      target.dispatchEvent(new Event('input',  { bubbles: true }));
+      target.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  });
+
+  /* ─── Quick header theme toggle ──────────────────────────────────────────── */
+  (function () {
+    var btn      = document.getElementById('themeToggleBtn');
+    var iconSun  = document.getElementById('themeIconSun');
+    var iconMoon = document.getElementById('themeIconMoon');
+
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      // Sync Settings-screen radios so they stay consistent
+      var radio = document.querySelector('input[name="themeMode"][value="' + theme + '"]');
+      if (radio) radio.checked = true;
+      // Swap icons: show Sun when dark (click = go light), Moon when light (click = go dark)
+      if (theme === 'dark') {
+        iconSun.removeAttribute('hidden');
+        iconMoon.setAttribute('hidden', '');
+      } else {
+        iconSun.setAttribute('hidden', '');
+        iconMoon.removeAttribute('hidden');
+      }
+    }
+
+    btn.addEventListener('click', function () {
+      var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      // Use the same localStorage key as main.js
+      try { localStorage.setItem('touchAssayTheme', next); } catch(e) {}
+      // Fire change on the matching radio so main.js listeners also trigger
+      var radio = document.querySelector('input[name="themeMode"][value="' + next + '"]');
+      if (radio) radio.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    // Keep icon in sync when Settings radios are changed by the user
+    document.querySelectorAll('input[name="themeMode"]').forEach(function (r) {
+      r.addEventListener('change', function () {
+        if (r.checked) applyTheme(r.value);
+      });
+    });
+
+    // Initialise icon to match whatever theme main.js will load
+    var saved = (function() { try { return localStorage.getItem('touchAssayTheme'); } catch(e) { return null; } })();
+    applyTheme(saved === 'dark' ? 'dark' : 'light');
+  })();
+  </script>
 
   <script>
     if ("serviceWorker" in navigator) {
