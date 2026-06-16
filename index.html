@@ -212,6 +212,9 @@
 
       <fieldset>
         <legend>Datasets</legend>
+        <label class="toggle-label" id="exportSelectAllLabel" style="padding-bottom: 0.5rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border-base);">
+          <input type="checkbox" id="exportSelectAll"> Select all datasets
+        </label>
         <div id="exportDatasetList">
           </div>
       </fieldset>
@@ -279,7 +282,9 @@
           <button id="downloadLogsBtn" class="secondary" type="button">Download Logs</button>
           <button id="clearLogsBtn" class="danger" type="button">Clear Logs</button>
         </div>
+        <p id="logCountBadge" style="font-size: 0.8rem; color: var(--text-muted); margin: 0.4rem 0 0;"></p>
       </fieldset>
+
       
       <button id="closeSettings" type="button" class="secondary">Back</button>
     </section>

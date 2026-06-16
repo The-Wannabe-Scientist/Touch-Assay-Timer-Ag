@@ -34,7 +34,7 @@
  *   }
  */
 
-import { initLogger, downloadLogs, clearLogs }       from "./logger.js";
+import { initLogger, downloadLogs, clearLogs, getLogCount } from "./logger.js";
 import { validateInputs, generateAutoID, binRunValues } from "./utils.js";
 import {
   createAssay, createTrial, createRun,
@@ -240,7 +240,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       temperature:     document.getElementById("temperature"),
       humidity:        document.getElementById("humidity"),
       genotypeSelect:  document.getElementById("genotypeSelect"),
-      selectAllAssays: document.getElementById("selectAllAssays"),
+      selectAllAssays:  document.getElementById("selectAllAssays"),
+      exportSelectAll:  document.getElementById("exportSelectAll"),
     },
     Screens: {
       setup:       document.getElementById("setupScreen"),
@@ -1079,6 +1080,8 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Populates the export dataset list with checkboxes for each trial and
    * the two pooled (completed-only vs all-trials) options.
    * Completed trials are pre-checked; abandoned/active are unchecked.
+   * Shows a per-genotype run breakdown alongside the totals (#7).
+   * Syncs the Select All checkbox and refreshes button state after building (#8, #9).
    *
    * @param {Object} assay - The full assay object.
    */
@@ -1094,12 +1097,23 @@ document.addEventListener("DOMContentLoaded", async () => {
       const total       = trial.runs.length;
       const eligible    = trial.runs.filter(r => r.eligibleForAnalysis).length;
 
+      // #7: per-genotype run count breakdown
+      const genotypeSummary = assay.genotypes
+        .map(g => {
+          const n = trial.runs.filter(r => r.genotype === g).length;
+          return n > 0 ? `${escapeHTML(g)}: ${n}` : null;
+        })
+        .filter(Boolean)
+        .join(", ");
+
       container.innerHTML +=
         `<label>` +
         `<input type="checkbox" data-dataset-type="trial" data-trial-id="${trial.trialId}"` +
         ` ${isCompleted ? "checked" : ""}>` +
-        ` Trial ${trial.trialIndex} — ${eligible} eligible (${total} total)` +
-        `${isAbandoned ? " (abandoned)" : ""}` +
+        ` Trial ${trial.trialIndex}` +
+        ` — ${eligible} eligible (${total} total)` +
+        (genotypeSummary ? ` &middot; ${genotypeSummary}` : "") +
+        (isAbandoned ? " <em>(abandoned)</em>" : "") +
         `</label>`;
     });
 
@@ -1110,6 +1124,34 @@ document.addEventListener("DOMContentLoaded", async () => {
     container.innerHTML +=
       `<label><input type="checkbox" data-dataset-type="pooled" ` +
       `data-include-abandoned="true"> Pooled (include abandoned)</label>`;
+
+    // Sync select-all state and button enabled state after rebuilding the list
+    syncExportSelectAll();
+    refreshExportButtonState();
+  }
+
+  /**
+   * Enables or disables the Export and Preview buttons based on whether at
+   * least one dataset checkbox is currently checked (#8).
+   */
+  function refreshExportButtonState() {
+    const anyChecked =
+      document.querySelectorAll("#exportDatasetList input[type='checkbox']:checked").length > 0;
+    UI.Buttons.exportExcel.disabled  = !anyChecked;
+    UI.Buttons.previewExcel.disabled = !anyChecked;
+  }
+
+  /**
+   * Updates the "Select all datasets" master checkbox to reflect the current
+   * checked / indeterminate state of all dataset checkboxes (#9).
+   */
+  function syncExportSelectAll() {
+    const all      = document.querySelectorAll("#exportDatasetList input[type='checkbox']");
+    const checked  = Array.from(all).filter(cb => cb.checked);
+    const selAll   = UI.Inputs.exportSelectAll;
+    if (!selAll) return;
+    selAll.checked       = checked.length === all.length && all.length > 0;
+    selAll.indeterminate = checked.length > 0 && checked.length < all.length;
   }
 
   /**
@@ -1692,18 +1734,100 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.previewModal.hidden = true;
   });
 
-  // ── Diagnostic logging ──────────────────────────────────────────────────
+  // ── Export dataset list — checkbox delegation (#8, #9) ──────────────────
+  // Refresh button state and keep the select-all checkbox in sync whenever
+  // any individual dataset checkbox changes.
+  document.getElementById("exportDatasetList").addEventListener("change", () => {
+    refreshExportButtonState();
+    syncExportSelectAll();
+  });
+
+  // Select-all master toggle: check/uncheck all dataset checkboxes (#9)
+  if (UI.Inputs.exportSelectAll) {
+    UI.Inputs.exportSelectAll.addEventListener("change", e => {
+      document.querySelectorAll("#exportDatasetList input[type='checkbox']")
+        .forEach(cb => { cb.checked = e.target.checked; });
+      refreshExportButtonState();
+    });
+  }
+
+  // ── SheetJS availability detection (#10) ────────────────────────────────
+  // The SheetJS script loads with `defer`, so we check after the window has
+  // fully loaded.  If it failed to load (e.g. offline), update button labels
+  // to "Export to CSV" so users are not surprised by the fallback format.
+  function updateExportButtonLabels() {
+    const isExcel = typeof XLSX !== "undefined";
+    if (!isExcel) {
+      const csvLabel = "Export to CSV";
+      const csvTitle = "SheetJS could not be loaded — data will export as CSV";
+      [UI.Buttons.exportExcel, UI.Buttons.exportFromPreview].forEach(btn => {
+        if (btn) { btn.textContent = csvLabel; btn.title = csvTitle; }
+      });
+    }
+  }
+
+  // Check once SheetJS has loaded (or failed) and again at window load as fallback
+  const xlsxScript = document.querySelector("script[src*=\"xlsx\"]");
+  if (xlsxScript) {
+    xlsxScript.addEventListener("load",  updateExportButtonLabels);
+    xlsxScript.addEventListener("error", updateExportButtonLabels);
+  }
+  window.addEventListener("load", updateExportButtonLabels);
+
+  // ── Diagnostic logging ───────────────────────────────────────────────────
+
+  /** Refreshes the log-count badge shown next to the Diagnostics buttons. */
+  async function refreshLogCount() {
+    try {
+      const count = await getLogCount();
+      const badge = document.getElementById("logCountBadge");
+      if (badge) badge.textContent = `${count} entr${count === 1 ? "y" : "ies"} stored`;
+    } catch {
+      // Non-critical — silently ignore if the DB is unavailable
+    }
+  }
+
   UI.Buttons.downloadLogs.addEventListener("click", async () => {
-    UI.Buttons.downloadLogs.textContent = "Processing...";
-    await downloadLogs();
-    UI.Buttons.downloadLogs.textContent = "Download Logs";
+    const btn = UI.Buttons.downloadLogs;
+    const originalText = btn.textContent;
+    btn.textContent = "Processing…";
+    btn.disabled = true;
+    try {
+      const count = await downloadLogs();
+      if (count === 0) {
+        showToast("No logs recorded yet.", "info");
+      } else {
+        showToast(`Downloaded ${count} log entr${count === 1 ? "y" : "ies"}.`, "success");
+      }
+    } catch (err) {
+      console.error("Log download failed:", err);
+      showToast("Failed to read logs from storage.", "error");
+    } finally {
+      btn.textContent = originalText;
+      btn.disabled = false;
+    }
   });
 
   UI.Buttons.clearLogs.addEventListener("click", async () => {
-    if (confirm("Are you sure you want to permanently delete all system logs?")) {
+    if (!confirm("Permanently delete all system logs? This cannot be undone.")) return;
+    try {
       await clearLogs();
-      alert("System logs cleared.");
+      await refreshLogCount();
+      showToast("System logs cleared.", "success");
+    } catch (err) {
+      console.error("Log clear failed:", err);
+      showToast("Failed to clear logs.", "error");
     }
   });
+
+  // Refresh the count badge every time the settings screen becomes visible
+  const settingsScreen = document.getElementById("settingsScreen");
+  if (settingsScreen) {
+    new MutationObserver(() => {
+      if (!settingsScreen.hidden) refreshLogCount();
+    }).observe(settingsScreen, { attributeFilter: ["hidden"] });
+  }
+  // Also populate on first load
+  refreshLogCount();
 
 });  // end DOMContentLoaded

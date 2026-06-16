@@ -9,10 +9,15 @@
  * the preview modal, or serialised to comma-separated text for CSV.
  *
  * Sheet layout for every trial/pooled section:
- *   1. Raw stimulus values   (one column per run, one row per stimulus)
- *   2. Binned percentages    (% response per bin) + mean/SEM summary
- *   3. Touch Index (binned)  (normalised against bin 1 baseline)
- *   4. Touch Index (analysed) (mean/SEM across animals per genotype)
+ *   1. Raw stimulus values    (one column per run, one row per stimulus)
+ *                              — includes Partial Bin Warning (#4) and Ineligible Reason (#5)
+ *   2. Binned percentages     (% response per bin) + mean / SEM / N summary (#2)
+ *   3. Touch Index (binned)   (normalised against bin 1 baseline)
+ *   4. Touch Index (analysed) (mean / SEM / N across animals per genotype) (#2)
+ *
+ * All three master export functions (Excel, CSV, HTML preview) share a single
+ * data-building pass via buildAllSections() (#12).  For pooled configs a shared
+ * run-binning cache avoids redundant computation (#11).
  *
  * Depends on SheetJS (XLSX) being loaded globally for Excel export.
  * The CSV fallback has no external dependencies.
@@ -36,9 +41,9 @@ import {
  * @type {Object.<string, string>}
  */
 export const RUN_STATUS_LABELS = {
-  completed:   "Completed",
+  completed:    "Completed",
   stoppedEarly: "Stopped Early",
-  abandoned:   "Abandoned"
+  abandoned:    "Abandoned"
 };
 
 
@@ -106,6 +111,26 @@ function calculateStats(values) {
   return { mean, sem };
 }
 
+/**
+ * Pre-computes binned percentages and Touch Index arrays for a flat list of
+ * runs, storing results in a Map keyed by run object.
+ *
+ * Used by buildAllSections() to share a single binning pass across all pooled
+ * sub-tables for the same config, avoiding redundant computation (#11).
+ *
+ * @param {Object[]} runs    - Flat array of run objects.
+ * @param {number}   binSize - Number of stimuli per bin.
+ * @returns {Map<Object, { binned: number[], ti: number[]|null }>}
+ */
+function buildRunCache(runs, binSize) {
+  const cache = new Map();
+  runs.forEach(run => {
+    const binned = binRunValues(run.values, binSize);
+    cache.set(run, { binned, ti: computeTouchIndexBins(binned) });
+  });
+  return cache;
+}
+
 
 /* ==========================================================================
    Layout & Formatting Helpers
@@ -115,8 +140,8 @@ function calculateStats(values) {
  * Applies column widths and text-wrap cell styles to a SheetJS worksheet.
  * The first column (labels) gets extra width; all others get equal narrower width.
  *
- * @param {Object}    sheet - A SheetJS worksheet object (mutated in place).
- * @param {any[][]}   data  - The 2D array that was used to create the sheet.
+ * @param {Object}  sheet - A SheetJS worksheet object (mutated in place).
+ * @param {any[][]} data  - The 2D array that was used to create the sheet.
  */
 export function applySheetLayout(sheet, data) {
   // Set column widths
@@ -137,6 +162,8 @@ export function applySheetLayout(sheet, data) {
  * Builds the assay-level metadata 2D array (shown on the first Excel sheet
  * and at the top of the HTML preview).
  *
+ * Includes both createdAt and lastModifiedAt (#6).
+ *
  * @param {Object} assay - The assay configuration object.
  * @returns {any[][]} Two-column table: [parameter, value].
  */
@@ -145,6 +172,7 @@ export function buildMetadata2D(assay) {
     ["Parameter",                    "Value"],
     ["Experiment ID",                assay.assayName],
     ["Date Created",                 new Date(assay.createdAt).toLocaleString()],
+    ["Last Modified",                assay.lastModifiedAt ? new Date(assay.lastModifiedAt).toLocaleString() : "N/A"],
     ["Genotypes",                    assay.genotypes.join(", ")],
     ["Temperature",                  assay.temperature !== undefined ? `${assay.temperature} °C` : "N/A"],
     ["Humidity",                     assay.humidity    !== undefined ? `${assay.humidity} % RH`  : "N/A"],
@@ -238,28 +266,36 @@ export function buildTouchAnalysedSheet2D({ percentAnalysed2D, tiBinned2D, tiAna
  * Runs that did not complete the full protocol show empty cells for
  * stimulus indices beyond their recorded values.
  *
+ * Now includes Partial Bin Warning (#4) and Ineligible Reason (#5) header rows
+ * so QC information is preserved in every raw export.
+ *
  * @param {Object} trial - A single trial object with a `runs` array.
  * @param {Object} assay - The parent assay (provides stimCount and genotypes).
- * @returns {any[][]} 2D array: [genotypeRow, animalRow, statusRow, ...stimulusRows]
+ * @returns {any[][]} 2D array: [genotypeRow, animalRow, statusRow, partialBinRow, ineligibleRow, ...stimulusRows]
  */
 export function buildTrialRaw2D(trial, assay) {
   const { stimCount, genotypes } = assay;
   const runsByGenotype = groupAndSortRuns(trial.runs, genotypes, false);
 
-  // Build the three header rows
-  const headerGenotype = ["Genotype"];
-  const headerAnimal   = ["Animal"];
-  const headerStatus   = ["Run Status"];
+  // Build the five header rows
+  const headerGenotype   = ["Genotype"];
+  const headerAnimal     = ["Animal"];
+  const headerStatus     = ["Run Status"];
+  const headerPartialBin = ["Partial Bin Warning"];  // #4
+  const headerIneligible = ["Ineligible Reason"];    // #5
 
   genotypes.forEach((g, gi) => {
     runsByGenotype[g].forEach(run => {
       headerGenotype.push(g);
       headerAnimal.push(`Animal ${run.animalIndex}`);
       headerStatus.push(RUN_STATUS_LABELS[run.status] ?? run.status);
+      headerPartialBin.push(run.partialBinWarning ?? "");
+      headerIneligible.push(run.ineligibleReason  ?? "");
     });
     // Blank spacer column between genotypes (not after the last one)
     if (gi < genotypes.length - 1) {
       headerGenotype.push(""); headerAnimal.push(""); headerStatus.push("");
+      headerPartialBin.push(""); headerIneligible.push("");
     }
   });
 
@@ -277,16 +313,16 @@ export function buildTrialRaw2D(trial, assay) {
     rows.push(row);
   }
 
-  return [headerGenotype, headerAnimal, headerStatus, ...rows];
+  return [headerGenotype, headerAnimal, headerStatus, headerPartialBin, headerIneligible, ...rows];
 }
 
 /**
  * Builds the binned percentage table for a single trial, with a summary
- * section showing mean ± SEM per genotype per bin.
+ * section showing mean ± SEM ± N per genotype per bin (#2).
  *
  * @param {Object} trial - A single trial object with a `runs` array.
  * @param {Object} assay - The parent assay (provides genotypes and binSize).
- * @returns {any[][]} 2D array with raw bins then mean/SEM summary rows.
+ * @returns {any[][]} 2D array with raw bins then mean/SEM/N summary rows.
  */
 export function buildTrialBinned2D(trial, assay) {
   const { genotypes, binSize } = assay;
@@ -321,7 +357,7 @@ export function buildTrialBinned2D(trial, assay) {
   const rawRows     = [];
   const summaryRows = [];
   const summaryHeader = ["Bin"];
-  genotypes.forEach(g => summaryHeader.push(`${g}_Mean`, `${g}_SEM`));
+  genotypes.forEach(g => summaryHeader.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
 
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
     const start    = binIndex * binSize + 1;
@@ -339,14 +375,14 @@ export function buildTrialBinned2D(trial, assay) {
     });
     rawRows.push(rawRow);
 
-    // Summary (mean ± SEM) row
+    // Summary (mean ± SEM ± N) row
     const sumRow = [binLabel];
     genotypes.forEach(g => {
       const values = runsByGenotype[g]
         .map(run => binnedByRun.get(run)?.[binIndex])  // optional chain: run may not be in map
         .filter(v => v !== undefined);
       const { mean, sem } = calculateStats(values);
-      sumRow.push(mean, sem);
+      sumRow.push(mean, sem, values.length);  // #2
     });
     summaryRows.push(sumRow);
   }
@@ -421,7 +457,7 @@ export function buildTrialTouchIndexBinned2D(trial, assay) {
 }
 
 /**
- * Builds the Touch Index summary (mean ± SEM per genotype per bin) for a single trial.
+ * Builds the Touch Index summary (mean ± SEM ± N per genotype per bin) for a single trial (#2).
  *
  * @param {Object} trial - A single trial object with a `runs` array.
  * @param {Object} assay - The parent assay (provides genotypes and binSize).
@@ -449,7 +485,7 @@ export function buildTrialTouchIndexAnalysed2D(trial, assay) {
   );
 
   const header = ["Bin"];
-  genotypes.forEach(g => header.push(`${g}_Mean`, `${g}_SEM`));
+  genotypes.forEach(g => header.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
 
   const rows = [];
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
@@ -461,7 +497,7 @@ export function buildTrialTouchIndexAnalysed2D(trial, assay) {
       // Filter out undefined entries (from runs with fewer bins)
       const values        = runsByGenotype[g].map(r => r[binIndex]).filter(v => v != null);
       const { mean, sem } = calculateStats(values);
-      row.push(mean, sem);
+      row.push(mean, sem, values.length);  // #2
     });
     rows.push(row);
   }
@@ -476,24 +512,31 @@ export function buildTrialTouchIndexAnalysed2D(trial, assay) {
 
 /**
  * Builds the raw stimulus-by-stimulus table across all selected trials (pooled).
- * Identical structure to buildTrialRaw2D but spans multiple trials,
- * adding Trial and Trial Animal header rows.
+ * Identical structure to buildTrialRaw2D but spans multiple trials, adding
+ * Trial and Trial Animal header rows.
  *
- * @param {Object} assay      - The full assay object.
- * @param {Object} [options]  - Filter options passed to collectPooledRuns.
- * @returns {any[][]} 2D array with five header rows then stimulus rows.
+ * Now includes Partial Bin Warning (#4) and Ineligible Reason (#5) header rows.
+ * Accepts pre-collected runs via optional _runs parameter to avoid re-querying
+ * when called from buildAllSections (#11).
+ *
+ * @param {Object}   assay    - The full assay object.
+ * @param {Object}   [options]- Filter options passed to collectPooledRuns.
+ * @param {Object[]} [_runs]  - Pre-collected runs (optional, avoids re-querying).
+ * @returns {any[][]} 2D array with seven header rows then stimulus rows.
  */
-export function buildPooledRaw2D(assay, options = {}) {
+export function buildPooledRaw2D(assay, options = {}, _runs = null) {
   const { stimCount, genotypes } = assay;
-  const runs           = collectPooledRuns(assay, options);
+  const runs           = _runs || collectPooledRuns(assay, options);
   const runsByGenotype = groupAndSortRuns(runs, genotypes, true);
 
-  // Five header rows for pooled view (extra Trial context vs per-trial view)
+  // Seven header rows for pooled view
   const hGenotype    = ["Genotype"];
   const hAnimal      = ["Animal"];
   const hTrial       = ["Trial"];
   const hTrialAnimal = ["Trial Animal"];
   const hStatus      = ["Run Status"];
+  const hPartialBin  = ["Partial Bin Warning"];  // #4
+  const hIneligible  = ["Ineligible Reason"];    // #5
 
   genotypes.forEach((g, gi) => {
     runsByGenotype[g].forEach(run => {
@@ -502,9 +545,12 @@ export function buildPooledRaw2D(assay, options = {}) {
       hTrial.push(`Trial ${run.trialIndex}`);
       hTrialAnimal.push(`Animal ${run.animalIndex}`);
       hStatus.push(RUN_STATUS_LABELS[run.status] ?? run.status);
+      hPartialBin.push(run.partialBinWarning ?? "");
+      hIneligible.push(run.ineligibleReason  ?? "");
     });
     if (gi < genotypes.length - 1) {
-      [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus].forEach(h => h.push(""));
+      [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hPartialBin, hIneligible]
+        .forEach(h => h.push(""));
     }
   });
 
@@ -520,19 +566,24 @@ export function buildPooledRaw2D(assay, options = {}) {
     rows.push(row);
   }
 
-  return [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, ...rows];
+  return [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hPartialBin, hIneligible, ...rows];
 }
 
 /**
- * Builds the pooled binned percentage table with mean ± SEM summary rows.
+ * Builds the pooled binned percentage table with mean ± SEM ± N summary rows (#2).
  *
- * @param {Object} assay     - The full assay object.
- * @param {Object} [options] - Filter options passed to collectPooledRuns.
+ * Accepts pre-collected runs and a pre-built binning cache to avoid redundant
+ * computation when called from buildAllSections (#11).
+ *
+ * @param {Object}   assay    - The full assay object.
+ * @param {Object}   [options]- Filter options.
+ * @param {Object[]} [_runs]  - Pre-collected runs (optional).
+ * @param {Map}      [_cache] - Pre-built run cache from buildRunCache (optional).
  * @returns {any[][]} 2D array with header rows, raw bin rows, and summary rows.
  */
-export function buildPooledBinned2D(assay, options = {}) {
+export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = null) {
   const { genotypes, binSize } = assay;
-  const runs           = collectPooledRuns(assay, options);
+  const runs           = _runs || collectPooledRuns(assay, options);
   const runsByGenotype = groupAndSortRuns(runs, genotypes, true);
 
   const hGenotype    = ["Genotype"];
@@ -554,19 +605,27 @@ export function buildPooledBinned2D(assay, options = {}) {
     }
   });
 
-  // Pre-compute bins for all runs
+  // Use provided cache or build one locally
   const binnedByRun = new Map();
   let maxBinCount   = 0;
-  runs.forEach(run => {
-    const bins = binRunValues(run.values, binSize);
-    binnedByRun.set(run, bins);
-    maxBinCount = Math.max(maxBinCount, bins.length);
-  });
+
+  if (_cache) {
+    _cache.forEach(({ binned }, run) => {
+      binnedByRun.set(run, binned);
+      maxBinCount = Math.max(maxBinCount, binned.length);
+    });
+  } else {
+    runs.forEach(run => {
+      const bins = binRunValues(run.values, binSize);
+      binnedByRun.set(run, bins);
+      maxBinCount = Math.max(maxBinCount, bins.length);
+    });
+  }
 
   const rawRows     = [];
   const summaryRows = [];
   const summaryHeader = ["Bin"];
-  genotypes.forEach(g => summaryHeader.push(`${g}_Mean`, `${g}_SEM`));
+  genotypes.forEach(g => summaryHeader.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
 
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
     const start    = binIndex * binSize + 1;
@@ -591,7 +650,7 @@ export function buildPooledBinned2D(assay, options = {}) {
         .map(run => binnedByRun.get(run)?.[binIndex])
         .filter(v => v !== undefined);
       const { mean, sem } = calculateStats(values);
-      sumRow.push(mean, sem);
+      sumRow.push(mean, sem, values.length);  // #2
     });
     summaryRows.push(sumRow);
   }
@@ -608,13 +667,18 @@ export function buildPooledBinned2D(assay, options = {}) {
 /**
  * Builds the pooled Touch Index (raw per-run) table across all selected trials.
  *
- * @param {Object} assay     - The full assay object.
- * @param {Object} [options] - Filter options passed to collectPooledRuns.
+ * Accepts pre-collected runs and a pre-built cache to avoid redundant
+ * computation when called from buildAllSections (#11).
+ *
+ * @param {Object}   assay    - The full assay object.
+ * @param {Object}   [options]- Filter options passed to collectPooledRuns.
+ * @param {Object[]} [_runs]  - Pre-collected runs (optional).
+ * @param {Map}      [_cache] - Pre-built run cache (optional).
  * @returns {any[][]} 2D array: [genotypeRow, animalRow, ...binRows]
  */
-export function buildPooledTouchIndexBinned2D(assay, options = {}) {
+export function buildPooledTouchIndexBinned2D(assay, options = {}, _runs = null, _cache = null) {
   const { genotypes, binSize } = assay;
-  const runs           = collectPooledRuns(assay, options);
+  const runs           = _runs || collectPooledRuns(assay, options);
   const runsByGenotype = groupAndSortRuns(runs, genotypes, true);
 
   const headerGenotype = ["Genotype"];
@@ -630,18 +694,28 @@ export function buildPooledTouchIndexBinned2D(assay, options = {}) {
     }
   });
 
-  const binnedByRun = new Map();
-  let maxBinCount   = 0;
+  // Use provided cache or compute locally
+  const tiBinnedByRun = new Map();
+  let maxBinCount     = 0;
 
-  runs.forEach(run => {
-    const binned = binRunValues(run.values, binSize);
-    const ti     = computeTouchIndexBins(binned);
-    // Excluded runs (null TI) are omitted from the map; handled by collectTouchIndexExclusions.
-    if (ti) {
-      binnedByRun.set(run, ti);
-      maxBinCount = Math.max(maxBinCount, ti.length);
-    }
-  });
+  if (_cache) {
+    _cache.forEach(({ ti }, run) => {
+      if (ti) {
+        tiBinnedByRun.set(run, ti);
+        maxBinCount = Math.max(maxBinCount, ti.length);
+      }
+    });
+  } else {
+    runs.forEach(run => {
+      const binned = binRunValues(run.values, binSize);
+      const ti     = computeTouchIndexBins(binned);
+      // Runs with a null TI (zero baseline) are excluded from the map.
+      if (ti) {
+        tiBinnedByRun.set(run, ti);
+        maxBinCount = Math.max(maxBinCount, ti.length);
+      }
+    });
+  }
 
   const rows = [];
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
@@ -651,7 +725,7 @@ export function buildPooledTouchIndexBinned2D(assay, options = {}) {
 
     genotypes.forEach((g, gi) => {
       runsByGenotype[g].forEach(run => {
-        const bins = binnedByRun.get(run);
+        const bins = tiBinnedByRun.get(run);
         row.push(bins && binIndex < bins.length ? bins[binIndex] : "");
       });
       if (gi < genotypes.length - 1) row.push("");
@@ -663,37 +737,50 @@ export function buildPooledTouchIndexBinned2D(assay, options = {}) {
 }
 
 /**
- * Builds the pooled Touch Index summary (mean ± SEM per genotype per bin)
- * across all selected trials.
+ * Builds the pooled Touch Index summary (mean ± SEM ± N per genotype per bin) (#2).
  *
- * @param {Object} assay     - The full assay object.
- * @param {Object} [options] - Filter options passed to collectPooledRuns.
+ * Accepts pre-collected runs and a pre-built cache to avoid redundant
+ * computation when called from buildAllSections (#11).
+ *
+ * @param {Object}   assay    - The full assay object.
+ * @param {Object}   [options]- Filter options passed to collectPooledRuns.
+ * @param {Object[]} [_runs]  - Pre-collected runs (optional).
+ * @param {Map}      [_cache] - Pre-built run cache (optional).
  * @returns {any[][]} 2D array: [header, ...summaryRows]
  */
-export function buildPooledTouchIndexAnalysed2D(assay, options = {}) {
+export function buildPooledTouchIndexAnalysed2D(assay, options = {}, _runs = null, _cache = null) {
   const { genotypes, binSize } = assay;
-  const runs = collectPooledRuns(assay, options);
+  const runs = _runs || collectPooledRuns(assay, options);
 
   // Group TI arrays by genotype (only non-excluded runs contribute)
-  const runsByGenotype = {};
-  genotypes.forEach(g => (runsByGenotype[g] = []));
+  const tiByGenotype = {};
+  genotypes.forEach(g => (tiByGenotype[g] = []));
 
-  runs.forEach(run => {
-    const binned = binRunValues(run.values, binSize);
-    const ti     = computeTouchIndexBins(binned);
-    // Excluded runs (null TI) are silently omitted; collectTouchIndexExclusions handles them.
-    if (ti && runsByGenotype[run.genotype]) {
-      runsByGenotype[run.genotype].push(ti);
-    }
-  });
+  if (_cache) {
+    runs.forEach(run => {
+      const entry = _cache.get(run);
+      if (entry?.ti && tiByGenotype[run.genotype]) {
+        tiByGenotype[run.genotype].push(entry.ti);
+      }
+    });
+  } else {
+    runs.forEach(run => {
+      const binned = binRunValues(run.values, binSize);
+      const ti     = computeTouchIndexBins(binned);
+      // Excluded runs (null TI) are silently omitted.
+      if (ti && tiByGenotype[run.genotype]) {
+        tiByGenotype[run.genotype].push(ti);
+      }
+    });
+  }
 
   const maxBinCount = Math.max(
-    ...Object.values(runsByGenotype).flat().map(r => r.length),
+    ...Object.values(tiByGenotype).flat().map(r => r.length),
     0
   );
 
   const header = ["Bin"];
-  genotypes.forEach(g => header.push(`${g}_Mean`, `${g}_SEM`));
+  genotypes.forEach(g => header.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
 
   const rows = [];
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
@@ -702,14 +789,109 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}) {
     const row   = [`Bin ${binIndex + 1} (${start}–${end})`];
 
     genotypes.forEach(g => {
-      const values        = runsByGenotype[g].map(r => r[binIndex]).filter(v => v != null);
+      const values        = tiByGenotype[g].map(r => r[binIndex]).filter(v => v != null);
       const { mean, sem } = calculateStats(values);
-      row.push(mean, sem);
+      row.push(mean, sem, values.length);  // #2
     });
     rows.push(row);
   }
 
   return [header, ...rows];
+}
+
+
+/* ==========================================================================
+   Master Section Builder (#12)
+   ========================================================================== */
+
+/**
+ * Builds a flat, ordered array of export sections for every selected dataset.
+ * Always produces: Assay Metadata first, then trial/pooled sections in config
+ * order, then Touch Index Exclusions (if any excluded runs exist).
+ *
+ * This is the single source of truth consumed by performExcelExport,
+ * performCSVExport, and generatePreviewHTML, eliminating ~100 lines of
+ * duplicated looping logic (#12).
+ *
+ * For pooled configs, collectPooledRuns is called once per config and a shared
+ * binning cache is passed to all three pooled sub-table builders, avoiding
+ * redundant binRunValues calls (#11).
+ *
+ * @param {Object}   assay         - The full assay object.
+ * @param {Object[]} exportConfigs - Array of dataset selection configs from getExportConfigs().
+ * @returns {Array<{ name: string, excelSheetName: string, data2D: any[][] }>}
+ */
+export function buildAllSections(assay, exportConfigs) {
+  const sections = [];
+
+  // ── Metadata (always first) ──────────────────────────────────────────────
+  sections.push({
+    name:           "Assay Metadata",
+    excelSheetName: "Assay_Metadata",
+    data2D:         buildMetadata2D(assay)
+  });
+
+  exportConfigs.forEach(config => {
+
+    // ── Per-trial sections ─────────────────────────────────────────────────
+    if (config.type === "trial") {
+      const trial = assay.trials.find(t => String(t.trialId) === String(config.trialId));
+      if (!trial) return;
+
+      sections.push({
+        name:           `Trial ${trial.trialIndex} - Raw`,
+        excelSheetName: `Trial_${trial.trialIndex}_Raw`,
+        data2D:         buildTrialRaw2D(trial, assay)
+      });
+      sections.push({
+        name:           `Trial ${trial.trialIndex} - Analysed`,
+        excelSheetName: `Trial_${trial.trialIndex}_Analysed`,
+        data2D:         buildTouchAnalysedSheet2D({
+          percentAnalysed2D: buildTrialBinned2D(trial, assay),
+          tiBinned2D:        buildTrialTouchIndexBinned2D(trial, assay),
+          tiAnalysed2D:      buildTrialTouchIndexAnalysed2D(trial, assay)
+        })
+      });
+    }
+
+    // ── Pooled (cross-trial) sections ──────────────────────────────────────
+    if (config.type === "pooled") {
+      const suffix   = config.includeAbandoned ? "All Trials"  : "Completed Trials";
+      const xlSuffix = config.includeAbandoned ? "AllTrials"   : "CompletedTrials";
+      const poolOpt  = { includeAbandoned: config.includeAbandoned };
+
+      // Collect runs once and build a shared binning cache for this config (#11)
+      const runs  = collectPooledRuns(assay, poolOpt);
+      const cache = buildRunCache(runs, assay.binSize);
+
+      sections.push({
+        name:           `Pooled (${suffix}) - Raw`,
+        excelSheetName: `Pooled_${xlSuffix}_Raw`,
+        data2D:         buildPooledRaw2D(assay, poolOpt, runs)
+      });
+      sections.push({
+        name:           `Pooled (${suffix}) - Analysed`,
+        excelSheetName: `Pooled_${xlSuffix}_Analysed`,
+        data2D:         buildTouchAnalysedSheet2D({
+          percentAnalysed2D: buildPooledBinned2D(assay, poolOpt, runs, cache),
+          tiBinned2D:        buildPooledTouchIndexBinned2D(assay, poolOpt, runs, cache),
+          tiAnalysed2D:      buildPooledTouchIndexAnalysed2D(assay, poolOpt, runs, cache)
+        })
+      });
+    }
+  });
+
+  // ── Touch Index exclusions (appended only if any runs were excluded) ──────
+  const tiExclusions = collectTouchIndexExclusions(assay);
+  if (tiExclusions.length > 0) {
+    sections.push({
+      name:           "Touch Index Exclusions",
+      excelSheetName: "TouchIndex_Exclusions",
+      data2D:         [["Trial", "Genotype", "Animal", "Reason"], ...tiExclusions]
+    });
+  }
+
+  return sections;
 }
 
 
@@ -721,10 +903,8 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}) {
  * Orchestrates the creation of a multi-sheet Excel workbook and triggers
  * a browser file download.
  *
- * Sheet order:
- *   1. Assay_Metadata
- *   2. One pair of Raw / Analysed sheets per selected trial or pooled dataset
- *   3. TouchIndex_Exclusions (if any runs were excluded)
+ * All sections are built via buildAllSections() (#12), which also applies
+ * the shared run-binning cache for pooled configs (#11).
  *
  * Requires SheetJS (XLSX) to be loaded globally. If XLSX is unavailable,
  * the caller should use performCSVExport() instead.
@@ -735,67 +915,20 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}) {
  */
 export function performExcelExport(currentAssay, exportConfigs) {
   try {
-    const wb = XLSX.utils.book_new();
+    const wb       = XLSX.utils.book_new();
+    const sections = buildAllSections(currentAssay, exportConfigs);
 
-    // 1. Metadata sheet (always included)
-    const metaSheet = XLSX.utils.aoa_to_sheet(buildMetadata2D(currentAssay));
-    metaSheet["!cols"] = [{ wch: 25 }, { wch: 40 }];
-    XLSX.utils.book_append_sheet(wb, metaSheet, "Assay_Metadata");
+    sections.forEach(({ excelSheetName, data2D }) => {
+      const sheet = XLSX.utils.aoa_to_sheet(data2D);
 
-    // 2. One pair of sheets per selected dataset config
-    exportConfigs.forEach(config => {
-
-      if (config.type === "trial") {
-        const trial = currentAssay.trials.find(t => String(t.trialId) === String(config.trialId));
-        if (!trial) return;
-
-        // Raw stimulus data
-        const raw2D   = buildTrialRaw2D(trial, currentAssay);
-        const rawSheet = XLSX.utils.aoa_to_sheet(raw2D);
-        applySheetLayout(rawSheet, raw2D);
-        XLSX.utils.book_append_sheet(wb, rawSheet, `Trial_${trial.trialIndex}_Raw`);
-
-        // Binned & Touch Index analysis
-        const analysed2D = buildTouchAnalysedSheet2D({
-          percentAnalysed2D: buildTrialBinned2D(trial, currentAssay),
-          tiBinned2D:        buildTrialTouchIndexBinned2D(trial, currentAssay),
-          tiAnalysed2D:      buildTrialTouchIndexAnalysed2D(trial, currentAssay)
-        });
-        const analysedSheet = XLSX.utils.aoa_to_sheet(analysed2D);
-        applySheetLayout(analysedSheet, analysed2D);
-        XLSX.utils.book_append_sheet(wb, analysedSheet, `Trial_${trial.trialIndex}_Analysed`);
+      if (excelSheetName === "Assay_Metadata") {
+        sheet["!cols"] = [{ wch: 25 }, { wch: 40 }];
+      } else {
+        applySheetLayout(sheet, data2D);
       }
 
-      if (config.type === "pooled") {
-        const suffix  = config.includeAbandoned ? "AllTrials" : "CompletedTrials";
-        const poolOpt = { includeAbandoned: config.includeAbandoned };
-
-        // Pooled raw
-        const raw2D   = buildPooledRaw2D(currentAssay, poolOpt);
-        const rawSheet = XLSX.utils.aoa_to_sheet(raw2D);
-        applySheetLayout(rawSheet, raw2D);
-        XLSX.utils.book_append_sheet(wb, rawSheet, `Pooled_${suffix}_Raw`);
-
-        // Pooled analysis
-        const analysed2D = buildTouchAnalysedSheet2D({
-          percentAnalysed2D: buildPooledBinned2D(currentAssay, poolOpt),
-          tiBinned2D:        buildPooledTouchIndexBinned2D(currentAssay, poolOpt),
-          tiAnalysed2D:      buildPooledTouchIndexAnalysed2D(currentAssay, poolOpt)
-        });
-        const analysedSheet = XLSX.utils.aoa_to_sheet(analysed2D);
-        applySheetLayout(analysedSheet, analysed2D);
-        XLSX.utils.book_append_sheet(wb, analysedSheet, `Pooled_${suffix}_Analysed`);
-      }
+      XLSX.utils.book_append_sheet(wb, sheet, excelSheetName);
     });
-
-    // 3. Exclusions sheet (only if there are excluded runs)
-    const tiExclusions = collectTouchIndexExclusions(currentAssay);
-    if (tiExclusions.length > 0) {
-      const exclusion2D    = [["Trial", "Genotype", "Animal", "Reason"], ...tiExclusions];
-      const exclusionSheet = XLSX.utils.aoa_to_sheet(exclusion2D);
-      applySheetLayout(exclusionSheet, exclusion2D);
-      XLSX.utils.book_append_sheet(wb, exclusionSheet, "TouchIndex_Exclusions");
-    }
 
     XLSX.writeFile(wb, `${currentAssay.assayName || "Assay"}_Export.xlsx`);
     return { success: true };
@@ -834,9 +967,13 @@ function arrayToCSVRow(row) {
  * Used automatically when SheetJS is unavailable (offline / CDN failure)
  * or when the Excel export fails.
  *
+ * All sections are built via buildAllSections() (#12).
+ * The download anchor is clicked directly without appending it to the DOM,
+ * which is sufficient in all modern browsers (#13).
+ *
  * Each dataset section is preceded by a "=== Section Name ===" heading line
- * and separated by a blank line, making the file human-readable in a text editor
- * as well as importable into spreadsheet applications.
+ * and separated by a blank line, making the file human-readable in a text
+ * editor as well as importable into spreadsheet applications.
  *
  * @param {Object}   currentAssay  - The full assay object.
  * @param {Object[]} exportConfigs - Array of dataset selection configs.
@@ -844,77 +981,24 @@ function arrayToCSVRow(row) {
  */
 export function performCSVExport(currentAssay, exportConfigs) {
   try {
-    const sections = [];
+    const sections = buildAllSections(currentAssay, exportConfigs);
 
-    // Metadata is always the first section
-    sections.push({ name: "Assay Metadata", data: buildMetadata2D(currentAssay) });
-
-    exportConfigs.forEach(config => {
-      if (config.type === "trial") {
-        const trial = currentAssay.trials.find(t => String(t.trialId) === String(config.trialId));
-        if (!trial) return;
-
-        sections.push({
-          name: `Trial ${trial.trialIndex} - Raw`,
-          data: buildTrialRaw2D(trial, currentAssay)
-        });
-        sections.push({
-          name: `Trial ${trial.trialIndex} - Analysed`,
-          data: buildTouchAnalysedSheet2D({
-            percentAnalysed2D: buildTrialBinned2D(trial, currentAssay),
-            tiBinned2D:        buildTrialTouchIndexBinned2D(trial, currentAssay),
-            tiAnalysed2D:      buildTrialTouchIndexAnalysed2D(trial, currentAssay)
-          })
-        });
-      }
-
-      if (config.type === "pooled") {
-        const suffix  = config.includeAbandoned ? "All Trials" : "Completed Trials";
-        const poolOpt = { includeAbandoned: config.includeAbandoned };
-
-        sections.push({
-          name: `Pooled (${suffix}) - Raw`,
-          data: buildPooledRaw2D(currentAssay, poolOpt)
-        });
-        sections.push({
-          name: `Pooled (${suffix}) - Analysed`,
-          data: buildTouchAnalysedSheet2D({
-            percentAnalysed2D: buildPooledBinned2D(currentAssay, poolOpt),
-            tiBinned2D:        buildPooledTouchIndexBinned2D(currentAssay, poolOpt),
-            tiAnalysed2D:      buildPooledTouchIndexAnalysed2D(currentAssay, poolOpt)
-          })
-        });
-      }
-    });
-
-    // Append exclusions section if any runs were excluded from TI
-    const tiExclusions = collectTouchIndexExclusions(currentAssay);
-    if (tiExclusions.length > 0) {
-      sections.push({
-        name: "Touch Index Exclusions",
-        data: [["Trial", "Genotype", "Animal", "Reason"], ...tiExclusions]
-      });
-    }
-
-    // Serialise sections to a single CSV string
     let csv = "";
     sections.forEach((section, i) => {
       if (i > 0) csv += "\n";
       csv += `=== ${section.name} ===\n`;
-      section.data.forEach(row => {
+      section.data2D.forEach(row => {
         csv += (row && row.length > 0) ? arrayToCSVRow(row) + "\n" : "\n";
       });
     });
 
-    // Trigger file download
+    // Trigger file download — no DOM append/remove needed in modern browsers (#13)
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
     a.href     = url;
     a.download = `${currentAssay.assayName || "Assay"}_Export.csv`;
-    document.body.appendChild(a);
     a.click();
-    document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
     return { success: true };
@@ -927,61 +1011,15 @@ export function performCSVExport(currentAssay, exportConfigs) {
 
 /**
  * Generates the full HTML content for the data preview modal.
- * Renders every selected dataset as an HTML table, plus the metadata
- * block and any Touch Index exclusions.
+ * All sections are built via buildAllSections() (#12).
  *
  * @param {Object}   currentAssay  - The full assay object.
  * @param {Object[]} exportConfigs - Array of dataset selection configs.
  * @returns {string} Complete HTML string ready to inject into the modal container.
  */
 export function generatePreviewHTML(currentAssay, exportConfigs) {
-  let html = buildHtmlTableFrom2D("Assay Metadata", buildMetadata2D(currentAssay));
-
-  exportConfigs.forEach(config => {
-    if (config.type === "trial") {
-      const trial = currentAssay.trials.find(t => String(t.trialId) === String(config.trialId));
-      if (!trial) return;
-
-      html += buildHtmlTableFrom2D(
-        `Trial ${trial.trialIndex} - Raw`,
-        buildTrialRaw2D(trial, currentAssay)
-      );
-      html += buildHtmlTableFrom2D(
-        `Trial ${trial.trialIndex} - Analysed`,
-        buildTouchAnalysedSheet2D({
-          percentAnalysed2D: buildTrialBinned2D(trial, currentAssay),
-          tiBinned2D:        buildTrialTouchIndexBinned2D(trial, currentAssay),
-          tiAnalysed2D:      buildTrialTouchIndexAnalysed2D(trial, currentAssay)
-        })
-      );
-    }
-
-    if (config.type === "pooled") {
-      const suffix  = config.includeAbandoned ? "All Trials" : "Completed Trials";
-      const poolOpt = { includeAbandoned: config.includeAbandoned };
-
-      html += buildHtmlTableFrom2D(
-        `Pooled (${suffix}) - Raw`,
-        buildPooledRaw2D(currentAssay, poolOpt)
-      );
-      html += buildHtmlTableFrom2D(
-        `Pooled (${suffix}) - Analysed`,
-        buildTouchAnalysedSheet2D({
-          percentAnalysed2D: buildPooledBinned2D(currentAssay, poolOpt),
-          tiBinned2D:        buildPooledTouchIndexBinned2D(currentAssay, poolOpt),
-          tiAnalysed2D:      buildPooledTouchIndexAnalysed2D(currentAssay, poolOpt)
-        })
-      );
-    }
-  });
-
-  const tiExclusions = collectTouchIndexExclusions(currentAssay);
-  if (tiExclusions.length > 0) {
-    html += buildHtmlTableFrom2D(
-      "Touch Index Exclusions",
-      [["Trial", "Genotype", "Animal", "Reason"], ...tiExclusions]
-    );
-  }
-
-  return html;
+  const sections = buildAllSections(currentAssay, exportConfigs);
+  return sections
+    .map(({ name, data2D }) => buildHtmlTableFrom2D(name, data2D))
+    .join("");
 }

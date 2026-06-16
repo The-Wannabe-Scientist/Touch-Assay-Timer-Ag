@@ -552,3 +552,61 @@ export async function clearAllLogs() {
     tx.onerror    = reject;
   });
 }
+
+/**
+ * Returns the total number of log entries currently stored.
+ * Uses a count() cursor which is faster than getAll() for large stores.
+ *
+ * @returns {Promise<number>}
+ */
+export async function getLogCount() {
+  const db  = await openDB();
+  const tx  = db.transaction(STORES.LOGS, "readonly");
+  const req = tx.objectStore(STORES.LOGS).count();
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+/**
+ * Deletes the oldest log entries so that at most `keepCount` remain.
+ * Iterates a cursor (ascending autoIncrement key order) and deletes until
+ * the store is within the desired limit.
+ *
+ * @param {number} keepCount - Maximum number of entries to retain.
+ * @returns {Promise<void>}
+ */
+export async function pruneOldestLogs(keepCount) {
+  const db    = await openDB();
+  const tx    = db.transaction(STORES.LOGS, "readwrite");
+  const store = tx.objectStore(STORES.LOGS);
+
+  const total = await new Promise((resolve, reject) => {
+    const req = store.count();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+
+  const deleteCount = total - keepCount;
+  if (deleteCount <= 0) return; // Nothing to prune
+
+  let deleted = 0;
+  const cursorReq = store.openCursor(); // ascending by key → oldest first
+  await new Promise((resolve, reject) => {
+    cursorReq.onsuccess = e => {
+      const cursor = e.target.result;
+      if (!cursor || deleted >= deleteCount) { resolve(); return; }
+      cursor.delete();
+      deleted++;
+      cursor.continue();
+    };
+    cursorReq.onerror = () => reject(cursorReq.error);
+  });
+
+  // Wait for the overall transaction to commit
+  await new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror    = () => reject(tx.error);
+  });
+}

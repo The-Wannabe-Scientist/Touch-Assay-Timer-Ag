@@ -11,9 +11,26 @@
  *
  * FATAL is used for uncaught errors and unhandled Promise rejections that
  * would not otherwise appear in a console.error call.
+ *
+ * Log rotation:
+ *   The store is capped at MAX_LOG_ENTRIES. Once the cap is reached, the
+ *   oldest entries are pruned automatically before each new write so that
+ *   diagnostic data from the most-recent session is always available.
  */
 
-import { saveLog, getAllLogs, clearAllLogs } from "./db.js";
+import { saveLog, getAllLogs, clearAllLogs, getLogCount, pruneOldestLogs } from "./db.js";
+
+
+/* ==========================================================================
+   Configuration
+   ========================================================================== */
+
+/**
+ * Maximum number of log entries retained in IndexedDB.
+ * When this limit is exceeded, the oldest entries are pruned before a new
+ * one is written, keeping the store bounded.
+ */
+const MAX_LOG_ENTRIES = 500;
 
 
 /* ==========================================================================
@@ -64,7 +81,8 @@ function formatMessage(args) {
 }
 
 /**
- * Constructs a log entry and persists it to IndexedDB asynchronously.
+ * Constructs a log entry, prunes the store if needed, then persists the
+ * entry to IndexedDB asynchronously.
  * Failures here are swallowed (logging to the original console) to avoid
  * an infinite error loop if the DB itself is broken.
  *
@@ -79,9 +97,15 @@ function logToDB(level, args) {
     url:     window.location.href
   };
 
-  saveLog(entry).catch(err =>
-    originalConsole.error("Logger failed to save entry to DB:", err)
-  );
+  (async () => {
+    try {
+      // Prune before writing so the cap is never exceeded by more than 1
+      await pruneOldestLogs(MAX_LOG_ENTRIES - 1);
+      await saveLog(entry);
+    } catch (err) {
+      originalConsole.error("Logger failed to save entry to DB:", err);
+    }
+  })();
 }
 
 
@@ -122,18 +146,20 @@ export function initLogger() {
  * plain-text file. The file is named with the current Unix timestamp to
  * avoid overwriting previous downloads.
  *
- * If no logs exist, shows a brief alert and returns without creating a file.
+ * Throws if the DB read fails — callers should catch and surface the error.
+ *
+ * @returns {Promise<number>} The number of log entries that were downloaded.
+ * @throws {Error} If the database read fails.
  */
 export async function downloadLogs() {
-  const logs = await getAllLogs();
+  const logs = await getAllLogs(); // let errors propagate to the caller
 
   if (logs.length === 0) {
-    alert("No logs recorded yet.");
-    return;
+    return 0;
   }
 
   // Build human-readable log text
-  let logText = "Touch Assay Timer — System Logs\n";
+  let logText  = "Touch Assay Timer — System Logs\n";
   logText     += "================================\n\n";
 
   logs.forEach(log => {
@@ -152,13 +178,25 @@ export async function downloadLogs() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+
+  return logs.length;
 }
 
 /**
  * Permanently erases all persisted log entries from IndexedDB.
  * This action is irreversible — the UI should confirm with the user first.
+ *
+ * @returns {Promise<void>}
  */
 export async function clearLogs() {
   await clearAllLogs();
   console.log("System logs cleared by user.");
 }
+
+/**
+ * Returns the current number of stored log entries.
+ * Convenience re-export so callers don't need to import from db.js directly.
+ *
+ * @returns {Promise<number>}
+ */
+export { getLogCount };
