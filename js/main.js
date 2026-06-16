@@ -1301,6 +1301,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     executeTapAction();
   });
 
+  // Fallback for older Android WebViews that don't implement Pointer Events
+  // reliably. The hardware debounce (TAP_COOLDOWN_MS = 80ms) prevents double-
+  // firing when both pointerdown and touchstart fire on the same interaction.
+  UI.Buttons.tap.addEventListener("touchstart", e => {
+    e.preventDefault();  // Suppress the following 300ms-delayed click
+    executeTapAction();
+  }, { passive: false });
+
   // ── Space bar shortcut ──────────────────────────────────────────────────
   document.addEventListener("keydown", event => {
     // Ignore held-down keys (auto-repeat)
@@ -1612,10 +1620,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll('input[name="themeMode"]').forEach(input => {
     input.addEventListener("change", e => {
       if (!e.target.checked) return;
-      document.documentElement.setAttribute("data-theme", e.target.value);
+      const theme = e.target.value;
+      document.documentElement.setAttribute("data-theme", theme);
+      // Keep the Android status bar / browser chrome color in sync
       document.querySelector('meta[name="theme-color"]')
-        ?.setAttribute("content", e.target.value === "dark" ? "#1f2937" : "#ffffff");
-      localStorage.setItem("touchAssayTheme", e.target.value);
+        ?.setAttribute("content", theme === "dark" ? "#0f172a" : "#f1f5f9");
+      localStorage.setItem("touchAssayTheme", theme);
     });
   });
 

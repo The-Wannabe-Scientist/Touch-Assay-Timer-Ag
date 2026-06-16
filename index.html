@@ -89,9 +89,13 @@
               type="text"
               id="genotypeTextInput"
               class="chip-text-input"
-              placeholder="Type & press Enter or comma…"
+              placeholder="Type &amp; press Enter or comma…"
               autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
               spellcheck="false"
+              inputmode="text"
+              enterkeyhint="done"
             >
           </div>
         </fieldset>
@@ -103,7 +107,7 @@
               <label for="temperature">Temperature (°C)</label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="temperature" data-delta="-1" aria-label="Decrease temperature">−</button>
-                <input type="number" id="temperature" value="20" required>
+                <input type="number" id="temperature" value="20" required inputmode="decimal">
                 <button type="button" class="stepper-btn" data-target="temperature" data-delta="1" aria-label="Increase temperature">+</button>
               </div>
             </div>
@@ -112,7 +116,7 @@
               <label for="humidity">Humidity (% RH)</label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="humidity" data-delta="-1" aria-label="Decrease humidity">−</button>
-                <input type="number" id="humidity" min="0" max="100" value="60" required>
+                <input type="number" id="humidity" min="0" max="100" value="60" required inputmode="decimal">
                 <button type="button" class="stepper-btn" data-target="humidity" data-delta="1" aria-label="Increase humidity">+</button>
               </div>
             </div>
@@ -126,7 +130,7 @@
               <label for="ISI">Inter-stimulus Interval (s)</label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="ISI" data-delta="-0.1" aria-label="Decrease ISI">−</button>
-                <input type="number" id="ISI" min="0.1" step="0.1" value="1" required>
+                <input type="number" id="ISI" min="0.1" step="0.1" value="1" required inputmode="decimal">
                 <button type="button" class="stepper-btn" data-target="ISI" data-delta="0.1" aria-label="Increase ISI">+</button>
               </div>
             </div>
@@ -135,7 +139,7 @@
               <label for="stimCount">Total Number of Stimulations</label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="stimCount" data-delta="-1" aria-label="Decrease stimulation count">−</button>
-                <input type="number" id="stimCount" min="1" step="1" value="100" required>
+                <input type="number" id="stimCount" min="1" step="1" value="100" required inputmode="numeric">
                 <button type="button" class="stepper-btn" data-target="stimCount" data-delta="1" aria-label="Increase stimulation count">+</button>
               </div>
             </div>
@@ -147,7 +151,7 @@
           <label for="binSize">Stimulations per bin (Bin Size)</label>
           <div class="stepper-wrapper">
             <button type="button" class="stepper-btn" data-target="binSize" data-delta="-1" aria-label="Decrease bin size">−</button>
-            <input type="number" id="binSize" min="1" step="1" value="10" required>
+            <input type="number" id="binSize" min="1" step="1" value="10" required inputmode="numeric">
             <button type="button" class="stepper-btn" data-target="binSize" data-delta="1" aria-label="Increase bin size">+</button>
           </div>
           
@@ -397,6 +401,17 @@
       }
     });
 
+    // Android soft keyboards often don't fire keydown for comma; handle via input event.
+    textInput.addEventListener('input', function () {
+      if (textInput.value.includes(',')) {
+        const parts = textInput.value.split(',');
+        // Last part stays in the input; all earlier parts become chips.
+        const pending = parts.pop();
+        parts.forEach(function (p) { addChip(p); });
+        textInput.value = pending;
+      }
+    });
+
     textInput.addEventListener('blur', function () {
       if (textInput.value.trim()) { addChip(textInput.value); textInput.value = ''; }
     });
@@ -439,6 +454,9 @@
         iconSun.setAttribute('hidden', '');
         iconMoon.removeAttribute('hidden');
       }
+      // Keep Android status bar / browser chrome colour in sync
+      var metaTheme = document.querySelector('meta[name="theme-color"]');
+      if (metaTheme) metaTheme.setAttribute('content', theme === 'dark' ? '#0f172a' : '#f1f5f9');
     }
 
     btn.addEventListener('click', function () {

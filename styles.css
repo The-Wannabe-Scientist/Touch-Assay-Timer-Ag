@@ -219,7 +219,7 @@ body {
 
 #overflowMenu {
   position: absolute;
-  top: 60px;
+  top: calc(100% + 4px);
   /* Aligns the menu natively with the constrained header column */
   right: max(12px, calc(50vw - 400px));
   background: var(--bg-card);
@@ -502,7 +502,7 @@ select option:disabled {
 
 .chip-text-input {
   flex: 1;
-  min-width: 140px;
+  min-width: min(140px, 40%);
   border: none;
   background: transparent;
   font-size: 0.9rem;
@@ -810,7 +810,7 @@ th {
   background: rgba(0, 0, 0, 0.5);
   display: flex; justify-content: center; align-items: center;
   z-index: 1000;
-  padding: 1rem;
+  padding: max(1rem, env(safe-area-inset-top)) 1rem max(1rem, env(safe-area-inset-bottom));
 }
 
 .modal-content {
