@@ -1304,8 +1304,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.addEventListener("keydown", event => {
     // Ignore held-down keys (auto-repeat)
     if (event.repeat) return;
-    // Always allow normal keyboard input in form fields
-    if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "SELECT") return;
 
     const onAssayScreen = currentState === STATES.CONFIGURED
                        || currentState === STATES.POISED
@@ -1313,19 +1311,17 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (onAssayScreen) {
       // On the assay screen, Space and Enter must NEVER activate any focused
-      // element (Stop Run, Finish Trial, Hide Progress, Select Genotype, etc.).
-      // Prevent the browser's default button/select activation immediately,
-      // before any early return, so no focused control can be triggered.
+      // element — including the genotype <select>, buttons, etc.
+      // Block the browser default BEFORE any early-return so the <select>
+      // dropdown cannot be opened and no button can be activated.
       if (event.key === " " || event.key === "Enter") {
         event.preventDefault();
       }
 
-      // Non-activation keys (e.g. Tab for focus movement) pass through —
-      // but Space and Enter are fully owned by this handler on the assay screen.
+      // Non-activation keys (Tab, arrow keys, etc.) pass through unaffected.
       if (event.key !== " " && event.key !== "Enter") return;
 
-      // Enter is silently swallowed — prevents accidental button activation
-      // but does not trigger a tap (Space is the only tap key).
+      // Enter is silently swallowed — no tap, no button activation.
       if (event.key !== " ") return;
 
       // RUNNING: tap unconditionally takes priority over everything
@@ -1345,7 +1341,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // ── Non-assay screens: Space only ────────────────────────────────────
+    // ── Non-assay screens ─────────────────────────────────────────────────
+    // Allow normal keyboard input in form fields (text inputs, selects, etc.)
+    if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "SELECT") return;
+
+    // Space only: dismiss toast or trigger tap
     if (event.key === " ") {
       event.preventDefault();
       if (document.activeElement?.classList.contains("toast")) return;
