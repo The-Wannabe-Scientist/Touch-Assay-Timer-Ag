@@ -254,14 +254,17 @@ body {
    ===================================================================== */
 
 main {
+  /* Fill all available vertical space so assay tap zone is maximized */
   min-height: calc(100svh - 60px);
   display: flex;
   flex-direction: column;
   padding: 1rem;
-  /* Desktop Scaling: Locks everything into a clean central column */
+  /* Desktop: lock into a clean central column */
   width: 100%;
-  max-width: 800px;
-  margin: 0 auto; 
+  max-width: 860px;
+  margin: 0 auto;
+  /* Prevent content overflow on very small screens */
+  overflow-x: hidden;
 }
 
 section {
@@ -667,15 +670,29 @@ button.danger:active {
   display: flex;
   flex-direction: column;
   flex: 1;
+  /* Ensures assay screen always fills the available height */
+  min-height: 0;
 }
 
-#assayScreen > header, #assayScreen > footer {
-  padding: 0.75rem;
+#assayScreen > header {
+  padding: 0.65rem 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
+
+#assayScreen > header select {
+  flex: 1;
+  min-width: 0;
+}
+
 #assayScreen > footer {
   display: flex;
   gap: 0.75rem;
   justify-content: space-between;
+  padding: 0.75rem;
+  /* Stick footer to bottom on all screen sizes */
+  flex-shrink: 0;
 }
 
 #tapZone {
@@ -683,8 +700,10 @@ button.danger:active {
   display: flex;
   flex-direction: column;
   padding: 0.75rem;
-  gap: 0.75rem;
+  gap: 0.6rem;
   align-items: center;
+  /* Ensure tap zone fills remaining height */
+  min-height: 0;
 }
 
 /* VISUAL METRONOME ANIMATION BAR */
@@ -712,26 +731,39 @@ button.danger:active {
 #tapButton {
   flex: 1;
   width: 100%;
-  
-  /* NEW: Dynamic minimum height for massive mobile touch targets */
-  min-height: max(280px, 35vh); 
-  
-  font-size: clamp(2.5rem, 8vw, 4rem); /* Slightly larger minimum font size too */
+
+  /* Dynamic minimum height — generous on mobile, grows on desktop via flex:1 */
+  min-height: max(260px, 38vh);
+
+  font-size: clamp(2rem, 7vw, 3.5rem);
   font-weight: 500;
   border: none;
   border-radius: 20px;
   background: var(--tap-bg);
   color: var(--tap-text);
   box-shadow: 0 8px 20px rgba(0,0,0,0.15);
-  
+
   touch-action: manipulation;
   user-select: none;
   -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
-  
+
   transition: transform 40ms linear, background-color 50ms linear;
+
+  /* Ensure long text labels don't break layout */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-/* Desktop sizing is naturally handled by flex: 1 taking up the remaining screen height */
+
+/* Desktop: tap button grows larger since there is more vertical real-estate */
+@media (min-width: 769px) {
+  #tapButton {
+    font-size: clamp(2.5rem, 4vw, 4rem);
+    min-height: max(320px, 40vh);
+    border-radius: 24px;
+  }
+}
 
 #tapButton:active {
   transform: scale(0.996);
@@ -1283,6 +1315,507 @@ body.state-running #visualMetronomeContainer {
   to   { transform: scaleX(0); }
 }
 
+
+/* =====================================================================
+   SETTINGS PAGE — Premium Redesign
+   ===================================================================== */
+
+/* ── Settings screen: transparent card so fieldsets stand out ──────── */
+#settingsScreen {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  gap: 0;
+}
+
+/* ── Page header (Settings h2 with icon) ──────────────────────────── */
+.settings-page-header {
+  margin-bottom: 1.25rem;
+}
+
+.settings-page-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 1.45rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: var(--text-main);
+}
+
+.settings-page-header h2 svg {
+  color: var(--color-primary);
+  flex-shrink: 0;
+}
+
+/* ── Each settings section (fieldset) as an elevated card ─────────── */
+.settings-card {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-base) !important;
+  border-radius: 16px !important;
+  padding: 1.2rem !important;
+  margin-bottom: 1rem !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 1.1rem !important;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.06) !important;
+  transition: box-shadow 0.2s ease !important;
+}
+
+.settings-card:focus-within {
+  box-shadow: 0 4px 20px rgba(79, 70, 229, 0.1), 0 1px 4px rgba(0, 0, 0, 0.08) !important;
+}
+
+/* ── Section legend with inline icon ──────────────────────────────── */
+.settings-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-primary);
+  padding: 0 !important;
+  margin: 0 0 0.1rem !important;
+  float: none !important; /* Override browser fieldset legend float */
+}
+
+.settings-legend svg {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+/* ── Theme: segmented pill control ────────────────────────────────── */
+.theme-segmented {
+  display: flex;
+  background: var(--bg-body);
+  border: 1px solid var(--border-base);
+  border-radius: 12px;
+  padding: 4px;
+  gap: 4px;
+}
+
+.theme-segment {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.theme-segment input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.theme-segment-inner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 9px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.theme-segment input[type="radio"]:checked + .theme-segment-inner {
+  background: var(--bg-card);
+  color: var(--color-primary);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.12), 0 0 0 1px var(--border-base);
+}
+
+.theme-segment-inner:hover {
+  background: var(--bg-card);
+  color: var(--text-main);
+}
+
+.theme-segment input[type="radio"]:focus-visible + .theme-segment-inner {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* ── Audio sliders ─────────────────────────────────────────────────── */
+.settings-slider-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.settings-slider-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-slider-label {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem !important;
+  font-weight: 600 !important;
+  color: var(--text-main) !important;
+  cursor: pointer;
+}
+
+.settings-slider-label svg {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.settings-slider-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 4rem;
+  padding: 0.2rem 0.55rem;
+  background: var(--color-primary);
+  color: #fff;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  transition: transform 0.1s ease;
+}
+
+/* Pulse animation when badge value changes */
+@keyframes badgePop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+
+.settings-slider-badge.pop {
+  animation: badgePop 0.2s ease-out;
+}
+
+.settings-slider-track-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.slider-icon-min,
+.slider-icon-max {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* ── Custom range slider styling ───────────────────────────────────── */
+.settings-range {
+  /* Reset */
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  border: none !important;
+  padding: 0 !important;
+  background: none !important;
+  box-shadow: none !important;
+  background-color: var(--border-base) !important;
+  outline: none !important;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+
+.settings-range:focus-visible {
+  outline: 2px solid var(--color-primary) !important;
+  outline-offset: 3px !important;
+}
+
+/* WebKit thumb */
+.settings-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  border: 3px solid var(--bg-card);
+  box-shadow: 0 0 0 1px var(--color-primary), 0 2px 8px rgba(79, 70, 229, 0.35);
+  cursor: pointer;
+  transition: box-shadow 0.18s ease, transform 0.14s ease;
+}
+
+.settings-range::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 0 1px var(--color-primary), 0 4px 14px rgba(79, 70, 229, 0.5);
+  transform: scale(1.12);
+}
+
+.settings-range:active::-webkit-slider-thumb {
+  transform: scale(0.95);
+}
+
+/* Firefox thumb */
+.settings-range::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  border: 3px solid var(--bg-card);
+  box-shadow: 0 0 0 1px var(--color-primary), 0 2px 8px rgba(79, 70, 229, 0.35);
+  cursor: pointer;
+  transition: box-shadow 0.18s ease, transform 0.14s ease;
+}
+
+.settings-range::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border-base);
+}
+
+/* ── Hint text below sliders ───────────────────────────────────────── */
+.settings-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: 0;
+  line-height: 1.45;
+  font-style: italic;
+}
+
+/* ── Voice option 2×2 card grid ───────────────────────────────────── */
+.voice-option-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.7rem;
+}
+
+.voice-option-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  padding: 0.85rem;
+  background: var(--bg-body);
+  border: 2px solid var(--border-base);
+  border-radius: 14px;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease, transform 0.14s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  min-height: 92px;
+}
+
+.voice-option-card input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.voice-option-card:hover {
+  border-color: var(--color-primary);
+  background: var(--bg-card);
+  box-shadow: 0 2px 10px rgba(79, 70, 229, 0.1);
+  transform: translateY(-1px);
+}
+
+.voice-option-card:active {
+  transform: scale(0.97);
+}
+
+/* Selected state */
+.voice-option-card:has(input[type="radio"]:checked) {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--bg-card));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 18%, transparent), 0 2px 8px rgba(79, 70, 229, 0.15);
+}
+
+.voice-option-card:has(input[type="radio"]:focus-visible) {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Selected checkmark overlay */
+.voice-option-card:has(input[type="radio"]:checked)::after {
+  content: "";
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-primary) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E") center / 11px no-repeat;
+}
+
+.voice-option-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+  margin-bottom: 0.1rem;
+}
+
+.voice-option-title {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.voice-option-desc {
+  font-size: 0.73rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+/* ── Warmup toggle row ─────────────────────────────────────────────── */
+.settings-toggle-row {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  cursor: pointer;
+  padding: 0.1rem 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.settings-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  flex: 1;
+}
+
+.settings-toggle-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.settings-toggle-sub {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* iOS-style switch */
+.settings-switch {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+}
+
+.settings-switch-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  pointer-events: none;
+}
+
+.settings-switch-track {
+  display: flex;
+  align-items: center;
+  width: 50px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--border-input);
+  padding: 3px;
+  transition: background 0.22s ease;
+  cursor: pointer;
+  position: relative;
+}
+
+.settings-switch-input:checked ~ .settings-switch-track {
+  background: var(--color-primary);
+}
+
+.settings-switch-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+  flex-shrink: 0;
+}
+
+.settings-switch-input:checked ~ .settings-switch-track .settings-switch-thumb {
+  transform: translateX(22px);
+}
+
+.settings-switch-input:focus-visible ~ .settings-switch-track {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Warmup duration input below toggle */
+.settings-warmup-input {
+  padding: 0.85rem;
+  background: var(--bg-body);
+  border-radius: 12px;
+  border: 1px solid var(--border-base);
+}
+
+.settings-warmup-input label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-main);
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+}
+
+.settings-warmup-input input[type="number"] {
+  margin-top: 0.4rem;
+  width: 100%;
+}
+
+/* ── Back button with icon ─────────────────────────────────────────── */
+.settings-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.25rem;
+}
+
+/* ── Dark-mode adjustments ─────────────────────────────────────────── */
+[data-theme="dark"] .settings-range {
+  background-color: #334155 !important;
+}
+
+[data-theme="dark"] .theme-segmented {
+  background: var(--bg-input);
+}
+
+[data-theme="dark"] .voice-option-card {
+  background: var(--bg-input);
+}
+
+[data-theme="dark"] .voice-option-card:hover {
+  background: var(--bg-card);
+}
+
+[data-theme="dark"] .settings-warmup-input {
+  background: var(--bg-input);
+}
+
+/* Mobile: stack voice option grid to single column on narrow screens */
+@media (max-width: 380px) {
+  .voice-option-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Mobile: full-width toasts at the bottom */
 @media (max-width: 480px) {
   #toastContainer {
@@ -1568,7 +2101,7 @@ button.secondary.btn-loading::before {
 /* ── Global touch-friendly sizing ─────────────────────────────────────── */
 @media (pointer: coarse) {
   /* All interactive elements get minimum 44px touch targets on touch devices */
-  button, select, input[type="checkbox"], input[type="radio"] {
+  button, select {
     min-height: 44px;
   }
 
@@ -1580,12 +2113,12 @@ button.secondary.btn-loading::before {
 
   /* Bigger slider thumbs on touch */
   input[type="range"]::-webkit-slider-thumb {
-    width: 24px;
-    height: 24px;
+    width: 26px;
+    height: 26px;
   }
   input[type="range"]::-moz-range-thumb {
-    width: 24px;
-    height: 24px;
+    width: 26px;
+    height: 26px;
   }
 
   /* Slightly bigger chip remove buttons */
@@ -1593,6 +2126,11 @@ button.secondary.btn-loading::before {
     width: 22px;
     height: 22px;
     font-size: 0.75rem;
+  }
+
+  /* Assay footer buttons always tall enough to tap easily */
+  #assayScreen > footer button {
+    min-height: 48px;
   }
 }
 
@@ -1603,7 +2141,7 @@ button.secondary.btn-loading::before {
     padding: 0.5rem;
   }
 
-  /* Section cards: less border radius, tighter padding */
+  /* Section cards: slightly tighter */
   section {
     border-radius: 10px;
     padding: 0.75rem;
@@ -1612,14 +2150,15 @@ button.secondary.btn-loading::before {
 
   /* Header: compact padding */
   .appHeader {
-    padding: 0.65rem 0.75rem;
+    padding: 0.6rem 0.75rem;
     padding-left: max(0.75rem, env(safe-area-inset-left));
     padding-right: max(0.75rem, env(safe-area-inset-right));
   }
 
   /* Slightly smaller header title on phones */
   .header-home-btn {
-    font-size: 0.95rem;
+    font-size: 0.9rem;
+    gap: 0.35rem;
   }
   .header-logo {
     width: 22px;
@@ -1650,16 +2189,40 @@ button.secondary.btn-loading::before {
     margin-bottom: 1rem;
   }
 
+  /* Assay header: ensure select fills the available width nicely */
+  #assayScreen > header {
+    padding: 0.5rem 0.6rem;
+  }
+  #genotypeSelect {
+    font-size: 0.95rem;
+    padding: 0.5rem 2rem 0.5rem 0.6rem;
+  }
+
+  /* Toggle progress: compact pill style on phones */
+  #toggleProgress {
+    font-size: 0.82rem;
+    padding: 0.35rem 0.65rem;
+    min-height: 36px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Tap zone: tighten padding */
+  #tapZone {
+    padding: 0.5rem;
+    gap: 0.5rem;
+  }
+
   /* Tap button: maximise touch area on phones */
   #tapButton {
-    min-height: max(240px, 40vh);
-    font-size: clamp(2rem, 10vw, 3.5rem);
+    min-height: max(200px, 38vh);
+    font-size: clamp(1.75rem, 9vw, 3rem);
     border-radius: 16px;
   }
 
   /* Progress panel: less height on small screens */
   #assayProgress {
-    max-height: 25vh;
+    max-height: 22vh;
   }
 
   /* Export / nav buttons: stack vertically on tiny screens */
@@ -1680,17 +2243,18 @@ button.secondary.btn-loading::before {
     width: 100%;
   }
 
-  /* Assay screen footer: stack buttons if space is tight */
+  /* Assay screen footer: stack buttons */
   #assayScreen > footer {
     flex-wrap: wrap;
     gap: 0.5rem;
+    padding: 0.6rem;
   }
   #assayScreen > footer button {
-    flex: 1 1 45%;
-    min-width: 120px;
+    flex: 1 1 calc(50% - 0.25rem);
+    min-width: 110px;
   }
 
-  /* Modal: edge-to-edge on mobile */
+  /* Modal: bottom-sheet style on mobile */
   .modal-overlay {
     padding: 0;
     align-items: flex-end;
@@ -1714,7 +2278,7 @@ button.secondary.btn-loading::before {
 
   /* Setup header */
   .setupHeader h2 {
-    font-size: 1.25rem;
+    font-size: 1.2rem;
   }
 
   /* Smaller table text on phones */
@@ -1747,12 +2311,6 @@ button.secondary.btn-loading::before {
     flex: 1 1 100%;
   }
 
-  /* Toggle progress button: tighter */
-  #toggleProgress {
-    font-size: 0.85rem;
-    padding: 0.4rem 0.75rem;
-  }
-
   /* Bulk actions in Saved Assays */
   .bulk-actions {
     flex-direction: column !important;
@@ -1761,6 +2319,41 @@ button.secondary.btn-loading::before {
   }
   .bulk-actions button {
     width: 100% !important;
+  }
+
+  /* Settings: voice option grid stays 2-col except very small */
+  .voice-option-card {
+    min-height: 80px;
+    padding: 0.7rem;
+  }
+  .voice-option-icon {
+    font-size: 1.2rem;
+  }
+  .voice-option-desc {
+    font-size: 0.7rem;
+  }
+
+  /* Live progress text: slightly smaller */
+  .live-progress {
+    font-size: 1rem;
+    margin-bottom: 0.25rem;
+  }
+}
+
+/* ── Extra-small screens (≤ 360px) ────────────────────────────────────── */
+@media (max-width: 360px) {
+  .header-home-btn span {
+    /* Hide title text on very narrow phones, keep logo */
+    display: none;
+  }
+
+  #tapButton {
+    min-height: max(160px, 35vh);
+    font-size: clamp(1.5rem, 8vw, 2.5rem);
+  }
+
+  .voice-option-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1777,37 +2370,128 @@ button.secondary.btn-loading::before {
 
   /* Tap button still needs a generous touch area */
   #tapButton {
-    min-height: max(260px, 35vh);
+    min-height: max(260px, 38vh);
+  }
+}
+
+/* ── Desktop (≥ 769px): single-column grid foundation ─────────────────── */
+@media (min-width: 769px) {
+  #assayScreen {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Wide desktop (≥ 1024px): two-panel tap zone + progress ────────────── */
+@media (min-width: 1024px) {
+  #assayScreen {
+    /* Tap zone left, progress panel right; header and footer span both */
+    grid-template-columns: 1fr 320px;
+    grid-template-rows: auto 1fr auto;
+  }
+
+  #assayScreen > header {
+    grid-column: 1 / -1;
+  }
+
+  #toggleProgress {
+    grid-column: 1 / -1;
+    width: auto;
+    align-self: center;
+  }
+
+  #tapZone {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  #assayProgress {
+    grid-column: 2;
+    grid-row: 2;
+    max-height: none;
+    height: 100%;
+    margin: 0;
+    border-radius: 10px;
+    overflow-y: auto;
+  }
+
+  #runStatus {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  #assayScreen > footer {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ── Voice option grid: single column on very narrow screens ───────────── */
+@media (max-width: 380px) {
+  .voice-option-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Full-width toasts on mobile ───────────────────────────────────────── */
+@media (max-width: 480px) {
+  #toastContainer {
+    right: 0.75rem;
+    left: 0.75rem;
+    max-width: none;
   }
 }
 
 /* ── Landscape orientation fixes ──────────────────────────────────────── */
 @media (orientation: landscape) and (max-height: 500px) {
-  /* Tap button: rely on flex:1 more, reduce min-height to avoid overflow */
+  /* Tap button: reduced min-height to avoid overflow; flex:1 handles the rest */
   #tapButton {
-    min-height: max(140px, 30vh);
-    font-size: clamp(1.5rem, 6vw, 2.5rem);
+    min-height: max(120px, 28vh);
+    font-size: clamp(1.25rem, 5vw, 2rem);
   }
 
   /* Compact main padding in landscape */
   main {
-    padding: 0.5rem;
+    padding: 0.4rem 0.5rem;
+  }
+
+  /* Section cards: tighter in landscape */
+  section {
+    padding: 0.6rem;
+    margin-bottom: 0.4rem;
   }
 
   /* Shorter progress panel in landscape */
   #assayProgress {
-    max-height: 20vh;
+    max-height: 18vh;
   }
 
   /* Metronome bar: thinner to save space */
   #visualMetronomeContainer {
     height: 8px;
-    margin-bottom: 0.25rem;
+    margin-bottom: 0.2rem;
   }
 
   /* Warmup display: smaller in landscape */
   .warmup-display {
-    font-size: 2rem;
+    font-size: 1.75rem;
+  }
+
+  /* Live progress: compact */
+  .live-progress {
+    font-size: 0.95rem;
+    margin-bottom: 0.15rem;
+  }
+
+  /* Assay screen footer: always horizontal in landscape */
+  #assayScreen > footer {
+    flex-wrap: nowrap;
+    padding: 0.5rem 0.6rem;
+  }
+
+  /* Header: minimal height in landscape */
+  .appHeader {
+    padding: 0.4rem max(0.75rem, calc(50vw - 400px));
   }
 }
 
@@ -1819,9 +2503,22 @@ button.secondary.btn-loading::before {
     padding-right: max(1rem, env(safe-area-inset-right));
   }
 
+  @media (max-width: 480px) {
+    .appHeader {
+      padding-top: max(0.6rem, env(safe-area-inset-top));
+      padding-left: max(0.75rem, env(safe-area-inset-left));
+      padding-right: max(0.75rem, env(safe-area-inset-right));
+    }
+  }
+
   main {
     padding-left: max(0.5rem, env(safe-area-inset-left));
     padding-right: max(0.5rem, env(safe-area-inset-right));
+  }
+
+  /* Main content also respects bottom inset */
+  main {
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
   }
 
   /* Banners also respect safe areas */
@@ -1829,6 +2526,11 @@ button.secondary.btn-loading::before {
   #idbWarningBanner {
     padding-left: max(1rem, env(safe-area-inset-left));
     padding-right: max(1rem, env(safe-area-inset-right));
+  }
+
+  /* Assay footer respects home indicator on iPhone */
+  #assayScreen > footer {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
   }
 }
 
@@ -1865,3 +2567,77 @@ body.state-running {
     box-shadow: 0 0 0 4px var(--focus-ring);
   }
 }
+
+/* ── Genotype select: always fills available width ─────────────────────── */
+#genotypeSelect {
+  width: 100%;
+  max-width: none;
+}
+
+/* ── Toggle progress: aligned right in assay header ───────────────────── */
+#toggleProgress {
+  align-self: flex-end;
+  font-size: 0.88rem;
+  padding: 0.4rem 0.85rem;
+  min-height: 38px;
+  border-radius: 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Saved assays bulk-actions: proper layout ─────────────────────────── */
+.bulk-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-base);
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.bulk-actions label {
+  font-size: 0.9rem;
+  margin: 0;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.bulk-actions .danger {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.9rem;
+  width: auto;
+  flex: none;
+}
+
+/* ── Saved assays back button ─────────────────────────────────────────── */
+#closeSavedAssays {
+  margin-top: 1rem;
+  width: 100%;
+}
+
+/* ── Export screen: select-all label separator ─────────────────────────── */
+.export-select-all-label {
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-base);
+}
+
+/* ── Bulk select label in saved assays ─────────────────────────────────── */
+.bulk-select-label {
+  font-size: 0.9rem;
+  margin: 0;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-main);
+}
+
+/* ── Assay screen: ensure the tapZone always uses remaining space ──────── */
+#assayScreen {
+  /* Needed so that flex children calculate height correctly */
+  height: 100%;
+}
+

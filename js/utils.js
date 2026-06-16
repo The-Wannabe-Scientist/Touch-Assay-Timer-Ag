@@ -65,6 +65,13 @@ export function validateInputs(values) {
     errors.push("Bin size must be greater than zero.");
   }
 
+  // BUG-8 fix: if binSize > stimCount, binRunValues() produces an empty array
+  // (all values are dropped as a trailing partial bin) causing completely blank
+  // columns in the export with no user-facing explanation.
+  if (values.binSize > 0 && values.stimCount > 0 && values.binSize > values.stimCount) {
+    errors.push(`Bin size (${values.binSize}) cannot be larger than the total stimulus count (${values.stimCount}).`);
+  }
+
   if (isNaN(values.temperature)) {
     errors.push("A valid temperature is required.");
   }

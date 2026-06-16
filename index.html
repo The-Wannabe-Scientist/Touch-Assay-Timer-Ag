@@ -240,7 +240,7 @@
 
       <fieldset>
         <legend>Datasets</legend>
-        <label class="toggle-label" id="exportSelectAllLabel" style="padding-bottom: 0.5rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border-base);">
+        <label class="toggle-label export-select-all-label" id="exportSelectAllLabel">
           <input type="checkbox" id="exportSelectAll"> Select all datasets
         </label>
         <div id="exportDatasetList">
@@ -260,95 +260,190 @@
       </div>
     </section>
     
- <section id="settingsScreen" hidden>
-      <h2>Settings</h2>
+    <section id="settingsScreen" hidden>
 
-      <fieldset>
-        <legend>Display Theme</legend>
-       
-        <label class="toggle-label" for="themeLight">
-          <input type="radio" id="themeLight" name="themeMode" value="light" checked>
-          Light Mode (Default)
-        </label>
-         <label class="toggle-label" for="themeDark"> 
-          <input type="radio" id="themeDark" name="themeMode" value="dark">
-          Dark Mode
-        </label>
-      </fieldset>
-      
-      <fieldset>
-        <legend>Audio</legend>
+      <!-- Settings page header -->
+      <div class="settings-page-header">
+        <h2>
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          Settings
+        </h2>
+      </div>
 
-        <div class="input-group">
-          <label for="tickVolume">Tick Volume</label>
-          <div class="slider-row">
-            <input type="range" id="tickVolume" min="0" max="1" step="0.05" value="1">
-            <span id="tickVolumeDisplay" class="slider-value">100%</span>
-          </div>
+      <!-- ── Display Theme ──────────────────────────────────────────────── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+            <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+          Display Theme
+        </legend>
+        <div class="theme-segmented" role="group" aria-label="Display theme">
+          <label class="theme-segment" for="themeLight">
+            <input type="radio" id="themeLight" name="themeMode" value="light" checked>
+            <span class="theme-segment-inner">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="5"/>
+                <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+              </svg>
+              Light
+            </span>
+          </label>
+          <label class="theme-segment" for="themeDark">
+            <input type="radio" id="themeDark" name="themeMode" value="dark">
+            <span class="theme-segment-inner">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+              </svg>
+              Dark
+            </span>
+          </label>
         </div>
-
-        <div class="input-group">
-          <label for="tickPitch">Tick Pitch (Hz)</label>
-          <div class="slider-row">
-            <input type="range" id="tickPitch" min="200" max="2000" step="50" value="900">
-            <span id="tickPitchDisplay" class="slider-value">900 Hz</span>
-          </div>
-        </div>
-
-        <div class="input-group">
-          <label for="speechLead">Speech Lead (ms)</label>
-          <p style="font-size:0.8rem;color:var(--text-muted);margin:0 0 0.4rem;">
-            How early the spoken cue fires before each stimulus. Increase if speech
-            arrives late on your device (typical range: 60–150 ms).
-          </p>
-          <div class="slider-row">
-            <input type="range" id="speechLead" min="0" max="490" step="10" value="80">
-            <span id="speechLeadDisplay" class="slider-value">80 ms</span>
-          </div>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Timer Voiceover Options</legend>
-
-        <label class="toggle-label" for="voiceTick"> 
-          <input type="radio" id="voiceTick" name="voiceMode" value="tick" checked>
-          Tick every second
-        </label>
-        <label class="toggle-label" for="voiceCount">
-          <input type="radio" id="voiceCount" name="voiceMode" value="count">
-          Speak every second
-        </label>
-        <label class="toggle-label" for="voiceTens">
-          <input type="radio" id="voiceTens" name="voiceMode" value="tens">
-          Speak every ten seconds, tick in between
-        </label>
-        <label class="toggle-label" for="voiceBins">
-          <input type="radio" id="voiceBins" name="voiceMode" value="bins">
-          Tick every stimulus, speak at each bin boundary
-        </label>
       </fieldset>
 
-      <fieldset>
-        <legend>Warmup Timer</legend>
-        <label class="toggle-label" for="warmupToggle">
-          <input type="checkbox" id="warmupToggle" checked>
-          Enable Warmup Timer
+      <!-- ── Audio ─────────────────────────────────────────────────────── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+          </svg>
+          Audio
+        </legend>
+
+        <div class="settings-slider-group">
+          <div class="settings-slider-header">
+            <label class="settings-slider-label" for="tickPitch">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+              </svg>
+              Tick Pitch
+            </label>
+            <span id="tickPitchDisplay" class="settings-slider-badge">900 Hz</span>
+          </div>
+          <div class="settings-slider-track-wrap">
+            <span class="slider-icon-min" aria-hidden="true" style="font-size:0.65rem;font-weight:700;letter-spacing:-0.05em;color:var(--text-muted);">Lo</span>
+            <input type="range" id="tickPitch" min="200" max="2000" step="50" value="900" class="settings-range">
+            <span class="slider-icon-max" aria-hidden="true" style="font-size:0.65rem;font-weight:700;letter-spacing:-0.05em;color:var(--text-muted);">Hi</span>
+          </div>
+          <p class="settings-hint">Move slider — a preview tick plays so you can hear the current pitch. Default: 900 Hz.</p>
+        </div>
+
+        <div class="settings-slider-group">
+          <div class="settings-slider-header">
+            <label class="settings-slider-label" for="speechLead">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+              </svg>
+              Speech Lead
+            </label>
+            <span id="speechLeadDisplay" class="settings-slider-badge">80 ms</span>
+          </div>
+          <div class="settings-slider-track-wrap">
+            <span class="slider-icon-min" aria-hidden="true" style="font-size:0.6rem;font-weight:700;color:var(--text-muted);">0</span>
+            <input type="range" id="speechLead" min="0" max="490" step="10" value="80" class="settings-range">
+            <span class="slider-icon-max" aria-hidden="true" style="font-size:0.6rem;font-weight:700;color:var(--text-muted);">490</span>
+          </div>
+          <p class="settings-hint">How early the spoken cue fires before each stimulus. Increase if speech arrives late on your device (typical: 60–150 ms).</p>
+        </div>
+      </fieldset>
+
+      <!-- ── Timer Voiceover Options ────────────────────────────────────── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+          Timer Voiceover
+        </legend>
+        <div class="voice-option-grid">
+          <label class="voice-option-card" for="voiceTick">
+            <input type="radio" id="voiceTick" name="voiceMode" value="tick" checked>
+            <span class="voice-option-icon" aria-hidden="true">🔔</span>
+            <span class="voice-option-title">Tick</span>
+            <span class="voice-option-desc">A beep plays on every stimulus</span>
+          </label>
+          <label class="voice-option-card" for="voiceCount">
+            <input type="radio" id="voiceCount" name="voiceMode" value="count">
+            <span class="voice-option-icon" aria-hidden="true">🔢</span>
+            <span class="voice-option-title">Count</span>
+            <span class="voice-option-desc">Stimulus number spoken aloud every interval</span>
+          </label>
+          <label class="voice-option-card" for="voiceBins">
+            <input type="radio" id="voiceBins" name="voiceMode" value="bins">
+            <span class="voice-option-icon" aria-hidden="true">📦</span>
+            <span class="voice-option-title">Bins</span>
+            <span class="voice-option-desc">Tick every stimulus; speak at bin boundaries</span>
+          </label>
+          <label class="voice-option-card" for="voiceTens">
+            <input type="radio" id="voiceTens" name="voiceMode" value="tens">
+            <span class="voice-option-icon" aria-hidden="true">🔟</span>
+            <span class="voice-option-title">Tens</span>
+            <span class="voice-option-desc">Spoken every 10th stimulus; tick in between</span>
+          </label>
+        </div>
+      </fieldset>
+
+      <!-- ── Warmup Timer ──────────────────────────────────────────────── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+          Warmup Timer
+        </legend>
+
+        <label class="settings-toggle-row" for="warmupToggle">
+          <span class="settings-toggle-text">
+            <span class="settings-toggle-title">Enable Warmup</span>
+            <span class="settings-toggle-sub">Plays a countdown before each run starts</span>
+          </span>
+          <!-- iOS-style switch built purely in CSS — the real checkbox is hidden but keyboard-accessible -->
+          <span class="settings-switch" aria-hidden="true">
+            <input type="checkbox" id="warmupToggle" checked class="settings-switch-input">
+            <span class="settings-switch-track"><span class="settings-switch-thumb"></span></span>
+          </span>
         </label>
-        
-        <div id="warmupDurationContainer" class="input-group">
+
+        <div id="warmupDurationContainer" class="input-group settings-warmup-input">
           <label for="warmupDuration">Duration (seconds)</label>
-          <input type="number" id="warmupDuration" min="1" max="60" step="1" value="3">
+          <div class="stepper-wrapper">
+            <button type="button" class="stepper-btn" data-target="warmupDuration" data-delta="-1" aria-label="Decrease warmup duration">−</button>
+            <input type="number" id="warmupDuration" min="1" max="60" step="1" value="3" inputmode="numeric">
+            <button type="button" class="stepper-btn" data-target="warmupDuration" data-delta="1" aria-label="Increase warmup duration">+</button>
+          </div>
         </div>
+
       </fieldset>
 
-
-
-      
-      <button id="closeSettings" type="button" class="secondary">Back</button>
+      <button id="closeSettings" type="button" class="secondary settings-back-btn">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="15 18 9 12 15 6"/>
+        </svg>
+        Back
+      </button>
     </section>
-      
-    
+
+
     <section id="guidelinesScreen" hidden>
       <h2>User Guidelines</h2>
       <p>This tool is designed to run simple touch / stimulus–response assays.</p>
@@ -373,17 +468,16 @@
   <section id="savedAssaysScreen" hidden>
       <h2>Saved Assays</h2>
       
-      <!-- TODO: move inline styles below into styles.css for consistency -->
-      <div class="bulk-actions" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border-base);">
-        <label class="toggle-label" style="font-size: 0.9rem; margin: 0;">
+      <div class="bulk-actions">
+        <label class="toggle-label bulk-select-label">
           <input type="checkbox" id="selectAllAssays"> Select All
         </label>
-        <button id="deleteSelectedAssays" type="button" class="danger" disabled style="padding: 0.4rem 0.8rem; font-size: 0.9rem; width: auto; flex: none;">Delete Selected</button>
+        <button id="deleteSelectedAssays" type="button" class="danger" disabled>Delete Selected</button>
       </div>
 
       <div id="savedAssaysList">
         </div>
-      <button id="closeSavedAssays" type="button" class="secondary" style="margin-top: 1rem;">Back</button>
+      <button id="closeSavedAssays" type="button" class="secondary">Back</button>
     </section>
 
   </main>

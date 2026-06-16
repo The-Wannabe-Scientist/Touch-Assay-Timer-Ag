@@ -49,7 +49,8 @@ import {
   isAudioReady, setVoiceMode, loadVoices, speak, stopSpeech,
   warmUpAudio, playWarmupTone, scheduleWebAudioTick,
   triggerImmediateSpeech, getAudioTime, playCompletionTone,
-  setVolume, setTickPitch, getTickPitch, primeSpeechEngine, setBinSpeak
+  setTickPitch, getTickPitch, primeSpeechEngine, setBinSpeak,
+  playTick
 }                                                      from "./audio.js";
 import {
   performExcelExport, performCSVExport, generatePreviewHTML
@@ -351,8 +352,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       warmupToggle:             document.getElementById("warmupToggle"),
       warmupDurationInput:      document.getElementById("warmupDuration"),
       warmupDurationContainer:  document.getElementById("warmupDurationContainer"),
-      tickVolume:               document.getElementById("tickVolume"),
-      tickVolumeDisplay:        document.getElementById("tickVolumeDisplay"),
       tickPitch:                document.getElementById("tickPitch"),
       tickPitchDisplay:         document.getElementById("tickPitchDisplay"),
       speechLead:               document.getElementById("speechLead"),
@@ -805,6 +804,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     // (activeRun is already null at this point because stopCueLoop() was called first.)
     if (!run) return;
 
+    // BUG-7 fix: guard against null activeTrial. This can happen in an extreme
+    // race where the trial was already completed via another path before the
+    // scheduler fired completeRunNormally. Without this guard, line 830
+    // (`saveRun(currentAssay.assayId, activeTrial.trialId, run)`) would throw
+    // TypeError and the final IDB save would never happen.
+    if (!activeTrial) {
+      console.error("completeRunNormally: no active trial found — run data may not be saved to IDB.");
+      playCompletionTone();
+      updateProgressTable();
+      refreshGenotypeDropdownCounts();
+      releaseWakeLock();
+      applyProgressVisibilityPreference();
+      setState(STATES.POISED);
+      showToast("Run complete — all stimulations recorded.", "success");
+      return;
+    }
+
     completeRun(run);
 
     // A run is eligible for analysis only if it recorded the full expected stimulus count
@@ -859,6 +875,11 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function stopRunEarly(reason = "Run stopped early by user") {
     isWarmingUp = false;
+    // BUG-3 fix: if warmup hid the tap button, restore it now so the UI
+    // doesn't get stuck in an invisible-button state after an external stop.
+    if (UI.Buttons.tap.hidden) UI.Buttons.tap.hidden = false;
+    if (!UI.Displays.warmup.hidden) UI.Displays.warmup.hidden = true;
+
     // Snapshot activeRun BEFORE stopCueLoop() nulls it. This prevents a double-stop
     // race where a final Worker tick arrives after stopCueLoop() clears activeRun,
     // causing a second call that would tag and re-save an already-tagged run.
@@ -1213,16 +1234,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (input.value === savedVoiceMode) input.checked = true;
     });
 
-    // #15: Tick volume
-    const savedVolume = parseFloat(localStorage.getItem("touchAssayTickVolume"));
-    const initVolume  = isNaN(savedVolume) ? 1.0 : savedVolume;
-    setVolume(initVolume);
-    if (UI.Settings.tickVolume) {
-      UI.Settings.tickVolume.value = initVolume;
-      if (UI.Settings.tickVolumeDisplay)
-        UI.Settings.tickVolumeDisplay.textContent = Math.round(initVolume * 100) + "%";
-    }
-
     // #15: Tick pitch
     const savedPitch = parseInt(localStorage.getItem("touchAssayTickPitch"), 10);
     const initPitch  = isNaN(savedPitch) ? 900 : savedPitch;
@@ -1414,9 +1425,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       html +=
         `<label>` +
         `<input type="checkbox" data-dataset-type="trial" data-trial-id="${trial.trialId}"` +
-        ` aria-label="Trial ${trial.trialIndex}, ${eligible} eligible of ${total} total${isAbandoned ? ', abandoned' : ''}"` +
+        ` aria-label="Trial ${Number(trial.trialIndex)}, ${eligible} eligible of ${total} total${isAbandoned ? ', abandoned' : ''}"` +
         ` ${isCompleted ? "checked" : ""}>` +
-        ` Trial ${trial.trialIndex}` +
+        ` Trial ${Number(trial.trialIndex)}` +
         ` — ${eligible} eligible (${total} total)` +
         (genotypeSummary ? ` &middot; ${genotypeSummary}` : "") +
         (isAbandoned ? " <em>(abandoned)</em>" : "") +
@@ -1534,7 +1545,7 @@ document.addEventListener("DOMContentLoaded", async () => {
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
         </svg>
-        Trial ${trial.trialIndex} Summary
+        Trial ${Number(trial.trialIndex)} Summary
       </h3>
       <div class="trial-summary-genotypes">${genotypesHTML}</div>`;
     card.hidden = false;
@@ -1662,9 +1673,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     e.preventDefault();
     e.returnValue = "";  // Required for Chrome/Edge (legacy spec)
 
-    // Bug 4 fix: call stopRunEarly() instead of manually tagging the run.
-    // This stops the Worker heartbeat and scheduler so that if the user
-    // clicks "Stay" on the Leave dialog the scheduler does not continue
+    // BUG-1 fix: snapshot the current run values to sessionStorage synchronously
+    // before the page is torn down. On mobile browsers (iOS Safari, Chrome Android)
+    // the async IDB write inside stopRunEarly() is not guaranteed to commit before
+    // the page is unloaded. sessionStorage writes are synchronous and survive a
+    // same-origin reload, giving abandonAllActiveTrialsInDB() on next launch a
+    // fallback to tag the run as stopped even if the IDB write was dropped.
+    try {
+      const activeTrial = getActiveTrial(currentAssay);
+      const runToSave   = activeRun || activeTrial?.runs.find(r => r.status === "active");
+      if (runToSave && activeTrial) {
+        sessionStorage.setItem("touchAssayCrashGuard", JSON.stringify({
+          assayId:  currentAssay.assayId,
+          trialId:  activeTrial.trialId,
+          runId:    runToSave.runId,
+          values:   runToSave.values,
+          savedAt:  Date.now()
+        }));
+      }
+    } catch { /* sessionStorage may be unavailable in some private-browse modes */ }
+
+    // Call stopRunEarly() to stop the Worker heartbeat and scheduler so that if
+    // the user clicks "Stay" on the Leave dialog the scheduler does not continue
     // running against a run that was already marked stoppedEarly.
     // stopRunEarly() is idempotent — if the timing-gap auto-stop already
     // fired, activeRun is null and the function returns early.
@@ -2276,23 +2306,55 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // ── Settings: audio controls (#15) ──────────────────────────────────────
-  if (UI.Settings.tickVolume) {
-    UI.Settings.tickVolume.addEventListener("input", e => {
-      const v = parseFloat(e.target.value);
-      setVolume(v);
-      localStorage.setItem("touchAssayTickVolume", v);
-      if (UI.Settings.tickVolumeDisplay)
-        UI.Settings.tickVolumeDisplay.textContent = Math.round(v * 100) + "%";
-    });
+
+  /**
+   * Plays a preview tick to help the user audition the current setting.
+   * Ensures the AudioContext is warmed up before playing.
+   * A debounce timer ID is returned so callers can cancel pending previews.
+   * @param {number|undefined} timerId - Previous debounce timer to cancel.
+   * @param {number}           delay   - Debounce delay in ms.
+   * @returns {number} New debounce timer ID.
+   */
+  function _previewTick(timerId, delay = 0) {
+    clearTimeout(timerId);
+    return setTimeout(() => {
+      warmUpAudio()
+        .then(() => playTick(null))
+        .catch(() => { /* AudioContext blocked — silently skip preview */ });
+    }, delay);
   }
+
+  /**
+   * Triggers the .pop CSS animation on a badge element to give tactile
+   * feedback whenever its value changes while the user drags a slider.
+   * @param {HTMLElement|null} el - The badge element to animate.
+   */
+  function _popBadge(el) {
+    if (!el) return;
+    el.classList.remove("pop");
+    // Force reflow so removing then re-adding the class restarts the animation
+    void el.offsetWidth;
+    el.classList.add("pop");
+  }
+
+  /**
+   * Debounce timer ID for the pitch-preview tick.
+   * @type {number|undefined}
+   */
+  let _pitchPreviewTimer;
 
   if (UI.Settings.tickPitch) {
     UI.Settings.tickPitch.addEventListener("input", e => {
       const hz = parseInt(e.target.value, 10);
       setTickPitch(hz);
       localStorage.setItem("touchAssayTickPitch", hz);
-      if (UI.Settings.tickPitchDisplay)
+      if (UI.Settings.tickPitchDisplay) {
         UI.Settings.tickPitchDisplay.textContent = hz + " Hz";
+        _popBadge(UI.Settings.tickPitchDisplay);
+      }
+      // Debounce the preview tick so rapid slider drags only fire once the
+      // user briefly pauses, preventing a rapid-fire buzz of overlapping tones.
+      _pitchPreviewTimer = _previewTick(_pitchPreviewTimer, 120);
     });
   }
 
@@ -2303,8 +2365,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       // push nextSpeechTime before AudioContext t0, misfiring the first speech cue.
       speechLeadMs = Math.max(0, Math.min(490, parseInt(e.target.value, 10)));
       localStorage.setItem("touchAssaySpeechLeadMs", speechLeadMs);
-      if (UI.Settings.speechLeadDisplay)
+      if (UI.Settings.speechLeadDisplay) {
         UI.Settings.speechLeadDisplay.textContent = speechLeadMs + " ms";
+        _popBadge(UI.Settings.speechLeadDisplay);
+      }
+      // BUG-10 fix: speechLeadMs seeds nextSpeechTime only at startCueLoop() time,
+      // so changing it mid-run has no effect on the current run. Inform the user
+      // so they're not confused by the apparent lack of immediate response.
+      if (currentState === STATES.RUNNING) {
+        showToast("Speech lead will apply from the next run.", "info", 3000);
+      }
     });
   }
 

@@ -31,10 +31,6 @@ let masterGain = null;
 
 /** @type {SpeechSynthesisVoice|null} The selected TTS voice, or null if unavailable. */
 let selectedVoice = null;
-
-/** @type {number} Current output volume, 0.0–1.0. */
-let volume = 1.0;
-
 /** @type {number} Frequency in Hz for the metronome tick tone. */
 let tickPitch = 900;
 
@@ -71,16 +67,6 @@ let isReady = false;
 
 /** @returns {boolean} Whether the audio context is running and ready for scheduling. */
 export const isAudioReady = () => isReady;
-
-/**
- * Sets the master output volume.
- * Clamped to [0, 1] to prevent distortion.
- * @param {number} level - Target volume, 0.0 (silent) to 1.0 (full).
- */
-export function setVolume(level) {
-  volume = Math.max(0, Math.min(1, level));
-  if (masterGain) masterGain.gain.value = volume;
-}
 
 /**
  * Changes the active voice/cue mode.
@@ -166,11 +152,11 @@ function getAudioContext() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-    // Route all oscillators through a single master gain node so volume
-    // changes apply globally without touching individual oscillators.
+    // Route all oscillators through a single master gain node.
+    // Note: Volume control is not needed in this app because device hardware volume
+    // buttons provide sufficient control for users. Default gain is 1.0 (full volume).
     masterGain = audioCtx.createGain();
     masterGain.connect(audioCtx.destination);
-    masterGain.gain.value = volume;
   }
   return audioCtx;
 }
