@@ -131,11 +131,15 @@ export function loadVoices() {
     null;
 }
 
-// Browsers load voices asynchronously; listen for when the list is populated
-speechSynthesis.onvoiceschanged = loadVoices;
-
-// Synchronously attempt to load if the list is already available (common on desktop)
-if (speechSynthesis.getVoices().length > 0) loadVoices();
+// M5 fix: speechSynthesis is not available in all browser environments
+// (some WebViews, embedded browsers). Accessing it at module load time without
+// a guard crashes the entire module, taking down the whole application.
+if (typeof speechSynthesis !== "undefined") {
+  // Browsers load voices asynchronously; listen for when the list is populated
+  speechSynthesis.onvoiceschanged = loadVoices;
+  // Synchronously attempt to load if the list is already available (common on desktop)
+  if (speechSynthesis.getVoices().length > 0) loadVoices();
+}
 
 
 /* ==========================================================================
@@ -155,6 +159,13 @@ function getAudioContext() {
     // Route all oscillators through a single master gain node.
     // Note: Volume control is not needed in this app because device hardware volume
     // buttons provide sufficient control for users. Default gain is 1.0 (full volume).
+    masterGain = audioCtx.createGain();
+    masterGain.connect(audioCtx.destination);
+  }
+  // H4 fix: enforce the invariant that audioCtx non-null ⇒ masterGain non-null.
+  // If masterGain was somehow lost (e.g. context recycled by a future refactor),
+  // re-create it so tone functions don't crash on gain.connect(masterGain).
+  if (!masterGain) {
     masterGain = audioCtx.createGain();
     masterGain.connect(audioCtx.destination);
   }
@@ -235,6 +246,7 @@ document.addEventListener("visibilitychange", () => {
  * @param {string} text - The text to speak.
  */
 export function speak(text) {
+  if (typeof speechSynthesis === "undefined") return;
   // Lazy-init guard: on Chrome, voiceschanged fires asynchronously after page load.
   // If speak() is called before the event fires, selectedVoice is still null.
   // Attempt to populate it now — this succeeds once the browser's voice list is ready.
@@ -270,6 +282,7 @@ export function speak(text) {
  * startCueLoop() when warmup is disabled).
  */
 export function primeSpeechEngine() {
+  if (typeof speechSynthesis === "undefined") return;
   if (!selectedVoice) loadVoices();
   const u = new SpeechSynthesisUtterance(" ");  // Single space — inaudible
   if (selectedVoice) u.voice = selectedVoice;
@@ -281,6 +294,7 @@ export function primeSpeechEngine() {
  * Stops any speech that is currently being spoken or queued.
  */
 export function stopSpeech() {
+  if (typeof speechSynthesis === "undefined") return;
   speechSynthesis.cancel();
 }
 
@@ -316,6 +330,9 @@ export function playTick(exactTime = null) {
 
   osc.start(time);
   osc.stop(time + 0.05);  // Node auto-disconnects after stopping
+  // L3 fix: disconnect the GainNode after the oscillator ends so it is released
+  // from the audio graph and eligible for GC on long-running sessions.
+  osc.onended = () => gain.disconnect();
 }
 
 /**
@@ -343,6 +360,8 @@ export function playWarmupTone(frequency, exactTime = null) {
 
   osc.start(time);
   osc.stop(time + 0.3);
+  // L3 fix: release GainNode from audio graph after oscillator stops
+  osc.onended = () => gain.disconnect();
 }
 
 /**
@@ -373,6 +392,8 @@ export function playCompletionTone() {
 
     osc.start(startAt);
     osc.stop(startAt + 0.3);
+    // L3 fix: release GainNode from audio graph after oscillator stops
+    osc.onended = () => gain.disconnect();
   });
 }
 
@@ -437,8 +458,8 @@ export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime) {
  * @param {number} assayIsi      - ISI of the active assay in seconds.
  */
 export function triggerImmediateSpeech(stimulusIndex, assayIsi) {
-  // Fast ISI: speech can't complete before the next tick — handled by tick only
-  if (voiceMode === "count" && assayIsi < 1) return;
+  // Fast ISI: speech can't complete before the next tick — skip all voice modes
+  if (assayIsi < 1) return;
 
   switch (voiceMode) {
     case "count":

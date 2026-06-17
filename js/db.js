@@ -149,7 +149,7 @@ export async function saveAssay(assay) {
   tx.objectStore(STORES.ASSAYS).put(assay);
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = reject;
+    tx.onerror    = () => reject(tx.error);
   });
 }
 
@@ -364,7 +364,7 @@ export async function saveTrial(assayId, trial) {
   tx.objectStore(STORES.TRIALS).put({ ...trialData, assayId });
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = reject;
+    tx.onerror    = () => reject(tx.error);
   });
 }
 
@@ -387,7 +387,10 @@ export async function markTrialCompleted(_assayId, trialId) {
 
   req.onsuccess = () => {
     const trial = req.result;
-    if (!trial) return;
+    // DB-1 fix: if the trial doesn't exist, abort the transaction so the caller
+    // receives a rejection instead of a silent no-op (tx.oncomplete would resolve
+    // even with no actual write, giving a false sense of success).
+    if (!trial) { tx.abort(); return; }
     trial.status  = "completed";
     trial.endedAt = Date.now();
     store.put(trial);
@@ -396,6 +399,7 @@ export async function markTrialCompleted(_assayId, trialId) {
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
     tx.onerror    = reject;
+    tx.onabort    = () => reject(new Error(`markTrialCompleted: trial ${trialId} not found`));
   });
 }
 
@@ -419,7 +423,8 @@ export async function markTrialAbandoned(_assayId, trialId, reason = "App closed
 
   req.onsuccess = () => {
     const trial = req.result;
-    if (!trial) return;
+    // DB-1 fix: abort if trial not found (same rationale as markTrialCompleted)
+    if (!trial) { tx.abort(); return; }
     trial.status          = "abandoned";
     trial.abandonedReason = reason;
     trial.endedAt         = Date.now();
@@ -429,6 +434,7 @@ export async function markTrialAbandoned(_assayId, trialId, reason = "App closed
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
     tx.onerror    = reject;
+    tx.onabort    = () => reject(new Error(`markTrialAbandoned: trial ${trialId} not found`));
   });
 }
 
@@ -457,7 +463,7 @@ export async function saveRun(_assayId, trialId, run) {
   tx.objectStore(STORES.RUNS).put({ ...run, trialId });
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = reject;
+    tx.onerror    = () => reject(tx.error);
   });
 }
 
@@ -529,7 +535,8 @@ export async function abandonAllActiveTrialsInDB() {
 
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = reject;
+    tx.onerror    = () => reject(tx.error);
+    tx.onabort    = () => reject(tx.error ?? new Error("abandonAllActiveTrials: transaction aborted"));
   });
 }
 

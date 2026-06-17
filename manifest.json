@@ -3,11 +3,12 @@
   "short_name": "AssayTimer",
   "description": "A stimulus–response assay timer for recording touch sensitivity data.",
   "start_url": ".",
+  "id": "/",
   "scope": ".",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#ffffff",
-  "theme_color": "#1f2937",
+  "theme_color": "#f1f5f9",
   "icons": [
     {
       "src": "icon-192.png",
@@ -17,7 +18,8 @@
     {
       "src": "icon-512.png",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any maskable"
     }
   ]
 }

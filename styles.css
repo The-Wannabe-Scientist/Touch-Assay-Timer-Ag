@@ -971,9 +971,10 @@ th {
 }
 
 .warmup-display { font-size: 3rem; font-weight: bold; }
-.export-actions { display: flex; gap: 1rem; margin-top: 1rem; }
-.export-actions button, .navButtons button { flex: 1; }
+.export-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
+.export-actions button { flex: 1 1 auto; }
 .navButtons { display: flex; gap: 1rem; margin-top: 1rem; }
+.navButtons button { flex: 1; }
 
 .toggle-label {
   display: flex; 
@@ -1882,72 +1883,6 @@ body.state-running #runBanner {
   flex-shrink: 0;
 }
 
-/* =====================================================================
-   16. TRIAL SUMMARY CARD  (#14)
-   ===================================================================== */
-
-#trialSummaryCard {
-  background: var(--bg-progress);
-  border: 1px solid var(--border-base);
-  border-radius: 12px;
-  padding: 1rem;
-  margin-bottom: 1rem;
-  animation: screenFadeIn 0.2s ease both;
-}
-#trialSummaryCard:not([hidden]) {
-  display: block;
-}
-
-#trialSummaryCard h3 {
-  margin: 0 0 0.75rem;
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: var(--text-main);
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.trial-summary-genotypes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-top: 0.25rem;
-}
-
-.trial-summary-genotype-block {
-  flex: 1 1 140px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-base);
-  border-radius: 8px;
-  padding: 0.6rem 0.8rem;
-}
-
-.trial-summary-genotype-block .genotype-name {
-  font-size: 0.8rem;
-  font-weight: 700;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 0.3rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.trial-summary-genotype-block .genotype-stat {
-  font-size: 1.35rem;
-  font-weight: 800;
-  color: var(--color-primary);
-  line-height: 1.1;
-}
-
-.trial-summary-genotype-block .genotype-label {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  margin-top: 0.15rem;
-}
-
 
 /* =====================================================================
    17. RANGE SLIDERS  (#15)
@@ -2080,18 +2015,6 @@ button.secondary.btn-loading::before {
 }
 
 
-/* =====================================================================
-   20. EXPORT SCREEN: CSV BUTTON LAYOUT TWEAK
-   ===================================================================== */
-
-.export-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-.export-actions button {
-  flex: 1 1 auto;
-}
 
 
 /* =====================================================================
@@ -2303,14 +2226,6 @@ button.secondary.btn-loading::before {
     padding: 0.5rem 0.6rem;
   }
 
-  /* Trial summary cards: single column */
-  .trial-summary-genotypes {
-    flex-direction: column;
-  }
-  .trial-summary-genotype-block {
-    flex: 1 1 100%;
-  }
-
   /* Bulk actions in Saved Assays */
   .bulk-actions {
     flex-direction: column !important;
@@ -2383,64 +2298,9 @@ button.secondary.btn-loading::before {
   }
 }
 
-/* ── Wide desktop (≥ 1024px): two-panel tap zone + progress ────────────── */
-@media (min-width: 1024px) {
-  #assayScreen {
-    /* Tap zone left, progress panel right; header and footer span both */
-    grid-template-columns: 1fr 320px;
-    grid-template-rows: auto 1fr auto;
-  }
+/* Wide desktop (≥ 1024px): single-column layout (two-panel removed) */
 
-  #assayScreen > header {
-    grid-column: 1 / -1;
-  }
 
-  #toggleProgress {
-    grid-column: 1 / -1;
-    width: auto;
-    align-self: center;
-  }
-
-  #tapZone {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  #assayProgress {
-    grid-column: 2;
-    grid-row: 2;
-    max-height: none;
-    height: 100%;
-    margin: 0;
-    border-radius: 10px;
-    overflow-y: auto;
-  }
-
-  #runStatus {
-    grid-column: 2;
-    grid-row: 2;
-  }
-
-  #assayScreen > footer {
-    grid-column: 1 / -1;
-  }
-}
-
-/* ── Voice option grid: single column on very narrow screens ───────────── */
-@media (max-width: 380px) {
-  .voice-option-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* ── Full-width toasts on mobile ───────────────────────────────────────── */
-@media (max-width: 480px) {
-  #toastContainer {
-    right: 0.75rem;
-    left: 0.75rem;
-    max-width: none;
-  }
-}
 
 /* ── Landscape orientation fixes ──────────────────────────────────────── */
 @media (orientation: landscape) and (max-height: 500px) {

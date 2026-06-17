@@ -26,10 +26,29 @@
 let running = false;
 
 /**
+ * W-2 fix: generation counter to invalidate stale setTimeout callbacks.
+ *
+ * Problem: on a rapid stop→start sequence within the 8 ms setTimeout window,
+ * a pending setTimeout from the old loop fires after the new loop has already
+ * started, posting to port2 a second time and spawning two simultaneous loops.
+ *
+ * Fix: each loop iteration captures the current generation at the time the
+ * setTimeout is scheduled. The callback only re-posts if the generation hasn't
+ * changed (i.e. no stop/start occurred in the meantime).
+ *
+ * @type {number}
+ */
+let generation = 0;
+
+/**
  * MessageChannel used for the self-post timing loop.
  * port1 is the receiver; posting to port2 queues the next iteration.
  */
 const channel = new MessageChannel();
+
+// Explicitly start port1 so it receives messages even if a future refactor
+// switches from .onmessage assignment to .addEventListener (W-1 note).
+channel.port1.start();
 
 /**
  * Each iteration: emit a tick to the main thread, then schedule the next
@@ -47,16 +66,24 @@ const channel = new MessageChannel();
 channel.port1.onmessage = () => {
   if (!running) return;
   postMessage("tick");
-  setTimeout(() => channel.port2.postMessage(null), 8);  // ~125 Hz ceiling
+  // Capture current generation so the callback can self-invalidate if a
+  // stop→start pair occurs before this setTimeout fires (W-2 fix).
+  const gen = generation;
+  setTimeout(() => {
+    if (gen === generation) channel.port2.postMessage(null);
+  }, 8);  // ~125 Hz ceiling
 };
 
 self.onmessage = function (e) {
   if (e.data === "start") {
     if (running) return;  // Guard against duplicate starts
     running = true;
-    channel.port2.postMessage(null);  // Kick off the loop
+    generation++;                         // Invalidate any pending setTimeout from before
+    channel.port2.postMessage(null);      // Kick off the loop
 
   } else if (e.data === "stop") {
     running = false;
+    generation++;                         // Invalidate the pending setTimeout so the loop
+                                          // truly stops rather than firing one last time
   }
 };

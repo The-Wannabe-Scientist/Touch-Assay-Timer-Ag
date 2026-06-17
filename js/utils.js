@@ -44,6 +44,16 @@ export function validateInputs(values) {
 
   if (!values.genotypes || values.genotypes.length === 0) {
     errors.push("At least one genotype is required.");
+  } else {
+    // U-3 fix: reject blank/whitespace-only genotype labels
+    if (values.genotypes.some(g => !g || !g.trim())) {
+      errors.push("Genotype labels must not be empty.");
+    }
+    // U-2 fix: reject duplicate genotype labels — duplicates corrupt export column headers
+    // and cause summary statistics to be computed from a merged pool of two genotypes.
+    if (new Set(values.genotypes.map(g => g.trim())).size !== values.genotypes.length) {
+      errors.push("Genotype labels must be unique.");
+    }
   }
 
   if (values.isi <= 0) {
@@ -72,11 +82,14 @@ export function validateInputs(values) {
     errors.push(`Bin size (${values.binSize}) cannot be larger than the total stimulus count (${values.stimCount}).`);
   }
 
-  if (isNaN(values.temperature)) {
+  // U-1 fix: isNaN(null) returns false (Number(null) === 0), so temperature: null
+  // would silently pass as 0 °C. Use an explicit null check first.
+  if (values.temperature == null || isNaN(Number(values.temperature))) {
     errors.push("A valid temperature is required.");
   }
 
-  if (isNaN(values.humidity) || values.humidity < 0 || values.humidity > 100) {
+  // Same null guard as temperature above — isNaN(null) is false (Number(null) === 0)
+  if (values.humidity == null || isNaN(Number(values.humidity)) || values.humidity < 0 || values.humidity > 100) {
     errors.push("Humidity must be a valid percentage between 0 and 100.");
   }
 
@@ -134,6 +147,9 @@ export function generateAutoID() {
 export function binRunValues(values, binSize, options = {}) {
   const { allowPartialBin = false, warnOnDrop = true } = options;
 
+  // U-4 fix: guard against null/undefined values (e.g. from a partially-written DB record)
+  if (!values || !Array.isArray(values)) return [];
+
   const totalValues = values.length;
   const remainder   = totalValues % binSize;
 
@@ -177,6 +193,11 @@ export function binRunValues(values, binSize, options = {}) {
  * @returns {number[]|null} Normalised ratios, or null if baseline is invalid.
  */
 export function computeTouchIndexBins(binnedPercentages) {
+  // U-5 fix: explicitly guard the empty-array case before reading index 0.
+  // Previously this relied on binnedPercentages[0] === undefined being == null,
+  // which is correct but fragile — a future strict-equality change would break it.
+  if (!binnedPercentages || binnedPercentages.length === 0) return null;
+
   const baseline = binnedPercentages[0];
 
   // Prevent division by zero (baseline = 0 means no responses in the first bin)

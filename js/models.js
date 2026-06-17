@@ -34,7 +34,7 @@ function generateUniqueId() {
     return crypto.randomUUID();
   }
   // Fallback for older browsers without crypto.randomUUID
-  const randomSuffix = Math.floor(Math.random() * 100_000);
+  const randomSuffix = Math.floor(Math.random() * 1_000_000_000);
   return `${Date.now()}_${randomSuffix}`;
 }
 

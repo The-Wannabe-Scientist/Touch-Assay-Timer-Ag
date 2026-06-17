@@ -132,7 +132,10 @@ function calculateStats(values) {
   // exported cell shows nothing rather than 0 (which implies zero spread).
   if (n === 1) return { mean, sem: "" };
 
-  const variance = values.reduce((a, v) => a + (v - mean) ** 2, 0) / n;
+  // EX-1 fix: use sample variance (Bessel's correction, divide by n-1) instead of
+  // population variance (divide by n). Population variance systematically underestimates
+  // SEM for small n, which is the typical case in biological experiments.
+  const variance = values.reduce((a, v) => a + (v - mean) ** 2, 0) / (n - 1);
   const sem      = Math.sqrt(variance) / Math.sqrt(n);
 
   return { mean, sem };
@@ -337,7 +340,9 @@ export function buildTrialRaw2D(trial, assay) {
     genotypes.forEach((g, gi) => {
       runsByGenotype[g].forEach(run => {
         // Show blank if this run ended before reaching this stimulus
-        row.push(i < run.values.length ? run.values[i] : "");
+        // EX-7 fix: guard against null/undefined values array (e.g. partial DB write)
+        const vals = run.values ?? [];
+        row.push(i < vals.length ? vals[i] : "");
       });
       if (gi < genotypes.length - 1) row.push("");
     });
@@ -400,7 +405,8 @@ export function buildTrialBinned2D(trial, assay) {
     genotypes.forEach((g, gi) => {
       runsByGenotype[g].forEach(run => {
         const bins = binnedByRun.get(run);
-        rawRow.push(binIndex < bins.length ? bins[binIndex] : "");
+        // EX-9 fix: guard bins being undefined; consistent with optional chain in summary row
+        rawRow.push(bins && binIndex < bins.length ? bins[binIndex] : "");
       });
       if (gi < genotypes.length - 1) rawRow.push("");
     });
@@ -591,7 +597,9 @@ export function buildPooledRaw2D(assay, options = {}, _runs = null) {
     const row = [`Stimulus ${i + 1}`];
     genotypes.forEach((g, gi) => {
       runsByGenotype[g].forEach(run => {
-        row.push(i < run.values.length ? run.values[i] : "");
+        // EX-7 fix: guard against null/undefined values array (e.g. partial DB write)
+        const vals = run.values ?? [];
+        row.push(i < vals.length ? vals[i] : "");
       });
       if (gi < genotypes.length - 1) row.push("");
     });
@@ -669,7 +677,7 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
     genotypes.forEach((g, gi) => {
       runsByGenotype[g].forEach(run => {
         const bins = binnedByRun.get(run);
-        rawRow.push(binIndex < bins.length ? bins[binIndex] : "");
+        rawRow.push(bins && binIndex < bins.length ? bins[binIndex] : "");
       });
       if (gi < genotypes.length - 1) rawRow.push("");
     });
@@ -947,6 +955,10 @@ export function buildAllSections(assay, exportConfigs) {
  * @returns {{ success: boolean, error?: string }}
  */
 export function performExcelExport(currentAssay, exportConfigs) {
+  // EX-5 fix: guard against XLSX being undefined (CDN failure, CSP block, etc.)
+  if (typeof XLSX === "undefined") {
+    return { success: false, error: "SheetJS library not loaded. Please check your internet connection and reload." };
+  }
   try {
     const wb       = XLSX.utils.book_new();
     const sections = buildAllSections(currentAssay, exportConfigs);

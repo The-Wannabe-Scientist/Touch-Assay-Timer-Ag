@@ -166,6 +166,9 @@ export function showToast(message, type = "info", duration = 3500) {
   let touchStartX = 0;
   toast.addEventListener("touchstart", e => { touchStartX = e.touches[0].clientX; }, { passive: true });
   toast.addEventListener("touchend", e => {
+    // T-4 fix: changedTouches can be empty in rare multi-touch cancel scenarios;
+    // accessing [0] would throw TypeError.
+    if (!e.changedTouches.length) return;
     const dx = e.changedTouches[0].clientX - touchStartX;
     if (Math.abs(dx) > 60) dismiss(toast);
   }, { passive: true });
