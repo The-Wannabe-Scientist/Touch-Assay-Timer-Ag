@@ -1571,7 +1571,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           <div class="assay-row-header">
             <input type="checkbox" class="assay-select-checkbox" data-assay-id="${assay.assayId}">
             <div class="assay-info">
-              ${escapeHTML(assay.assayName) || "Untitled"} — ${assay.createdAt ? new Date(assay.createdAt).toLocaleString() : "Unknown date"}
+              ${escapeHTML(assay.assayName) || "Untitled"}${assay.genotypes && assay.genotypes.length ? ` (${escapeHTML(assay.genotypes.join(', '))})` : ''} — ${assay.createdAt ? new Date(assay.createdAt).toLocaleString() : "Unknown date"}
             </div>
           </div>
           <div class="assay-actions">
