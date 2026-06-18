@@ -56,6 +56,11 @@ import {
   performExcelExport, performCSVExport, generatePreviewHTML
 }                                                      from "./export.js";
 import { showToast, dismissLatestToast }                from "./toast.js";
+import {
+  isBluetoothSupported, armbandConnect, armbandDisconnect,
+  armbandTap, armbandRunComplete,
+  armbandStartHeartbeat, armbandStopHeartbeat,
+}                                                      from "./haptic-armband.js";
 
 
 /* ==========================================================================
@@ -337,6 +342,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       deleteSelectedAssays: document.getElementById("deleteSelectedAssays"),
       headerHome:           document.getElementById("headerHomeBtn"),
+      armbandHeaderBtn:     document.getElementById("armbandHeaderBtn"),
+      connectArmband:       document.getElementById("connectArmband"),
     },
     Displays: {
       liveProgress:     document.getElementById("liveProgress"),
@@ -348,9 +355,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       previewModal:     document.getElementById("previewModal"),
       previewContainer: document.getElementById("previewContainer"),
       closePreview:     document.getElementById("closePreview"),
-      overflowMenu:     document.getElementById("overflowMenu"),
+      overflowMenu:          document.getElementById("overflowMenu"),
       // Cached once to avoid repeated getElementById calls inside the hot scheduler loop
-      metronomeBar:     document.getElementById("visualMetronomeBar"),
+      metronomeBar:          document.getElementById("visualMetronomeBar"),
+      armbandStatusSettings: document.getElementById("armbandStatusSettings"),
+      armbandBatteryLevel:   document.getElementById("armbandBatteryLevel"),
     },
     Forms: {
       setup: document.getElementById("setupForm"),
@@ -622,6 +631,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     nextDataIntervalTime   = startTime + runISI;  // First window closes after one ISI
 
     timerWorker.postMessage("start");
+    armbandStartHeartbeat();  // keep armband watchdog alive during the run
 
     // Cancel any stale animation frame before starting a fresh one
     // (guards against rapid stop→start sequences stacking rAF callbacks)
@@ -802,6 +812,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function stopCueLoop() {
     timerWorker.postMessage("stop");
+    armbandStopHeartbeat();   // cancel heartbeat so watchdog doesn't fire between runs
     activeRun = null;  // Defensive: prevent scheduler() processing stale run
     if (visualAnimationFrame !== null) {
       cancelAnimationFrame(visualAnimationFrame);
@@ -876,6 +887,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
       if (navigator.vibrate) navigator.vibrate([100, 50, 200]);  // Ascending haptic pattern
     } catch (e) { /* Haptics not supported — silently ignore */ }
+    armbandRunComplete();  // mirror navigator.vibrate([100,50,200]) on the armband
 
     // Update the UI and return to POISED state for the next run.
     // applyProgressVisibilityPreference() below sets both .hidden and the button
@@ -1069,6 +1081,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (currentState === STATES.RUNNING) {
       // Record the tap's AudioContext timestamp for the data recording layer
       tapTimestamps.push(getAudioTime());
+      armbandTap();  // mirror navigator.vibrate(50) on the armband
 
       // Visual indicator: "bucket fulfilled" shows the tap was registered
       UI.Buttons.tap.classList.add("bucket-fulfilled");
@@ -2058,6 +2071,114 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Stop run button ─────────────────────────────────────────────────────
   UI.Buttons.stopRun.addEventListener("click", () => stopRunEarly());
+
+  // -- Haptic Armband connect buttons (header icon + Settings card) ---------
+  // Both buttons call the same shared helper so status displays stay in sync.
+  if (isBluetoothSupported()) {
+    // Reveal the header Bluetooth icon and the Settings fieldset
+    UI.Buttons.armbandHeaderBtn.removeAttribute("hidden");
+    document.querySelectorAll(".armband-fieldset").forEach(el => el.removeAttribute("hidden"));
+
+    // Track last-alerted battery threshold so toasts fire only once per crossing.
+    // 100 = "haven't warned yet"; reset to 100 on reconnect so warnings re-arm.
+    let _lastBattWarnLevel = 100;
+
+    /**
+     * Handles battery level updates pushed by the armband BLE notification.
+     * Updates the header badge, Settings badge, and fires threshold toasts.
+     * This runs asynchronously from a BLE event -- never on the tap/audio path.
+     * @param {number} level  Battery percentage 0-100.
+     */
+    function _handleArmbandBattery(level) {
+      // -- Header badge ----------------------------------------------------
+      const badge = UI.Displays.armbandBatteryLevel;
+      badge.textContent = level + "%";
+      badge.removeAttribute("hidden");
+
+      // Colour: green >20%, amber 10-20%, red <=10%
+      badge.className = level > 20 ? "armband-battery-level"
+                      : level > 10 ? "armband-battery-level armband-batt-low"
+                                   : "armband-battery-level armband-batt-critical";
+
+      // -- Settings badge --------------------------------------------------
+      UI.Displays.armbandStatusSettings.textContent = "Connected \u2713  \u00b7  " + level + "%";
+
+      // -- Header button tooltip -------------------------------------------
+      UI.Buttons.armbandHeaderBtn.setAttribute("title", "Armband connected \u2014 " + level + "%");
+      UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Armband connected \u2014 " + level + "% battery");
+
+      // -- Threshold toasts (fire only once per crossing) ------------------
+      if (level <= 10 && _lastBattWarnLevel > 10) {
+        showToast(
+          "Armband battery critical (" + level + "%) \u2014 haptics may cut out soon",
+          "error",
+          0   // persistent until dismissed
+        );
+        _lastBattWarnLevel = level;
+      } else if (level <= 20 && _lastBattWarnLevel > 20) {
+        showToast(
+          "Armband battery low (" + level + "%) \u2014 consider charging soon",
+          "warning",
+          8000
+        );
+        _lastBattWarnLevel = level;
+      } else if (level > 20) {
+        // Battery recovered above 20% (e.g. after hot-swap) -- re-arm both warnings
+        _lastBattWarnLevel = 100;
+      }
+    }
+
+    /**
+     * Shared connection handler called by both the header icon and Settings button.
+     * @param {HTMLButtonElement} btn  The button that was clicked.
+     */
+    async function _connectArmband(btn) {
+      btn.disabled = true;
+      btn.textContent = "Connecting\u2026";
+
+      try {
+        await armbandConnect(
+          // onDisconnect callback
+          () => {
+            UI.Displays.armbandStatusSettings.textContent = "Disconnected \u26a0";
+            UI.Displays.armbandStatusSettings.className   = "armband-status armband-disconnected";
+            UI.Buttons.armbandHeaderBtn.classList.remove("armband-connected");
+            UI.Buttons.armbandHeaderBtn.classList.add("armband-disconnected");
+            UI.Buttons.armbandHeaderBtn.setAttribute("title", "Reconnect Armband");
+            UI.Displays.armbandBatteryLevel.setAttribute("hidden", "");
+            UI.Buttons.connectArmband.disabled    = false;
+            UI.Buttons.connectArmband.textContent = "Reconnect";
+            _lastBattWarnLevel = 100;  // re-arm threshold warnings after reconnect
+            showToast("Haptic armband disconnected", "warning", 4000);
+          },
+          // onBatteryUpdate callback
+          _handleArmbandBattery
+        );
+
+        // -- Connection success ---------------------------------------------
+        UI.Displays.armbandStatusSettings.textContent = "Connected \u2713";
+        UI.Displays.armbandStatusSettings.className   = "armband-status armband-connected";
+        UI.Buttons.armbandHeaderBtn.classList.add("armband-connected");
+        UI.Buttons.armbandHeaderBtn.classList.remove("armband-disconnected");
+        UI.Buttons.armbandHeaderBtn.setAttribute("title", "Armband Connected");
+        UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Armband Connected");
+        UI.Buttons.connectArmband.textContent = "Connected \u2713";
+        UI.Buttons.connectArmband.disabled    = true;
+        showToast("Haptic armband connected", "success", 3000);
+
+      } catch (err) {
+        // NotFoundError = user cancelled the browser picker -- silent
+        if (err.name !== "NotFoundError") {
+          showToast("Could not connect armband: " + err.message, "error");
+        }
+        btn.disabled = false;
+        btn.textContent = "Connect";
+      }
+    }
+
+    UI.Buttons.connectArmband.addEventListener("click", () => _connectArmband(UI.Buttons.connectArmband));
+    UI.Buttons.armbandHeaderBtn.addEventListener("click", () => _connectArmband(UI.Buttons.connectArmband));
+  }
 
   // ── Finish trial button ─────────────────────────────────────────────────
   UI.Buttons.finishTrial.addEventListener("click", async () => {

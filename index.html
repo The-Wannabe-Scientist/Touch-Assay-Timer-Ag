@@ -35,6 +35,17 @@
     </button>
 
     <div class="header-actions">
+      <!-- Haptic armband quick-connect (hidden on non-BLE browsers via JS class) -->
+      <button id="armbandHeaderBtn" type="button" class="header-icon-btn armband-header-btn" aria-label="Connect haptic armband" title="Connect Armband" hidden>
+        <!-- Bluetooth icon -->
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="6.5 6.5 17.5 17.5 12 23 12 1 17.5 6.5 6.5 17.5"/>
+        </svg>
+        <!-- Battery percentage — hidden until a level is received from the armband -->
+        <span id="armbandBatteryLevel" class="armband-battery-level" aria-live="polite" hidden></span>
+      </button>
+
       <!-- Quick dark/light mode toggle -->
       <button id="themeToggleBtn" type="button" aria-label="Toggle dark mode" class="header-icon-btn" title="Toggle theme">
         <!-- Sun icon (shown in dark mode to switch to light); hidden initially since default theme is light -->
@@ -436,6 +447,25 @@
           </div>
         </div>
 
+      </fieldset>
+
+      <!-- ── Haptic Armband ──────────────────────────────────────────────── -->
+      <fieldset class="settings-card armband-fieldset">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="6.5 6.5 17.5 17.5 12 23 12 1 17.5 6.5 6.5 17.5"/>
+          </svg>
+          Haptic Armband
+        </legend>
+
+        <div class="armband-connect-row">
+          <div class="armband-info">
+            <span class="armband-status" id="armbandStatusSettings">Not connected</span>
+            <p class="settings-hint">Mirrors device haptic feedback to your wrist. Requires Chrome and a compatible XIAO nRF52840 armband.</p>
+          </div>
+          <button id="connectArmband" type="button" class="armband-connect-btn">Connect</button>
+        </div>
       </fieldset>
 
       <button id="closeSettings" type="button" class="secondary settings-back-btn">
