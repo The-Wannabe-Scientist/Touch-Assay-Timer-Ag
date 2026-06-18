@@ -758,7 +758,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // Reset visual "bucket fulfilled" indicators for the next interval
       UI.Buttons.tap.classList.remove("bucket-fulfilled");
+      // #4: Remove ISI waiting dim now that a new interval is starting
+      UI.Buttons.tap.classList.remove("isi-waiting");
       if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.remove("fulfilled");
+      if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.remove("near-full");
 
       currentStimulusIndex++;
       nextDataIntervalTime += runISI;
@@ -1218,8 +1221,26 @@ document.addEventListener("DOMContentLoaded", async () => {
     let progress = (currentTime - intervalStart) / runISI;  // Use cached ISI
     progress     = Math.max(0, Math.min(1, progress));  // Clamp to [0, 1]
 
+    // #4: Dim the tap button during ISI — only after a tap has already been registered.
+    // When bucket-fulfilled (experimenter tapped), there's nothing more to do until
+    // the next interval, so a gentle dim signals "wait" without alarming the user.
+    if (UI.Buttons.tap.classList.contains("bucket-fulfilled") &&
+        !UI.Buttons.tap.classList.contains("tapped")) {
+      UI.Buttons.tap.classList.add("isi-waiting");
+    } else {
+      UI.Buttons.tap.classList.remove("isi-waiting");
+    }
+
     // Use cached DOM reference from UI — avoids getElementById on every frame
-    if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.style.width = `${progress * 100}%`;
+    if (UI.Displays.metronomeBar) {
+      UI.Displays.metronomeBar.style.width = `${progress * 100}%`;
+      // #10: near-full glow at 90%+ to signal upcoming stimulus
+      if (progress >= 0.9) {
+        UI.Displays.metronomeBar.classList.add("near-full");
+      } else {
+        UI.Displays.metronomeBar.classList.remove("near-full");
+      }
+    }
 
     // Schedule the next frame
     visualAnimationFrame = requestAnimationFrame(renderVisualMetronome);
@@ -1320,7 +1341,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Default: show the table ("true" or no stored pref = visible)
     const shouldShow = pref !== "false";
     container.hidden               = !shouldShow;
-    UI.Buttons.progress.textContent = shouldShow ? "Hide Progress" : "Show Progress";
+    // #7/#15: Update text, icon, and aria-pressed together
+    const label = UI.Buttons.progress.querySelector(".toggle-progress-label");
+    const eyeOn  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
+    const eyeOff = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye-off");
+    if (label)  label.textContent     = shouldShow ? "Hide Progress" : "Show Progress";
+    if (eyeOn)  eyeOn.hidden          = !shouldShow;
+    if (eyeOff) eyeOff.hidden         = shouldShow;
+    UI.Buttons.progress.setAttribute("aria-pressed", String(shouldShow));
   }
 
   /**
@@ -1774,7 +1802,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       progressContainer.innerHTML = "";
       progressContainer.hidden    = true;
     }
-    UI.Buttons.progress.textContent = "Show Progress";
+    // #7/#15: Sync progress toggle button state
+    const label = UI.Buttons.progress.querySelector(".toggle-progress-label");
+    const eyeOn  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
+    const eyeOff = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye-off");
+    if (label)  label.textContent = "Show Progress";
+    if (eyeOn)  eyeOn.hidden     = true;
+    if (eyeOff) eyeOff.hidden    = false;
+    UI.Buttons.progress.setAttribute("aria-pressed", "false");
 
     resetTimingState();
     setState(STATES.SETUP);
@@ -2219,12 +2254,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Show/hide progress table ────────────────────────────────────────────
   UI.Buttons.progress.addEventListener("click", () => {
-    const progressContainer            = document.getElementById("assayProgress");
-    progressContainer.hidden           = !progressContainer.hidden;
-    UI.Buttons.progress.textContent    = progressContainer.hidden ? "Show Progress" : "Hide Progress";
+    const progressContainer = document.getElementById("assayProgress");
+    progressContainer.hidden = !progressContainer.hidden;
+    const nowVisible = !progressContainer.hidden;
+    // #7/#15: Update text, icon, and aria-pressed
+    const label  = UI.Buttons.progress.querySelector(".toggle-progress-label");
+    const eyeOn  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
+    const eyeOff = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye-off");
+    if (label)  label.textContent = nowVisible ? "Hide Progress" : "Show Progress";
+    if (eyeOn)  eyeOn.hidden      = !nowVisible;
+    if (eyeOff) eyeOff.hidden     = nowVisible;
+    UI.Buttons.progress.setAttribute("aria-pressed", String(nowVisible));
     // #21: Persist the user's visibility preference
     // Bug 3 fix: wrap in try/catch for Private Browsing / QuotaExceededError.
-    try { localStorage.setItem("touchAssayProgressVisible", String(!progressContainer.hidden)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem("touchAssayProgressVisible", String(nowVisible)); } catch { /* storage unavailable */ }
   });
 
   // ── Genotype selection change — update tap button label ─────────────────
@@ -2364,7 +2407,14 @@ document.addEventListener("DOMContentLoaded", async () => {
         progressContainer.innerHTML = "";
         progressContainer.hidden    = true;
       }
-      UI.Buttons.progress.textContent = "Show Progress";
+      // #7/#15: Sync progress toggle
+      const label2  = UI.Buttons.progress.querySelector(".toggle-progress-label");
+      const eyeOn2  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
+      const eyeOff2 = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye-off");
+      if (label2)  label2.textContent = "Show Progress";
+      if (eyeOn2)  eyeOn2.hidden      = true;
+      if (eyeOff2) eyeOff2.hidden     = false;
+      UI.Buttons.progress.setAttribute("aria-pressed", "false");
 
       hideScreenAndRestore(UI.Screens.savedAssays);
       setState(STATES.POISED);
@@ -2413,43 +2463,57 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Buttons.deleteSelectedAssays.disabled = !isChecked || all.length === 0;
   });
 
-  UI.Buttons.deleteSelectedAssays.addEventListener("click", async () => {
+  // #6: Inline confirmation for bulk delete — replaces the browser confirm() dialog
+  UI.Buttons.deleteSelectedAssays.addEventListener("click", () => {
     const checked = document.querySelectorAll(".assay-select-checkbox:checked");
     if (checked.length === 0) return;
 
-    if (!confirm(`Are you sure you want to permanently delete ${checked.length} selected assays?`)) return;
+    // If a confirmation bar is already showing, do nothing (user must respond to it)
+    if (document.querySelector(".bulk-delete-confirm")) return;
 
-    UI.Buttons.deleteSelectedAssays.textContent = "Deleting...";
-    UI.Buttons.deleteSelectedAssays.disabled    = true;
+    const bulkBar = document.querySelector(".bulk-actions");
+    const confirmRow = document.createElement("div");
+    confirmRow.className = "bulk-delete-confirm";
+    confirmRow.innerHTML =
+      `<span>Permanently delete <strong>${checked.length}</strong> assay${checked.length !== 1 ? "s" : ""}?</span>` +
+      `<button type="button" class="confirm-yes">Yes, delete</button>` +
+      `<button type="button" class="confirm-cancel">Cancel</button>`;
 
-    const idsToDelete = Array.from(checked).map(cb => cb.dataset.assayId);
-    let failCount = 0;
+    bulkBar.after(confirmRow);
 
-    // Delete sequentially — parallel deletes on the same cached IDB connection
-    // can interleave their write transactions and cause silent aborts.
-    // BUG-2 fix: populateSavedAssaysList() is now inside the try block so the
-    // finally clause always restores the button label even if the list refresh
-    // throws. Previously the call was after the try/finally, so a throw there
-    // would permanently leave the button disabled with no label.
-    try {
-      for (const id of idsToDelete) {
-        try {
-          await deleteAssay(id);
-        } catch (err) {
-          console.error(`Failed to delete assay ${id}:`, err);
-          failCount++;
+    confirmRow.querySelector(".confirm-cancel").addEventListener("click", () => {
+      confirmRow.remove();
+    });
+
+    confirmRow.querySelector(".confirm-yes").addEventListener("click", async () => {
+      confirmRow.remove();
+
+      const idsToDelete = Array.from(checked).map(cb => cb.dataset.assayId);
+      UI.Buttons.deleteSelectedAssays.textContent = "Deleting...";
+      UI.Buttons.deleteSelectedAssays.disabled    = true;
+      let failCount = 0;
+
+      try {
+        for (const id of idsToDelete) {
+          try {
+            await deleteAssay(id);
+          } catch (err) {
+            console.error(`Failed to delete assay ${id}:`, err);
+            failCount++;
+          }
         }
-      }
 
-      if (failCount > 0) {
-        alert(`${failCount} assay(s) could not be deleted. The rest were removed.`);
-      }
+        if (failCount > 0) {
+          showToast(`${failCount} assay(s) could not be deleted. The rest were removed.`, "error", 5000);
+        } else {
+          showToast(`${idsToDelete.length - failCount} assay${idsToDelete.length - failCount !== 1 ? "s" : ""} deleted.`, "success", 3000);
+        }
 
-      await populateSavedAssaysList();
-    } finally {
-      // Always restore the button — even if populateSavedAssaysList() throws.
-      UI.Buttons.deleteSelectedAssays.textContent = "Delete Selected";
-    }
+        await populateSavedAssaysList();
+      } finally {
+        UI.Buttons.deleteSelectedAssays.textContent = "Delete Selected";
+      }
+    });
   });
 
   // ── Settings ────────────────────────────────────────────────────────────
