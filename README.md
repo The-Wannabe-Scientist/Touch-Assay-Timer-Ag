@@ -42,6 +42,7 @@ Adapted by [Ag](https://github.com/The-Wannabe-Scientist) from [touch-assay-time
 | 📱 **Installable PWA** | Installs to iOS / Android / desktop home screen; runs in standalone mode |
 | 🌙 **Light / Dark theme** | System-aware default with manual override; preference persists |
 | ♿ **Accessible** | Keyboard-navigable; ARIA live regions announce stimulus cues |
+| ⌚ **Haptic Armband** | Direct BLE integration for zero-latency haptic mirroring and battery monitoring |
 
 ---
 
@@ -176,6 +177,18 @@ The timing engine uses a **two-layer architecture** for accuracy:
 
 ---
 
+## Haptic Armband Integration
+
+The timer supports an optional external **Haptic Armband** (built on the Seeed XIAO nRF52840) worn by the researcher. This allows the researcher to feel precise tactile feedback without relying on audio or screen visuals.
+
+- **Zero-Latency Mirroring:** The armband perfectly mirrors the native device haptics (a crisp 50ms pulse on tap, and an ascending pattern on trial completion) via a direct Web Bluetooth (GATT) connection.
+- **Safety Watchdog:** A 2-second heartbeat ensures the armband vibrates autonomously if the app crashes or drops the connection.
+- **Battery Monitoring:** Uses the standard BLE Battery Service to display the armband's battery percentage in the header, with smart threshold warnings at ≤20% and ≤10%.
+
+*Note: The armband features require a Chromium-based browser (Chrome, Edge). On unsupported browsers like Safari or Firefox, the feature degrades gracefully and is hidden from the UI.*
+
+---
+
 ## Settings
 
 Access **Settings** from the ⋮ overflow menu in the header.
@@ -233,6 +246,7 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
     ├── models.js       # Data model factories (createAssay, createTrial, createRun)
     ├── db.js           # IndexedDB persistence layer
     ├── audio.js        # Web Audio API metronome + Web Speech API countdown
+    ├── haptic-armband.js # Web Bluetooth GATT module for wearable integration
     ├── export.js       # Excel (SheetJS) / CSV / HTML preview generation
     ├── utils.js        # Binning, Touch Index, pooled-run computation
     ├── toast.js        # Non-blocking notification toasts
@@ -249,6 +263,7 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
 | IndexedDB persistence | All modern browsers (disabled in some private modes) |
 | Web Audio API (ticks) | Chrome, Firefox, Safari, Edge |
 | Web Speech API (voice) | Chrome, Edge (limited in Firefox/Safari) |
+| Web Bluetooth (Armband) | Chrome, Edge, Android Chrome (Not supported in Safari/Firefox) |
 | PWA install | Chrome, Edge, Safari 16.4+ |
 | Offline mode | All browsers with Service Worker support |
 
