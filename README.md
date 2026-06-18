@@ -6,6 +6,8 @@ A fully offline-capable Progressive Web App (PWA) for recording touch assay data
 
 Adapted by [Ag](https://github.com/The-Wannabe-Scientist) from [touch-assay-timer](https://github.com/dv-welp/touch-assay-timer) by [DV](https://github.com/dv-welp/).
 
+🌐 **Live app:** [https://the-wannabe-scientist.github.io/Touch-Assay-Timer-Ag/](https://the-wannabe-scientist.github.io/Touch-Assay-Timer-Ag/)
+
 ---
 
 ## Table of Contents
@@ -50,7 +52,13 @@ Adapted by [Ag](https://github.com/The-Wannabe-Scientist) from [touch-assay-time
 
 The app is a **static web app** — no build step, no server, no dependencies to install.
 
-### Option A — Open locally
+### Option A — Use the hosted app
+
+Just open the link in any modern browser — no installation required:
+
+👉 **[https://the-wannabe-scientist.github.io/Touch-Assay-Timer-Ag/](https://the-wannabe-scientist.github.io/Touch-Assay-Timer-Ag/)**
+
+### Option B — Run locally
 
 ```bash
 # Clone the repo
@@ -67,7 +75,7 @@ Then open `http://localhost:8080` in your browser.
 
 > **Why a server?** Service Workers (and therefore offline caching) require an `https://` or `http://localhost` origin. Opening `index.html` directly via `file://` will disable the PWA features.
 
-### Option B — Deploy to any static host
+### Option C — Deploy to any static host
 
 Upload all files to GitHub Pages, Netlify, Vercel, or any static host. The app is fully self-contained.
 
