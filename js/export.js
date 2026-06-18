@@ -27,7 +27,8 @@ import {
   binRunValues,
   computeTouchIndexBins,
   collectPooledRuns,
-  collectTouchIndexExclusions
+  collectTouchIndexExclusions,
+  escapeHTML
 } from "./utils.js";
 
 
@@ -51,22 +52,7 @@ export const RUN_STATUS_LABELS = {
    XSS Guard
    ========================================================================== */
 
-/**
- * Escapes HTML special characters in a string before inserting it into innerHTML.
- * Prevents XSS when user-supplied values (assay names, genotype labels, etc.)
- * are rendered into the preview modal.
- *
- * @param {string} str - Raw string to escape.
- * @returns {string} Safely escaped HTML string.
- */
-function escapeHTML(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g,  "&lt;")
-    .replace(/>/g,  "&gt;")
-    .replace(/"/g,  "&quot;")
-    .replace(/'/g,  "&#39;");
-}
+// escapeHTML is imported from utils.js — single shared implementation (BUG-10 fix).
 
 
 /* ==========================================================================
@@ -699,7 +685,10 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
   return [
     hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus,
     ...rawRows,
-    ["", ""], ["", ""], ["", ""],   // Blank separator rows
+    // BUG-5 fix: separator rows must have the same column count as the header rows
+    // (5 columns) so SheetJS column-width detection is not confused. Previously these
+    // used only 2 cells, causing inconsistent column widths in the Excel preview.
+    ["", "", "", "", ""], ["", "", "", "", ""], ["", "", "", "", ""],
     summaryHeader,
     ...summaryRows
   ];

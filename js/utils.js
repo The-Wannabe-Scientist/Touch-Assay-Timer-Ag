@@ -214,6 +214,28 @@ export function computeTouchIndexBins(binnedPercentages) {
    ========================================================================== */
 
 /**
+ * Escapes HTML special characters to prevent XSS when rendering
+ * user-supplied strings (e.g. assay names, genotype labels) into innerHTML.
+ *
+ * Extracted here from main.js and export.js to serve as a single source of
+ * truth — previously both modules had an identical private copy (BUG-10).
+ *
+ * @param {string} str - Raw user input string.
+ * @returns {string} Safely escaped HTML string.
+ */
+export function escapeHTML(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g,  "&lt;")
+    .replace(/>/g,  "&gt;")
+    .replace(/"/g,  "&quot;")
+    .replace(/'/g,  "&#39;");
+}
+
+
+
+/**
  * Flattens all runs from all trials in an assay into a single array,
  * enriching each run with its parent trial's index for downstream labelling.
  *

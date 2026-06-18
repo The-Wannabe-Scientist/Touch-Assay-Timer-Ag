@@ -471,7 +471,9 @@ export function triggerImmediateSpeech(stimulusIndex, assayIsi) {
       if (stimulusIndex % 10 === 0) {
         // Speak on multiples of 10
         speak(String(stimulusIndex));
-      } else if (speechSynthesis.speaking || speechSynthesis.pending) {
+      } else if (typeof speechSynthesis !== "undefined" && (speechSynthesis.speaking || speechSynthesis.pending)) {
+        // BUG-7 fix: guard typeof before accessing .speaking/.pending —
+        // some browsers/WebViews expose no speechSynthesis at all.
         // Flush any overrunning speech from the previous multiple-of-10.
         // Without this, a spoken "10" or "20" can still be playing when the
         // next tick fires on short ISIs (≈ 1 s), causing audible overlap.
@@ -488,7 +490,8 @@ export function triggerImmediateSpeech(stimulusIndex, assayIsi) {
       // hardware tick scheduled by scheduleWebAudioTick — no speech needed.
       if (stimulusIndex % binSpeakSize === 0) {
         speak(String(stimulusIndex));
-      } else if (speechSynthesis.speaking || speechSynthesis.pending) {
+      } else if (typeof speechSynthesis !== "undefined" && (speechSynthesis.speaking || speechSynthesis.pending)) {
+        // BUG-7 fix: guard typeof before accessing .speaking/.pending.
         // Flush any overrun from the previous bin-boundary utterance so it
         // doesn't bleed into the following tick interval.
         // Guarded to avoid needless cancel() calls on every non-boundary tick.

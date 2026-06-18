@@ -35,7 +35,7 @@
  */
 
 
-import { validateInputs, generateAutoID, binRunValues } from "./utils.js";
+import { validateInputs, generateAutoID, binRunValues, escapeHTML } from "./utils.js";  // BUG-10: escapeHTML is now shared from utils.js
 import {
   createAssay, createTrial, createRun,
   getActiveTrial, completeRun
@@ -1183,9 +1183,13 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function renderVisualMetronome() {
     if (currentState !== STATES.RUNNING || !currentAssay) {
-      // Clear the stale handle so stopCueLoop()'s cancelAnimationFrame guard stays
-      // consistent — otherwise a handle created by a re-queued rAF after stopCueLoop
-      // would never be stored and could run indefinitely.
+      // BUG-11 (clarification): Setting visualAnimationFrame = null here is safe.
+      // This callback itself is the current rAF tick — its handle was already
+      // consumed by the browser when it invoked us.  We zero the variable so
+      // stopCueLoop()'s cancelAnimationFrame(visualAnimationFrame) call has a
+      // consistent "no pending frame" sentinel (null) regardless of which path
+      // stopped the run, preventing a stale handle from ever being re-cancelled
+      // on the next run.
       visualAnimationFrame = null;
       return;
     }
@@ -1509,22 +1513,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     selAll.indeterminate = checked.length > 0 && checked.length < all.length;
   }
 
-  /**
-   * Escapes HTML special characters to prevent XSS when rendering
-   * user-supplied strings (e.g. assay names) into innerHTML.
-   *
-   * @param {string} str - Raw user input string.
-   * @returns {string} Safely escaped HTML string.
-   */
-  function escapeHTML(str) {
-    if (!str) return "";
-    return str
-      .replace(/&/g, "&amp;")
-      .replace(/</g,  "&lt;")
-      .replace(/>/g,  "&gt;")
-      .replace(/"/g,  "&quot;")
-      .replace(/'/g,  "&#39;");
-  }
+  // BUG-10 fix: escapeHTML is imported from utils.js (shared with export.js).
+  // The local copy that was here has been removed.
 
   /**
    * Builds and renders the trial summary card on the export screen.
@@ -2082,10 +2072,20 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    if (activeTrial.runs.length === 0) {
-      await markTrialAbandoned(currentAssay.assayId, activeTrial.trialId, "No runs recorded");
-    } else {
-      await markTrialCompleted(currentAssay.assayId, activeTrial.trialId);
+    // BUG-4 fix: markTrialAbandoned/Completed rejects when the trial record is not
+    // found in IDB (e.g. a first-launch write was dropped on mobile). Without this
+    // try/catch the promise rejection is unhandled, leaving the UI frozen on the
+    // assay screen with no error feedback to the experimenter.
+    try {
+      if (activeTrial.runs.length === 0) {
+        await markTrialAbandoned(currentAssay.assayId, activeTrial.trialId, "No runs recorded");
+      } else {
+        await markTrialCompleted(currentAssay.assayId, activeTrial.trialId);
+      }
+    } catch (err) {
+      console.error("finishTrial: IDB write failed:", err);
+      showToast("Could not save trial — please try again. If the problem persists, export your data now.", "error", 7000);
+      return;
     }
 
     // Hydrate FIRST so the export list reflects the updated trial status
@@ -2189,13 +2189,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   // ── Overflow menu toggle ────────────────────────────────────────────────
   UI.Buttons.overflowMenu.addEventListener("click", e => {
     e.stopPropagation();  // Prevent the document click handler from immediately closing it
-    UI.Displays.overflowMenu.hidden = !UI.Displays.overflowMenu.hidden;
+    const willBeOpen = UI.Displays.overflowMenu.hidden;  // true = it is currently closed → we are opening it
+    UI.Displays.overflowMenu.hidden = !willBeOpen;
+    // BUG-1 fix: keep aria-expanded in sync so screen readers announce the correct
+    // open/closed state. Previously the attribute was hard-coded to "false" in HTML
+    // and never updated, so assistive technologies always reported the menu as collapsed.
+    UI.Buttons.overflowMenu.setAttribute("aria-expanded", String(willBeOpen));
   });
 
   // Close the overflow menu when clicking anywhere outside it
   document.addEventListener("click", e => {
     if (!UI.Displays.overflowMenu.hidden && !UI.Displays.overflowMenu.contains(e.target)) {
       UI.Displays.overflowMenu.hidden = true;
+      // BUG-1 fix: also reset aria-expanded when closed via outside click.
+      UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
     }
   });
 
@@ -2229,9 +2236,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       await saveTrial(currentAssay.assayId, newTrial);
 
       // Clear progress table from any previously loaded assay
+      // BUG-3 fix: guard against null — every other call site does this; the saved-assays
+      // start action was the only one missing it.
       const progressContainer = document.getElementById("assayProgress");
-      progressContainer.innerHTML = "";
-      progressContainer.hidden    = true;
+      if (progressContainer) {
+        progressContainer.innerHTML = "";
+        progressContainer.hidden    = true;
+      }
       UI.Buttons.progress.textContent = "Show Progress";
 
       hideScreenAndRestore(UI.Screens.savedAssays);
@@ -2295,8 +2306,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Delete sequentially — parallel deletes on the same cached IDB connection
     // can interleave their write transactions and cause silent aborts.
-    // Bug 3: use try/finally so the button label is always restored, even if
-    // populateSavedAssaysList() throws after a partial deletion failure.
+    // BUG-2 fix: populateSavedAssaysList() is now inside the try block so the
+    // finally clause always restores the button label even if the list refresh
+    // throws. Previously the call was after the try/finally, so a throw there
+    // would permanently leave the button disabled with no label.
     try {
       for (const id of idsToDelete) {
         try {
@@ -2310,12 +2323,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (failCount > 0) {
         alert(`${failCount} assay(s) could not be deleted. The rest were removed.`);
       }
+
+      await populateSavedAssaysList();
     } finally {
       // Always restore the button — even if populateSavedAssaysList() throws.
       UI.Buttons.deleteSelectedAssays.textContent = "Delete Selected";
     }
-
-    await populateSavedAssaysList();
   });
 
   // ── Settings ────────────────────────────────────────────────────────────
@@ -2330,7 +2343,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   // so the displayed value always matches the JS variable and never shows 0.
   function applyWarmupDuration(e) {
     const parsed = parseInt(e.target.value, 10);
-    if (isNaN(parsed)) return;  // Don't update while field is empty
+    if (isNaN(parsed)) {
+      // BUG-6 fix: restore the last valid value instead of leaving the field blank.
+      // Without this, clearing the field and then pressing a stepper button fires an
+      // "input" event with value="", parseInt returns NaN, and the field stays empty.
+      // The warmupDuration variable holds the previous good value; writing it back
+      // snaps the field to a valid number immediately.
+      UI.Settings.warmupDurationInput.value = warmupDuration;
+      return;
+    }
     warmupDuration = Math.min(60, Math.max(1, parsed));
     UI.Settings.warmupDurationInput.value = warmupDuration;  // Reflect clamped value back
     // Bug 3 fix: wrap in try/catch for Private Browsing / QuotaExceededError.

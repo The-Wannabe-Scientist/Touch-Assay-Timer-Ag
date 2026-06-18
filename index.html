@@ -105,9 +105,13 @@
           <label for="assayName">Experiment ID</label>
           <input type="text" id="assayName" required>
 
-          <label id="genotypeInputLabel">Genotypes</label>
+          <label for="genotypes" id="genotypeInputLabel">Genotypes</label>
           <!-- Hidden input keeps comma-list value; main.js reads this via .value.split(',') -->
-          <input type="hidden" id="genotypes">
+          <!-- `required` here is picked up by formatRequiredLabels() to show the * asterisk;
+               type="hidden" inputs are exempt from browser constraint validation so this
+               does NOT block form submission (HTML spec §4.10.18.5). (BUG-9 fix) -->
+          <input type="hidden" id="genotypes" required>
+
           <div class="chip-input-wrapper" id="chipInputWrapper" role="group" aria-labelledby="genotypeInputLabel">
             <div id="chipList" class="chip-list" aria-live="polite"></div>
             <input
