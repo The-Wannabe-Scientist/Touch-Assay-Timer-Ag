@@ -23,7 +23,15 @@
 
 // ── Pin Definitions ─────────────────────────────────────────
 #define VIBRATION_PIN   D0    // Grove Vibration Motor signal
-#define BATTERY_ADC_PIN A0    // Optional: voltage divider for battery %
+
+// XIAO nRF52840 battery monitoring
+// PIN_VBAT  = P0.31, routed through an on-board 1MΩ/1MΩ divider.
+// Pin 14 (P0.14) gates the divider FET — must be driven HIGH before reading.
+// If PIN_VBAT is not defined by your BSP version, we fall back to pin 32 (P0.31).
+#ifndef PIN_VBAT
+  #define PIN_VBAT 32
+#endif
+#define VBAT_ENABLE_PIN 14   // pull HIGH to connect divider, LOW when done
 
 // ── Onboard RGB LED ──────────────────────────────────────────
 // XIAO nRF52840 built-in RGB is ACTIVE LOW (write LOW to turn ON)
@@ -119,10 +127,41 @@ void vibrateDisconnect() {
 }
 
 // ── Battery Reading ──────────────────────────────────────────
+// Reads the WLY 602040 3.7V 400mAh LiPo via the XIAO nRF52840's on-board
+// 1MΩ/1MΩ voltage divider on PIN_VBAT (P0.31).
+//
+// Key corrections vs. the naive A0 approach:
+//   • Use PIN_VBAT (P0.31), not A0 — A0 is floating/unconnected.
+//   • Drive VBAT_ENABLE_PIN HIGH to switch on the divider FET before reading.
+//   • Use the internal 3.0V fixed reference (AR_INTERNAL_3_0) so the reading
+//     is independent of VDD, which itself fluctuates on battery power.
+//   • Use 12-bit resolution (nRF52840 ADC max) for ~0.7 mV/LSB accuracy.
+//   • Divider factor is ×2 (1MΩ : 1MΩ), so VBAT = ADC_voltage × 2.
+//   • LiPo discharge curve: 3.0V (0%) → 4.2V (100%).
 int readBatteryPercent() {
-  int raw     = analogRead(BATTERY_ADC_PIN);
-  float volt  = raw * (3.3f / 1023.0f) * 2.0f;
-  int pct     = (int)((volt - 3.0f) / 1.2f * 100.0f);
+  // Enable the voltage divider
+  pinMode(VBAT_ENABLE_PIN, OUTPUT);
+  digitalWrite(VBAT_ENABLE_PIN, HIGH);
+  delayMicroseconds(500); // allow divider to settle
+
+  // Configure ADC for accurate absolute measurement
+  analogReference(AR_INTERNAL_3_0); // 3.0V internal reference (stable)
+  analogReadResolution(12);          // 12-bit: 0–4095
+
+  int raw = analogRead(PIN_VBAT);
+
+  // Restore defaults so other analogRead calls are unaffected
+  analogReadResolution(10);
+  analogReference(AR_DEFAULT);
+
+  // Disable divider FET to save power between reads
+  digitalWrite(VBAT_ENABLE_PIN, LOW);
+
+  // VBAT = raw_voltage × 2  (undo the 1:1 divider)
+  float volt = raw * (3.0f / 4095.0f) * 2.0f;
+
+  // LiPo: 3.0V = 0%, 4.2V = 100%
+  int pct = (int)((volt - 3.0f) / 1.2f * 100.0f);
   return constrain(pct, 0, 100);
 }
 
@@ -233,6 +272,12 @@ void loop() {
     vibrateTap(); // single connect-confirm pulse
 
     while (central.connected()) {
+      // BUG FIX: BLE.poll() MUST be called on every iteration of the inner loop.
+      // ArduinoBLE only processes incoming packets (writes, disconnects, etc.)
+      // during a poll. Without this, hapticChar.written() never returns true
+      // and all touch commands are silently dropped.
+      BLE.poll();
+
       updateLED();
 
       unsigned long now = millis();
