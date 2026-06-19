@@ -325,6 +325,27 @@ void loop() {
 
 ---
 
+## 🚥 LED and Vibration Signals Reference
+
+The armband provides hardware-level feedback via the onboard RGB LED and the vibration motor to indicate its current state.
+
+**Visual Indicators (XIAO Onboard RGB LED):**
+- **Booting up:** Solid White
+- **Advertising / Waiting to connect:** Slow Blue Blink
+- **Connected:** Solid Green
+- **Low Battery (< 15%):** Fast Amber (Red+Green) Blink
+- **Fatal Error:** Solid Red
+
+**Vibration Patterns:**
+- **Boot Sequence:** Three escalating pulses (alive confirmation)
+- **BLE Ready / Advertising:** Double tap
+- **Connected:** Single tap
+- **Disconnected:** Rapid buzz (6 quick pulses)
+- **Low Battery:** SOS pattern (··· ─── ···)
+- **Fatal Error:** Rapid infinite pulsing
+
+---
+
 ## 📱 Connecting via Phone (No App Needed)
 
 Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):

@@ -193,6 +193,23 @@ The timer supports an optional external **Haptic Armband** (built on the Seeed X
 - **Safety Watchdog:** A 2-second heartbeat ensures the armband vibrates autonomously if the app crashes or drops the connection.
 - **Battery Monitoring:** Uses the standard BLE Battery Service to display the armband's battery percentage in the header, with smart threshold warnings at ≤20% and ≤10%.
 
+### Armband Signals & Feedback
+
+**Visual Indicators (XIAO Onboard RGB LED):**
+- **Booting up:** Solid White
+- **Advertising / Waiting to connect:** Slow Blue Blink
+- **Connected:** Solid Green
+- **Low Battery (< 15%):** Fast Amber (Red+Green) Blink
+- **Fatal Error:** Solid Red
+
+**Vibration Patterns:**
+- **Boot Sequence:** Three escalating pulses (alive confirmation)
+- **BLE Ready / Advertising:** Double tap
+- **Connected:** Single tap
+- **Disconnected:** Rapid buzz (6 quick pulses)
+- **Low Battery:** SOS pattern (··· ─── ···)
+- **Fatal Error:** Rapid infinite pulsing
+
 *Note: The armband features require a Chromium-based browser (Chrome, Edge). On unsupported browsers like Safari or Firefox, the feature degrades gracefully and is hidden from the UI.*
 
 ---
