@@ -130,35 +130,33 @@ void vibrateDisconnect() {
 // Reads the WLY 602040 3.7V 400mAh LiPo via the XIAO nRF52840's on-board
 // 1MΩ/1MΩ voltage divider on PIN_VBAT (P0.31).
 //
-// Key corrections vs. the naive A0 approach:
 //   • Use PIN_VBAT (P0.31), not A0 — A0 is floating/unconnected.
 //   • Drive VBAT_ENABLE_PIN HIGH to switch on the divider FET before reading.
-//   • Use the internal 3.0V fixed reference (AR_INTERNAL_3_0) so the reading
-//     is independent of VDD, which itself fluctuates on battery power.
-//   • Use 12-bit resolution (nRF52840 ADC max) for ~0.7 mV/LSB accuracy.
+//   • Use AR_INTERNAL2V4 — the 2.4V internal reference available in the
+//     Seeed nRF52 BSP. This is stable and independent of VDD.
+//     (The generic AR_INTERNAL_3_0 / AR_DEFAULT names do not exist in this BSP.)
+//   • Use 12-bit resolution (nRF52840 ADC max) for ~0.6 mV/LSB accuracy.
 //   • Divider factor is ×2 (1MΩ : 1MΩ), so VBAT = ADC_voltage × 2.
+//     LiPo pin voltage range: 1.5 V (empty) → 2.1 V (full) — well within 2.4V ref.
 //   • LiPo discharge curve: 3.0V (0%) → 4.2V (100%).
 int readBatteryPercent() {
-  // Enable the voltage divider
+  // Enable the voltage divider FET
   pinMode(VBAT_ENABLE_PIN, OUTPUT);
   digitalWrite(VBAT_ENABLE_PIN, HIGH);
   delayMicroseconds(500); // allow divider to settle
 
-  // Configure ADC for accurate absolute measurement
-  analogReference(AR_INTERNAL_3_0); // 3.0V internal reference (stable)
-  analogReadResolution(12);          // 12-bit: 0–4095
+  // AR_INTERNAL2V4 = 2.4V internal reference (Seeed nRF52 BSP constant)
+  analogReference(AR_INTERNAL2V4);
+  analogReadResolution(12); // 12-bit: 0–4095
 
   int raw = analogRead(PIN_VBAT);
-
-  // Restore defaults so other analogRead calls are unaffected
-  analogReadResolution(10);
-  analogReference(AR_DEFAULT);
 
   // Disable divider FET to save power between reads
   digitalWrite(VBAT_ENABLE_PIN, LOW);
 
   // VBAT = raw_voltage × 2  (undo the 1:1 divider)
-  float volt = raw * (3.0f / 4095.0f) * 2.0f;
+  // raw_voltage = raw * (2.4V / 4095)
+  float volt = raw * (2.4f / 4095.0f) * 2.0f;
 
   // LiPo: 3.0V = 0%, 4.2V = 100%
   int pct = (int)((volt - 3.0f) / 1.2f * 100.0f);
