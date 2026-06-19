@@ -61,6 +61,13 @@ export const isArmbandConnected = () => _connected;
  * @param {Function} onDisconnect  Called when the BLE connection drops unexpectedly.
  * @throws {Error}  If the user cancels the picker (err.name === "NotFoundError"),
  *                  or if GATT negotiation fails.
+ *
+ * Filter strategy: we filter by SERVICE_UUID rather than device name.
+ * "TouchAssayArmband" (18 chars) + the 128-bit service UUID together exceed
+ * the 31-byte BLE advertising packet limit, so ArduinoBLE pushes the name
+ * into the scan-response packet. Chrome's name filter only inspects the main
+ * advertising packet, causing intermittent discovery failures.
+ * The service UUID is always in the main advert and is 100% reliable.
  */
 export async function armbandConnect(onDisconnect, onBatteryUpdate = null) {
   if (!isBluetoothSupported()) {
@@ -70,8 +77,8 @@ export async function armbandConnect(onDisconnect, onBatteryUpdate = null) {
   _onBatteryUpdateCb = onBatteryUpdate;
 
   _device = await navigator.bluetooth.requestDevice({
-    filters:          [{ name: "TouchAssayArmband" }],
-    optionalServices: [SERVICE_UUID, BATT_SERVICE_UUID],
+    filters:          [{ services: [SERVICE_UUID] }],  // UUID is in main advert → reliable
+    optionalServices: [BATT_SERVICE_UUID],             // SERVICE_UUID now in filter, not here
   });
 
   _device.addEventListener("gattserverdisconnected", _handleDisconnect);
