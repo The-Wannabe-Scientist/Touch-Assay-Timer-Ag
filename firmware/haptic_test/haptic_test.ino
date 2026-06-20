@@ -1,23 +1,45 @@
 // ============================================================
 //  haptic_test.ino  —  Basic vibration pattern test
 //  Board: Seeed XIAO BLE nRF52840
+//  Hardware: DRV2605L haptic driver (I²C) + external ERM motor
+//
+//  Wiring:
+//    DRV2605L SDA → D4 (XIAO I²C SDA)
+//    DRV2605L SCL → D5 (XIAO I²C SCL)
+//    DRV2605L VIN → 3.3V
+//    DRV2605L GND → GND
+//    ERM motor    → DRV2605L OUTP / OUTN terminals
 // ============================================================
 
-#define VIBRATION_PIN D0   // Grove SIG pin → D0
+#include <Wire.h>
+#include <Adafruit_DRV2605.h>
+
+Adafruit_DRV2605 drv;
 
 void setup() {
   Serial.begin(115200);
-  pinMode(VIBRATION_PIN, OUTPUT);
-  digitalWrite(VIBRATION_PIN, LOW);
-  Serial.println("Haptic Armband - Vibration Test");
+  Wire.begin();
+
+  if (!drv.begin()) {
+    Serial.println("ERROR: DRV2605L not found! Check I2C wiring.");
+    while (1);
+  }
+
+  drv.selectLibrary(1);              // ERM library (use 6 for LRA motors)
+  drv.setMode(DRV2605_MODE_INTTRIG); // internal trigger mode
+
+  Serial.println("Haptic Armband - DRV2605L Vibration Test");
 }
 
+// Drive ERM at full amplitude for onMs, then silent for offMs
 void pulseVibrate(int onMs, int offMs, int reps) {
   for (int i = 0; i < reps; i++) {
-    digitalWrite(VIBRATION_PIN, HIGH);
+    drv.setMode(DRV2605_MODE_REALTIME);
+    drv.setRealtimeValue(127);  // ~50% amplitude (0–255)
     delay(onMs);
-    digitalWrite(VIBRATION_PIN, LOW);
-    delay(offMs);
+    drv.setRealtimeValue(0);
+    drv.setMode(DRV2605_MODE_INTTRIG);
+    if (offMs > 0) delay(offMs);
   }
 }
 

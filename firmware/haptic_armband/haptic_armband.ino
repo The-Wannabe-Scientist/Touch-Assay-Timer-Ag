@@ -1,7 +1,14 @@
 // ============================================================
 //  haptic_armband.ino  —  BLE Haptic Armband Firmware
 //  Board: Seeed XIAO BLE nRF52840
-//  Library: ArduinoBLE
+//  Libraries: ArduinoBLE, Adafruit DRV2605
+//
+//  Hardware: DRV2605L haptic driver (I²C) + external ERM motor
+//    DRV2605L SDA → D4 (XIAO I²C SDA)
+//    DRV2605L SCL → D5 (XIAO I²C SCL)
+//    DRV2605L VIN → 3.3V
+//    DRV2605L GND → GND
+//    ERM motor    → DRV2605L OUTP / OUTN terminals
 //
 //  GATT layout (must match js/haptic-armband.js exactly):
 //    Service UUID:    12345678-1234-1234-1234-123456789012
@@ -20,9 +27,11 @@
 // ============================================================
 
 #include <ArduinoBLE.h>
+#include <Wire.h>
+#include <Adafruit_DRV2605.h>
 
-// ── Pin Definitions ─────────────────────────────────────────
-#define VIBRATION_PIN   D0    // Grove Vibration Motor signal
+// ── DRV2605L Driver Instance ─────────────────────────────────
+Adafruit_DRV2605 drv;
 
 // XIAO nRF52840 battery monitoring
 // PIN_VBAT  = P0.31, routed through an on-board 1MΩ/1MΩ divider.
@@ -86,13 +95,23 @@ unsigned long lastHeartbeatMs    = 0;
 bool          heartbeatActive    = false;  // true once first HB received
 const unsigned long HB_TIMEOUT_MS = 3000; // >3 s with no HB → stutter warning
 
-// ── Vibration helpers ────────────────────────────────────────
+// ── DRV2605L Vibration Helpers ───────────────────────────────
+// The DRV2605L library uses ROM waveform slots (1–123) for
+// ERM/LRA. We use setRealtimeValue() for precise custom pulses
+// at full amplitude, then return to 0 to stop.
+//
+// Alternatively, individual waveform slots can be used for
+// hardware-timed effects (no delay() needed), but custom
+// durations are cleaner with real-time mode for this application.
 
-// Single blocking pulse: on for onMs, then off for offMs
+// Drive the ERM at full amplitude for onMs, then stop.
+// Uses real-time playback mode (RTP) for duration control.
 void pulse(int onMs, int offMs = 0) {
-  digitalWrite(VIBRATION_PIN, HIGH);
+  drv.setMode(DRV2605_MODE_REALTIME);
+  drv.setRealtimeValue(127);  // 127 = ~50% amplitude (0–255 range)
   delay(onMs);
-  digitalWrite(VIBRATION_PIN, LOW);
+  drv.setRealtimeValue(0);
+  drv.setMode(DRV2605_MODE_INTTRIG); // return to internal trigger mode
   if (offMs > 0) delay(offMs);
 }
 
@@ -202,15 +221,29 @@ void setup() {
   boardState = STATE_BOOTING;
   updateLED(); // solid white
 
-  // Motor
-  pinMode(VIBRATION_PIN, OUTPUT);
-  digitalWrite(VIBRATION_PIN, LOW);
-
   // Serial (optional)
   Serial.begin(115200);
   unsigned long t = millis();
   while (!Serial && millis() - t < 2000) {}
 
+  // ── DRV2605L Init ──────────────────────────────────────────
+  // The DRV2605L communicates over I²C (address 0x5A).
+  // Wire.begin() uses XIAO D4 (SDA) and D5 (SCL) by default.
+  Wire.begin();
+  if (!drv.begin()) {
+    Serial.println("ERROR: DRV2605L not found! Check wiring.");
+    boardState = STATE_BLE_ERROR;
+    updateLED();
+    while (1) {
+      setLED(true, false, false); delay(100);
+      setLED(false, false, false); delay(200);
+    }
+  }
+
+  drv.selectLibrary(1);             // ERM library (use 6 for LRA motors)
+  drv.setMode(DRV2605_MODE_INTTRIG); // internal trigger mode (default)
+
+  Serial.println("DRV2605L initialised.");
   Serial.println("Startup vibration sequence...");
   startupVibrationSequence();
 

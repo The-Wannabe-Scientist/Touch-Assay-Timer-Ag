@@ -45,6 +45,7 @@ let _battChar           = null;   // Battery Level characteristic (0x2A19)
 let _hbTimer            = null;
 let _connected          = false;
 let _onDisconnectCb     = null;
+let _onReconnectCb      = null;  // () => void — fired after a successful auto-reconnect
 let _onBatteryUpdateCb  = null;  // (level: 0-100) => void
 
 // ── Public API ─────────────────────────────────────────────────────────────────
@@ -58,7 +59,9 @@ export const isArmbandConnected = () => _connected;
 /**
  * Opens the browser Bluetooth device picker and connects to the armband.
  * Resolves when GATT characteristics are ready.
- * @param {Function} onDisconnect  Called when the BLE connection drops unexpectedly.
+ * @param {Function} onDisconnect   Called when the BLE connection drops unexpectedly.
+ * @param {Function} [onBatteryUpdate]  Called with the battery level (0-100) on updates.
+ * @param {Function} [onReconnect]  Called when a background auto-reconnect succeeds.
  * @throws {Error}  If the user cancels the picker (err.name === "NotFoundError"),
  *                  or if GATT negotiation fails.
  *
@@ -69,11 +72,12 @@ export const isArmbandConnected = () => _connected;
  * advertising packet, causing intermittent discovery failures.
  * The service UUID is always in the main advert and is 100% reliable.
  */
-export async function armbandConnect(onDisconnect, onBatteryUpdate = null) {
+export async function armbandConnect(onDisconnect, onBatteryUpdate = null, onReconnect = null) {
   if (!isBluetoothSupported()) {
     throw new Error("Web Bluetooth is not supported on this browser.");
   }
   _onDisconnectCb    = onDisconnect;
+  _onReconnectCb     = onReconnect;
   _onBatteryUpdateCb = onBatteryUpdate;
 
   _device = await navigator.bluetooth.requestDevice({
@@ -215,8 +219,10 @@ function _handleDisconnect() {
       await _subscribeBattery(server);  // re-subscribe after reconnect
       _connected    = true;
       console.log("[HapticArmband] Auto-reconnected.");
+      // Notify the UI so it can restore the "connected" appearance.
+      _onReconnectCb?.();
     } catch {
-      console.warn("[HapticArmband] Auto-reconnect failed.");
+      console.warn("[HapticArmband] Auto-reconnect failed — user must reconnect manually.");
     }
   }, 1000);
 }

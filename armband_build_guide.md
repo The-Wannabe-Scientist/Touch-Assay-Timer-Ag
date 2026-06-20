@@ -1,6 +1,6 @@
 # 🦾 BLE Haptic Armband Build Guide
 
-**Components:** Seeed Studio XIAO BLE nRF52840 · WLY602040 3.7V 400mAh LiPo · Seeed Grove Vibration Motor
+**Components:** Seeed Studio XIAO BLE nRF52840 · WLY602040 3.7V 400mAh LiPo · DRV2605L Haptic Driver · External ERM Vibration Motor
 
 ---
 
@@ -10,11 +10,13 @@
 |---|---|---|
 | Seeed Studio XIAO BLE nRF52840 | 1 | **Not** the Sense variant unless you want IMU |
 | WLY602040 3.7V 400mAh LiPo battery | 1 | 6×20×40 mm, ~PCM protected |
-| Seeed Grove Vibration Motor (v1.2+) | 1 | **Must be v1.2+** — has built-in S9013 transistor |
-| Grove to Dupont/Bare-Wire cable | 1 | Or cut a 4-pin Grove cable |
+| DRV2605L Haptic Motor Driver breakout | 1 | Adafruit #2305 or equivalent; I²C, 3.3V-compatible |
+| External ERM vibration motor (coin/pancake) | 1 | 3V ERM, e.g. 10mm × 2.7mm coin cell motor; ~1.0–1.5Ω coil |
+| 4× pin header / jumper wires (female–female) | — | For SDA, SCL, VIN, GND from XIAO to DRV2605L breakout |
+| 2× thin motor leads (~5 cm) | — | Solder from DRV2605L OUTP/OUTN pads to motor terminals |
 | Elastic armband strap (~30mm wide) | 1 | Nylon or silicone |
 | Velcro strip | 1 pair | ~30 mm × 60 mm |
-| Small enclosure / 3D-printed shell | 1 | ~50×25×12 mm |
+| Small enclosure / 3D-printed shell | 1 | ~55×25×14 mm (slightly deeper to fit DRV2605L breakout) |
 | Kapton tape or hot glue | — | For strain relief & insulation |
 | USB-C cable | 1 | For programming & charging |
 | **Optional:** On/off toggle switch (SPDT) | 1 | Wired in series on BAT+ line |
@@ -29,10 +31,13 @@
 > **LiPo polarity is fatal to the board.** Always verify BAT+ (red wire) and BAT− (black wire) with a multimeter BEFORE soldering. Reversing polarity will instantly destroy the XIAO.
 
 > [!WARNING]
-> The Grove Vibration Motor **must be v1.2 or later** (has the S9013 transistor on-board). Earlier v1.0 modules drive the motor directly from the I/O pin and can pull too much current. Check the PCB silkscreen.
+> The DRV2605L is a **dedicated haptic driver IC** — do NOT connect the ERM motor directly to any GPIO pin. The DRV2605L controls motor current via its internal H-bridge; the GPIO pins of the XIAO can only handle 4 mA and will be damaged or produce very weak vibration if used directly.
 
 > [!NOTE]
-> The XIAO nRF52840 runs at **3.3V logic**. The Grove Vibration Motor module accepts 3.0–5.5V on VCC and logic-level signal, so it is fully compatible at 3.3V.
+> The XIAO nRF52840 runs at **3.3V logic**. The DRV2605L breakout board (Adafruit #2305) includes a 3.3V regulator and level-shifter, so it accepts both 3.3V and 5V power on VIN — power it from the XIAO **3.3V** pad.
+
+> [!TIP]
+> The DRV2605L I²C address is fixed at **0x5A**. If you use another I²C device (e.g. an IMU), ensure there is no address conflict.
 
 ---
 
@@ -59,19 +64,22 @@ D6/TX│ 7        8│ VIN (5V from USB)
 
 ## 🔌 Wiring Diagram
 
-### Grove Vibration Motor → XIAO BLE
+### DRV2605L Haptic Driver → XIAO BLE
 
-The Grove connector has 4 wires:
-
-| Grove Wire | Color | Connect To | XIAO Pin |
-|---|---|---|---|
-| Signal (SIG) | Yellow | D0 | Pin 1 |
-| NC | White | (leave unconnected) | — |
-| VCC | Red | 3.3V pad | Pin 14 |
-| GND | Black | GND pad | Pin 13 |
+| DRV2605L Pin | Connect To | XIAO Pin |
+|---|---|---|
+| VIN | 3.3V pad | Pin 14 |
+| GND | GND pad | Pin 13 |
+| SDA | D4/SDA | Pin 5 |
+| SCL | D5/SCL | Pin 6 |
+| OUTP | Motor (+) terminal | — |
+| OUTN | Motor (−) terminal | — |
 
 > [!TIP]
-> If using a bare-ended Grove cable, strip ~5mm of insulation, tin the ends, and solder directly to the XIAO pads or use a breadboard for prototyping first.
+> Use short (~5 cm) silicone-insulated wires between the DRV2605L OUTP/OUTN pads and the ERM motor leads. Twist the two motor wires together to minimise EMI and strain on the solder joints.
+
+> [!NOTE]
+> Many ERM coin motors have **no polarity marking** — reversing OUTP/OUTN only changes spin direction and has no electrical impact. If the motor doesn't spin, swap the two motor leads.
 
 ### LiPo Battery → XIAO BLE (bottom pads)
 
@@ -84,6 +92,25 @@ The Grove connector has 4 wires:
 Insert a single-pole switch in series on the BAT+ line:
 ```
   LiPo Red (+) ──→ [SWITCH] ──→ BAT+
+```
+
+### Complete Wiring at a Glance
+
+```
+  ┌────────────────┐        ┌──────────────────┐
+  │  XIAO nRF52840 │        │   DRV2605L       │
+  │                │        │                  │
+  │   3.3V (14) ───┼────────┼─ VIN             │
+  │    GND  (13) ──┼────────┼─ GND             │
+  │  D4/SDA (5)  ──┼────────┼─ SDA             │
+  │  D5/SCL (6)  ──┼────────┼─ SCL             │
+  │                │        │                  │
+  │                │        │  OUTP ───────────┼──→ Motor (+)
+  │                │        │  OUTN ───────────┼──→ Motor (−)
+  └────────────────┘        └──────────────────┘
+        │
+  BAT+ (bottom) ──→ LiPo Red (+)
+  BAT− (bottom) ──→ LiPo Black (−)
 ```
 
 ---
@@ -111,10 +138,21 @@ Download Arduino IDE 2.x from [arduino.cc](https://www.arduino.cc/en/software).
 > [!NOTE]
 > If the board is not detected, **double-tap the Reset button**. The orange LED will fade — this is bootloader mode. Try uploading again.
 
-### Step 4 — Install ArduinoBLE Library
+### Step 4 — Install Required Libraries
 
+You need **two** libraries:
+
+#### ArduinoBLE
 1. **Sketch → Include Library → Manage Libraries**
 2. Search **"ArduinoBLE"**, click **Install**
+
+#### Adafruit DRV2605 Library
+1. **Sketch → Include Library → Manage Libraries**
+2. Search **"Adafruit DRV2605"**, click **Install**
+3. When prompted to install dependencies, click **Install All** (installs Adafruit BusIO)
+
+> [!IMPORTANT]
+> Both libraries are required. The sketch will fail to compile without `Adafruit_DRV2605.h` and `Adafruit_BusIO`.
 
 ---
 
@@ -128,23 +166,45 @@ This sketch runs a haptic heartbeat pattern on boot — no BLE required. Great f
 // ============================================================
 //  haptic_test.ino  —  Basic vibration pattern test
 //  Board: Seeed XIAO BLE nRF52840
+//  Hardware: DRV2605L haptic driver (I²C) + external ERM motor
+//
+//  Wiring:
+//    DRV2605L SDA → D4 (XIAO I²C SDA)
+//    DRV2605L SCL → D5 (XIAO I²C SCL)
+//    DRV2605L VIN → 3.3V
+//    DRV2605L GND → GND
+//    ERM motor    → DRV2605L OUTP / OUTN terminals
 // ============================================================
 
-#define VIBRATION_PIN D0   // Grove SIG pin → D0
+#include <Wire.h>
+#include <Adafruit_DRV2605.h>
+
+Adafruit_DRV2605 drv;
 
 void setup() {
   Serial.begin(115200);
-  pinMode(VIBRATION_PIN, OUTPUT);
-  digitalWrite(VIBRATION_PIN, LOW);
-  Serial.println("Haptic Armband - Vibration Test");
+  Wire.begin();
+
+  if (!drv.begin()) {
+    Serial.println("ERROR: DRV2605L not found! Check I2C wiring.");
+    while (1);
+  }
+
+  drv.selectLibrary(1);              // ERM library (use 6 for LRA motors)
+  drv.setMode(DRV2605_MODE_INTTRIG); // internal trigger mode
+
+  Serial.println("Haptic Armband - DRV2605L Vibration Test");
 }
 
+// Drive ERM at full amplitude for onMs, then silent for offMs
 void pulseVibrate(int onMs, int offMs, int reps) {
   for (int i = 0; i < reps; i++) {
-    digitalWrite(VIBRATION_PIN, HIGH);
+    drv.setMode(DRV2605_MODE_REALTIME);
+    drv.setRealtimeValue(127);  // ~50% amplitude (0–255)
     delay(onMs);
-    digitalWrite(VIBRATION_PIN, LOW);
-    delay(offMs);
+    drv.setRealtimeValue(0);
+    drv.setMode(DRV2605_MODE_INTTRIG);
+    if (offMs > 0) delay(offMs);
   }
 }
 
@@ -163,165 +223,52 @@ void loop() {
 
 ### Full BLE-Controlled Haptic Armband
 
-This is the main firmware. It exposes a **BLE GATT service** with:
-- **Characteristic 1** — Trigger a vibration pattern (write 0–4)
-- **Characteristic 2** — Battery voltage (read/notify)
+This is the main firmware. It exposes a **BLE GATT service** that the Touch Assay Timer web app connects to. The DRV2605L is controlled over I²C using real-time playback (RTP) mode for precise custom pulse durations.
 
+See [`firmware/haptic_armband/haptic_armband.ino`](./firmware/haptic_armband/haptic_armband.ino) for the complete sketch — summarised key points below:
+
+| Feature | Implementation |
+|---|---|
+| Motor driver | DRV2605L via I²C (Wire.h + Adafruit_DRV2605) |
+| Vibration control | `drv.setMode(DRV2605_MODE_REALTIME)` + `setRealtimeValue(127)` |
+| Amplitude | 127/255 (~50%) — increase to 200–255 for stronger feedback |
+| Motor library | ERM = `drv.selectLibrary(1)`; LRA = `drv.selectLibrary(6)` |
+| BLE service UUID | `12345678-1234-1234-1234-123456789012` |
+| Tap command | Write `0x01` to haptic characteristic → 50 ms pulse |
+| Run complete | Write `0x02` → ascending 100 ms + 200 ms pattern |
+| Heartbeat watchdog | No HB for >3 s → 3× stutter pattern |
+
+> [!TIP]
+> To increase vibration intensity, raise the `setRealtimeValue()` argument (max 255). Start at 127 and adjust to taste — higher values draw more current but feel stronger.
+
+---
+
+## 🔋 DRV2605L Driver Notes
+
+### ERM vs LRA Motor Selection
+
+The DRV2605L supports two motor types:
+
+| Motor Type | Library Constant | `selectLibrary()` |
+|---|---|---|
+| **ERM** (coin/pager, DC motor) | `DRV2605_LIBRARY_ERM_CLOSED_LOOP` | `drv.selectLibrary(1)` |
+| **LRA** (linear resonant actuator) | `DRV2605_LIBRARY_LRA` | `drv.selectLibrary(6)` |
+
+This firmware targets **ERM coin motors** (library 1). If you use an LRA, change `selectLibrary(1)` to `selectLibrary(6)` and enable LRA mode:
 ```cpp
-// ============================================================
-//  haptic_armband.ino  —  BLE Haptic Armband Firmware
-//  Board: Seeed XIAO BLE nRF52840
-//  Library: ArduinoBLE
-// ============================================================
-
-#include <ArduinoBLE.h>
-
-// ── Pin Definitions ─────────────────────────────────────────
-#define VIBRATION_PIN   D0    // Grove Vibration Motor signal
-#define BATTERY_ADC_PIN A0    // Optional: voltage divider for battery %
-// (XIAO nRF52840 has built-in charge state LED,
-//  battery ADC requires a resistor divider on A0)
-
-// ── BLE Service & Characteristics ───────────────────────────
-// Using standard "Haptic" / custom 128-bit UUIDs
-BLEService hapticService("19B10000-E8F2-537E-4F6C-D104768A1214");
-
-// Pattern command: write 0–4 to trigger pattern
-BLEByteCharacteristic patternChar(
-  "19B10001-E8F2-537E-4F6C-D104768A1214",
-  BLEWrite
-);
-
-// Battery level 0–100 (read + notify)
-BLEByteCharacteristic batteryChar(
-  "2A19",   // Standard Battery Level UUID
-  BLERead | BLENotify
-);
-
-// ── Vibration Patterns ───────────────────────────────────────
-struct Pulse { int onMs; int offMs; int reps; };
-
-const Pulse PATTERNS[][5] = {
-  // 0: Single short tap
-  {{50, 0, 1}, {0,0,0}, {0,0,0}, {0,0,0}, {0,0,0}},
-  // 1: Double tap
-  {{80, 70, 2}, {0,0,0}, {0,0,0}, {0,0,0}, {0,0,0}},
-  // 2: Long pulse
-  {{600, 0, 1}, {0,0,0}, {0,0,0}, {0,0,0}, {0,0,0}},
-  // 3: SOS (··· ─── ···)
-  {{100,80,3},{300,80,3},{100,80,3},{0,0,0},{0,0,0}},
-  // 4: Rapid buzz
-  {{50, 50, 6}, {0,0,0}, {0,0,0}, {0,0,0}, {0,0,0}},
-};
-
-// ── Battery Reading ──────────────────────────────────────────
-int readBatteryPercent() {
-  // Simple voltage divider: 100kΩ from BAT+ to A0, 100kΩ from A0 to GND
-  // Full scale 4.2V → 2.1V at A0 → 3.3V ref → ~65% of ADC range
-  // Adjust R1/R2 or calibrate for your specific divider
-  int raw = analogRead(BATTERY_ADC_PIN);
-  float voltage = raw * (3.3f / 1023.0f) * 2.0f;  // ×2 for divider
-  // LiPo: 3.0V = 0%, 4.2V = 100%
-  int pct = (int)((voltage - 3.0f) / 1.2f * 100.0f);
-  return constrain(pct, 0, 100);
-}
-
-// ── Run a vibration pattern ──────────────────────────────────
-void runPattern(int id) {
-  if (id < 0 || id > 4) return;
-  const Pulse* p = PATTERNS[id];
-  for (int i = 0; i < 5; i++) {
-    if (p[i].reps == 0) break;
-    for (int r = 0; r < p[i].reps; r++) {
-      digitalWrite(VIBRATION_PIN, HIGH);
-      delay(p[i].onMs);
-      digitalWrite(VIBRATION_PIN, LOW);
-      if (p[i].offMs > 0) delay(p[i].offMs);
-    }
-  }
-}
-
-// ── Setup ────────────────────────────────────────────────────
-void setup() {
-  Serial.begin(115200);
-  // Wait up to 2s for Serial monitor (remove for battery-only use)
-  unsigned long t = millis();
-  while (!Serial && millis() - t < 2000) {}
-
-  pinMode(VIBRATION_PIN, OUTPUT);
-  digitalWrite(VIBRATION_PIN, LOW);
-
-  // Init BLE
-  if (!BLE.begin()) {
-    Serial.println("ERROR: BLE init failed!");
-    while (1) {
-      // Blink vibrate to signal error
-      digitalWrite(VIBRATION_PIN, HIGH); delay(50);
-      digitalWrite(VIBRATION_PIN, LOW);  delay(200);
-    }
-  }
-
-  // Advertise device
-  BLE.setLocalName("HapticArmband");
-  BLE.setAdvertisedService(hapticService);
-
-  // Add characteristics to service
-  hapticService.addCharacteristic(patternChar);
-  hapticService.addCharacteristic(batteryChar);
-
-  // Add service to BLE stack
-  BLE.addService(hapticService);
-
-  // Set initial values
-  patternChar.writeValue(0);
-  batteryChar.writeValue(readBatteryPercent());
-
-  // Start advertising
-  BLE.advertise();
-  Serial.println("BLE Haptic Armband ready. Advertising...");
-
-  // Boot confirmation pulse
-  runPattern(1);  // double-tap on boot
-}
-
-// ── Loop ─────────────────────────────────────────────────────
-unsigned long lastBatteryUpdate = 0;
-const unsigned long BATTERY_INTERVAL_MS = 30000; // 30s
-
-void loop() {
-  BLEDevice central = BLE.central();
-
-  if (central) {
-    Serial.print("Connected to: ");
-    Serial.println(central.address());
-    runPattern(0);  // single tap on connect
-
-    while (central.connected()) {
-      // Handle pattern commands
-      if (patternChar.written()) {
-        int id = patternChar.value();
-        Serial.print("Pattern: "); Serial.println(id);
-        runPattern(id);
-      }
-
-      // Periodic battery update
-      unsigned long now = millis();
-      if (now - lastBatteryUpdate > BATTERY_INTERVAL_MS) {
-        int pct = readBatteryPercent();
-        batteryChar.writeValue(pct);
-        Serial.print("Battery: "); Serial.print(pct); Serial.println("%");
-        lastBatteryUpdate = now;
-
-        // Low battery warning
-        if (pct < 15) runPattern(3);  // SOS pattern
-      }
-    }
-
-    Serial.println("Disconnected.");
-    runPattern(4);  // rapid buzz on disconnect
-  }
-}
+drv.useLRA(); // call this after drv.begin()
 ```
+
+### Waveform ROM Effects (Alternative to RTP)
+
+The DRV2605L includes 123 pre-programmed haptic waveforms in ROM. These run entirely in hardware (no `delay()` needed) and are ideal for consistent, timed patterns. Example:
+```cpp
+// Play ROM effect #14 (sharp click) then stop
+drv.setWaveform(0, 14);  // slot 0: effect #14
+drv.setWaveform(1, 0);   // slot 1: end
+drv.go();
+```
+See the [DRV2605L datasheet](https://www.ti.com/lit/ds/symlink/drv2605l.pdf) for the full effect library table.
 
 ---
 
@@ -350,19 +297,15 @@ The armband provides hardware-level feedback via the onboard RGB LED and the vib
 
 Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
 
-1. Open the app → Scan → find **"HapticArmband"**
+1. Open the app → Scan → find **"TouchAssayArmband"**
 2. Connect
-3. Navigate to the custom service UUID `19B10000-...`
-4. Write a **byte value (0–4)** to the Pattern characteristic
-5. The armband vibrates the corresponding pattern
+3. Navigate to the custom service UUID `12345678-1234-1234-1234-123456789012`
+4. Write a **byte value** to the Haptic characteristic:
 
 | Value | Pattern |
 |---|---|
-| `0` | Single short tap |
-| `1` | Double tap |
-| `2` | Long pulse (600 ms) |
-| `3` | SOS (··· ─── ···) |
-| `4` | Rapid buzz (6×) |
+| `0x01` | Single tap (50 ms) |
+| `0x02` | Run complete (100 ms pause 200 ms) |
 
 ---
 
@@ -376,48 +319,58 @@ Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
 4. Apply Kapton tape over the solder joints for insulation
 5. **Optional:** solder the on/off switch in-line on the red wire
 
-### Step 2: Prepare Grove Motor Cable
+### Step 2: Connect DRV2605L to XIAO
 
-1. Cut the Grove-to-Grove cable in half, or use a Grove-to-bare-wire cable
-2. Strip ~5mm from each wire end
-3. Identify: Yellow = SIG, Red = VCC, Black = GND, White = NC
-4. Solder:
-   - Yellow → D0 pad
-   - Red → 3.3V pad
-   - Black → GND pad
-   - White → leave untouched (tape the end)
-5. Hot-glue or Kapton tape wires to XIAO for strain relief
+1. Use short female-female jumper wires (or directly solder wires):
+   - DRV2605L **VIN** → XIAO **3.3V** (pin 14)
+   - DRV2605L **GND** → XIAO **GND** (pin 13)
+   - DRV2605L **SDA** → XIAO **D4** (pin 5)
+   - DRV2605L **SCL** → XIAO **D5** (pin 6)
+2. Secure the DRV2605L breakout flat against the XIAO with double-sided foam tape
+3. Apply hot glue or Kapton tape for extra strain relief on the wires
 
-### Step 3: Test Electronics (Before Enclosing)
+### Step 3: Attach ERM Motor to DRV2605L
+
+1. Strip ~5 mm from each ERM motor lead
+2. Tin both leads and the DRV2605L **OUTP** and **OUTN** pads
+3. Solder motor leads to OUTP and OUTN (polarity only affects spin direction — either orientation works)
+4. Apply a small drop of hot glue at the solder joint for strain relief
+5. Twist the two motor leads together to reduce EMI
+
+### Step 4: Test Electronics (Before Enclosing)
 
 1. Connect XIAO via USB-C
 2. Upload the `haptic_test.ino` sketch first
-3. Verify the motor buzzes the double-tap + long-pulse pattern
-4. Open Serial Monitor at 115200 baud to confirm messages
-5. Then upload `haptic_armband.ino` and test BLE from your phone
+3. Open **Serial Monitor at 115200 baud** — confirm "DRV2605L Vibration Test" appears
+4. Verify the motor buzzes the double-tap + long-pulse pattern
+5. If Serial prints "ERROR: DRV2605L not found!" — check SDA/SCL wiring and ensure `Wire.begin()` is called
+6. Then upload `haptic_armband.ino` and test BLE from your phone
 
-### Step 4: Enclosure
+> [!TIP]
+> If the motor makes noise but doesn't vibrate strongly, increase `setRealtimeValue()` from 127 toward 200 in `haptic_test.ino`. If there is no response at all, check the OUTP/OUTN solder joints with a multimeter (should read ~3 V when active).
+
+### Step 5: Enclosure
 
 **Option A — 3D Printed Shell (Recommended)**
-- Print a 50×25×12mm box with snap-fit lid
+- Print a 55×25×14mm box with snap-fit lid
 - Add cutouts for: USB-C port, optional power switch, motor wire exit
-- Dimensions to fit XIAO (21×17.5 mm) + LiPo (6×20×40 mm) side-by-side
+- Dimensions to fit XIAO (21×17.5 mm) + DRV2605L breakout (~20×20 mm) + LiPo (6×20×40 mm)
 
 **Option B — Heat-Shrink / Fabric Pouch**
 - Wrap in bubble foam, slide into a sewn nylon pouch
 - Velcro the pouch to the strap
 
-### Step 5: Attach to Armband
+### Step 6: Attach to Armband
 
 1. Cut elastic strap to wrist circumference + ~40mm overlap
 2. Sew or glue Velcro: loop side on one strap end, hook side on the other
 3. Attach enclosure to the center of the strap using:
    - Hook-and-loop (removable, for charging)
    - Double-sided foam tape (permanent)
-4. Route the vibration motor cable alongside the strap
-5. Position the vibration motor disc at the underside (skin-contact face) of the band for best haptic sensation
+4. Route the motor cable alongside the strap
+5. Position the ERM motor disc at the underside (skin-contact face) of the band for best haptic sensation — attach with a small adhesive foam pad
 
-### Step 6: Charging
+### Step 7: Charging
 
 1. Remove the enclosure from the strap (or expose the USB-C port)
 2. Plug in any USB-C cable
@@ -443,11 +396,13 @@ Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
 |---|---|
 | Board not detected in Arduino IDE | Double-tap Reset; use USB-C **data** cable (not charge-only) |
 | Upload fails | Select mbed-enabled board package; check port selection |
-| Motor doesn't vibrate | Check SIG wire on D0; verify VCC is 3.3V; probe with multimeter |
+| Serial: "DRV2605L not found!" | Check SDA→D4 and SCL→D5; confirm VIN=3.3V and GND connected; verify `Wire.begin()` is called before `drv.begin()` |
+| Motor doesn't vibrate | Check OUTP/OUTN solder joints; confirm DRV2605L enumerated on Serial; try swapping motor leads |
+| Motor vibrates but very weakly | Increase `setRealtimeValue()` argument (e.g. 200); ensure motor coil resistance ~1–1.5Ω |
 | BLE doesn't advertise | Call `BLE.begin()` before any other BLE function |
 | Serial Monitor blank | Add `while(!Serial){}` with timeout; use mbed board package |
 | Battery draining fast | Add `delay()` in loop; use `BLE.poll()` instead of blocking |
-| Vibration feels weak at 3.3V | Power motor VCC from VIN (5V from USB) only when plugged in; not available from battery |
+| Compile error: Adafruit_DRV2605.h not found | Install "Adafruit DRV2605" library + dependencies via Library Manager |
 
 ---
 
@@ -480,19 +435,19 @@ For deep-sleep between events (advanced), use the `nrf52` SDK sleep calls or the
 
 ```
 ┌──────────────────────────────────────┐
-│         50mm × 25mm × 12mm           │
+│         55mm × 25mm × 14mm           │
 │                                      │
-│  ┌────────┐  ┌───────────────────┐  │
-│  │  XIAO  │  │   LiPo Battery    │  │
-│  │21×17mm │  │   6×20×40mm       │  │
-│  └────────┘  └───────────────────┘  │
+│  ┌──────┐  ┌───────┐  ┌──────────┐  │
+│  │ XIAO │  │DRV2605│  │  LiPo    │  │
+│  │21×17mm│ │~20×20mm│ │6×20×40mm │  │
+│  └──────┘  └───────┘  └──────────┘  │
 │                                      │
 │  ← USB-C cutout on short end →       │
 │  ← Motor wire exit on long side →    │
 └──────────────────────────────────────┘
 ```
 
-Place the **vibration motor disc** external to the enclosure on the skin-facing side, attached with adhesive foam tape.
+Place the **ERM motor disc** external to the enclosure on the skin-facing side, attached with adhesive foam tape or a 3D-printed motor pocket.
 
 ---
 
