@@ -2164,6 +2164,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     /**
+     * Restores the UI to the "connected" state.
+     * Called from both the normal connect path and the auto-reconnect callback.
+     */
+    function _setArmbandConnectedUI() {
+      UI.Displays.armbandStatusSettings.textContent = "Connected \u2713";
+      UI.Displays.armbandStatusSettings.className   = "armband-status armband-connected";
+      UI.Buttons.armbandHeaderBtn.classList.add("armband-connected");
+      UI.Buttons.armbandHeaderBtn.classList.remove("armband-disconnected");
+      UI.Buttons.armbandHeaderBtn.setAttribute("title", "Armband Connected");
+      UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Armband Connected");
+      UI.Buttons.connectArmband.textContent = "Connected \u2713";
+      UI.Buttons.connectArmband.disabled    = true;
+    }
+
+    /**
      * Shared connection handler called by both the header icon and Settings button.
      * @param {HTMLButtonElement} btn  The button that was clicked.
      */
@@ -2187,18 +2202,16 @@ document.addEventListener("DOMContentLoaded", async () => {
             showToast("Haptic armband disconnected", "warning", 4000);
           },
           // onBatteryUpdate callback
-          _handleArmbandBattery
+          _handleArmbandBattery,
+          // onReconnect callback — fired when the background auto-reconnect succeeds
+          () => {
+            _setArmbandConnectedUI();
+            showToast("Haptic armband reconnected", "success", 3000);
+          }
         );
 
         // -- Connection success ---------------------------------------------
-        UI.Displays.armbandStatusSettings.textContent = "Connected \u2713";
-        UI.Displays.armbandStatusSettings.className   = "armband-status armband-connected";
-        UI.Buttons.armbandHeaderBtn.classList.add("armband-connected");
-        UI.Buttons.armbandHeaderBtn.classList.remove("armband-disconnected");
-        UI.Buttons.armbandHeaderBtn.setAttribute("title", "Armband Connected");
-        UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Armband Connected");
-        UI.Buttons.connectArmband.textContent = "Connected \u2713";
-        UI.Buttons.connectArmband.disabled    = true;
+        _setArmbandConnectedUI();
         showToast("Haptic armband connected", "success", 3000);
 
       } catch (err) {
@@ -2212,7 +2225,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     UI.Buttons.connectArmband.addEventListener("click", () => _connectArmband(UI.Buttons.connectArmband));
-    UI.Buttons.armbandHeaderBtn.addEventListener("click", () => _connectArmband(UI.Buttons.connectArmband));
+    // Header icon: pass itself as btn so its own disabled/text state is managed.
+    // When the armband is disconnected (yellow icon) the click opens the picker
+    // to reconnect; when already connected it is a no-op (picker will reject).
+    UI.Buttons.armbandHeaderBtn.addEventListener("click", () => _connectArmband(UI.Buttons.armbandHeaderBtn));
   }
 
   // ── Finish trial button ─────────────────────────────────────────────────
