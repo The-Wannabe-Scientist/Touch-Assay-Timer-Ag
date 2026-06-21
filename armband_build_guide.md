@@ -1,6 +1,6 @@
 # 🦾 BLE Haptic Armband Build Guide
 
-**Components:** Seeed Studio XIAO BLE nRF52840 · WLY602040 3.7V 400mAh LiPo · DRV2605L Haptic Driver · External ERM Vibration Motor
+**Components:** Seeed Studio XIAO BLE nRF52840 · WLY602040 3.7V 400mAh LiPo · DRV2605L Haptic Driver · External ERM or LRA Vibration Motor
 
 ---
 
@@ -11,7 +11,7 @@
 | Seeed Studio XIAO BLE nRF52840 | 1 | **Not** the Sense variant unless you want IMU |
 | WLY602040 3.7V 400mAh LiPo battery | 1 | 6×20×40 mm, ~PCM protected |
 | DRV2605L Haptic Motor Driver breakout | 1 | Adafruit #2305 or equivalent; I²C, 3.3V-compatible |
-| External ERM vibration motor (coin/pancake) | 1 | 3V ERM, e.g. 10mm × 2.7mm coin cell motor; ~1.0–1.5Ω coil |
+| External ERM or LRA vibration motor | 1 | 3V ERM (e.g. coin motor) or LRA (e.g. Z-axis linear actuator) |
 | 1N5819 Schottky Diode | 2 | For dual-voltage OR loop to prevent brownouts |
 | 4× pin header / jumper wires (female–female) | — | For SDA, SCL, VIN, GND from XIAO to DRV2605L breakout |
 | 2× thin motor leads (~5 cm) | — | Solder from DRV2605L OUTP/OUTN pads to motor terminals |
@@ -32,7 +32,7 @@
 > **LiPo polarity is fatal to the board.** Always verify BAT+ (red wire) and BAT− (black wire) with a multimeter BEFORE soldering. Reversing polarity will instantly destroy the XIAO.
 
 > [!WARNING]
-> The DRV2605L is a **dedicated haptic driver IC** — do NOT connect the ERM motor directly to any GPIO pin. The DRV2605L controls motor current via its internal H-bridge; the GPIO pins of the XIAO can only handle 4 mA and will be damaged or produce very weak vibration if used directly.
+> The DRV2605L is a **dedicated haptic driver IC** — do NOT connect the motor directly to any GPIO pin. The DRV2605L controls motor current via its internal H-bridge; the GPIO pins of the XIAO can only handle 4 mA and will be damaged or produce very weak vibration if used directly.
 
 > [!NOTE]
 > The XIAO nRF52840 runs at **3.3V logic**. The DRV2605L breakout board (Adafruit #2305) includes a 3.3V regulator and level-shifter, so it accepts both 3.3V and 5V power on VIN — power it from the XIAO **3.3V** pad.
@@ -84,10 +84,10 @@ To prevent the motor from causing voltage drops (brownouts) on the 3.3V line whe
 - Twist both **Cathodes** (the striped ends) together and connect them to DRV2605L **VIN**.
 
 > [!TIP]
-> Use short (~5 cm) silicone-insulated wires between the DRV2605L OUTP/OUTN pads and the ERM motor leads. Twist the two motor wires together to minimise EMI and strain on the solder joints.
+> Use short (~5 cm) silicone-insulated wires between the DRV2605L OUTP/OUTN pads and the motor leads. Twist the two motor wires together to minimise EMI and strain on the solder joints.
 
 > [!NOTE]
-> Many ERM coin motors have **no polarity marking** — reversing OUTP/OUTN only changes spin direction and has no electrical impact. If the motor doesn't spin, swap the two motor leads.
+> Many ERM coin motors have **no polarity marking** — reversing OUTP/OUTN only changes spin direction and has no electrical impact. If your motor doesn't spin, swap the two motor leads. **Note:** LRA motors often DO have polarity. If your LRA is marked +/-, connect + to OUTP and - to OUTN.
 
 ### LiPo Battery → XIAO BLE (bottom pads)
 
@@ -265,9 +265,16 @@ The DRV2605L supports two motor types:
 | **ERM** (coin/pager, DC motor) | `DRV2605_LIBRARY_ERM_CLOSED_LOOP` | `drv.selectLibrary(1)` |
 | **LRA** (linear resonant actuator) | `DRV2605_LIBRARY_LRA` | `drv.selectLibrary(6)` |
 
-This firmware targets **ERM coin motors** (library 1). If you use an LRA, change `selectLibrary(1)` to `selectLibrary(6)` and enable LRA mode:
+This firmware targets **ERM coin motors** (library 1) by default. If you use an LRA, you must configure the driver for LRA mode in your `setup()` function:
+
 ```cpp
-drv.useLRA(); // call this after drv.begin()
+  drv.selectLibrary(6); // 6 = LRA library
+  drv.useLRA();         // Tell driver it's an LRA
+
+  // Set Rated Voltage & Overdrive Clamp for your specific LRA
+  // (Values below are examples for a typical 2.0Vrms LRA)
+  drv.writeRegister8(DRV2605_REG_RATEDV, 0x53);
+  drv.writeRegister8(DRV2605_REG_CLAMPV, 0x68);
 ```
 
 ### Waveform ROM Effects (Alternative to RTP)
@@ -343,11 +350,11 @@ Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
 3. Secure the DRV2605L breakout flat against the XIAO with double-sided foam tape
 4. Apply hot glue or Kapton tape for extra strain relief on the wires
 
-### Step 3: Attach ERM Motor to DRV2605L
+### Step 3: Attach Motor to DRV2605L
 
-1. Strip ~5 mm from each ERM motor lead
+1. Strip ~5 mm from each motor lead
 2. Tin both leads and the DRV2605L **OUTP** and **OUTN** pads
-3. Solder motor leads to OUTP and OUTN (polarity only affects spin direction — either orientation works)
+3. Solder motor leads to OUTP and OUTN. (For ERMs, polarity only affects spin direction. For LRAs, observe +/- markings if present).
 4. Apply a small drop of hot glue at the solder joint for strain relief
 5. Twist the two motor leads together to reduce EMI
 
@@ -382,7 +389,7 @@ Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
    - Hook-and-loop (removable, for charging)
    - Double-sided foam tape (permanent)
 4. Route the motor cable alongside the strap
-5. Position the ERM motor disc at the underside (skin-contact face) of the band for best haptic sensation — attach with a small adhesive foam pad
+5. Position the motor at the underside (skin-contact face) of the band for best haptic sensation — attach with a small adhesive foam pad
 
 ### Step 7: Charging
 

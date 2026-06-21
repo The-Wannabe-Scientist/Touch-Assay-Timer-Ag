@@ -189,7 +189,7 @@ The timing engine uses a **two-layer architecture** for accuracy:
 
 The timer supports an optional external **Haptic Armband** (built on the Seeed XIAO nRF52840) worn by the researcher. This allows the researcher to feel precise tactile feedback without relying on audio or screen visuals.
 
-The armband uses a **DRV2605L haptic motor driver** (I²C) paired with an **external ERM coin vibration motor**, giving clean, consistent, and adjustable haptic output without overloading any GPIO pin.
+The armband uses a **DRV2605L haptic motor driver** (I²C) paired with an **external ERM or LRA vibration motor**, giving clean, consistent, and adjustable haptic output without overloading any GPIO pin.
 
 - **Zero-Latency Mirroring:** The armband perfectly mirrors the native device haptics (a crisp 50ms pulse on tap, and an ascending pattern on trial completion) via a direct Web Bluetooth (GATT) connection.
 - **Dual-Voltage Power Routing:** Seamlessly switches between battery and USB power via a diode OR loop, preserving battery life and preventing voltage drops during high-intensity haptic pulses.
