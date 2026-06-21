@@ -192,6 +192,7 @@ The timer supports an optional external **Haptic Armband** (built on the Seeed X
 The armband uses a **DRV2605L haptic motor driver** (I²C) paired with an **external ERM coin vibration motor**, giving clean, consistent, and adjustable haptic output without overloading any GPIO pin.
 
 - **Zero-Latency Mirroring:** The armband perfectly mirrors the native device haptics (a crisp 50ms pulse on tap, and an ascending pattern on trial completion) via a direct Web Bluetooth (GATT) connection.
+- **Dual-Voltage Power Routing:** Seamlessly switches between battery and USB power via a diode OR loop, preserving battery life and preventing voltage drops during high-intensity haptic pulses.
 - **Safety Watchdog:** A 2-second heartbeat ensures the armband vibrates autonomously if the app crashes or drops the connection.
 - **Battery Monitoring:** Uses the standard BLE Battery Service to display the armband's battery percentage in the header, with smart threshold warnings at ≤20% and ≤10%.
 

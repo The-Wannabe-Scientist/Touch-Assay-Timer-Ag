@@ -3,12 +3,13 @@
 //  Board: Seeed XIAO BLE nRF52840
 //  Libraries: ArduinoBLE, Adafruit DRV2605
 //
-//  Hardware: DRV2605L haptic driver (I²C) + external ERM motor
+//  Hardware: DRV2605L haptic driver (I²C) + LRA motor
 //    DRV2605L SDA → D4 (XIAO I²C SDA)
 //    DRV2605L SCL → D5 (XIAO I²C SCL)
-//    DRV2605L VIN → 3.3V
+//    DRV2605L VIN → 3.3V (logic supply)
+//    DRV2605L VM  → LiPo BAT+ (motor supply, up to 3.7V)
 //    DRV2605L GND → GND
-//    ERM motor    → DRV2605L OUTP / OUTN terminals
+//    LRA motor    → DRV2605L OUTP / OUTN (polarity-sensitive!)
 //
 //  GATT layout (must match js/haptic-armband.js exactly):
 //    Service UUID:    12345678-1234-1234-1234-123456789012
@@ -95,23 +96,25 @@ unsigned long lastHeartbeatMs    = 0;
 bool          heartbeatActive    = false;  // true once first HB received
 const unsigned long HB_TIMEOUT_MS = 3000; // >3 s with no HB → stutter warning
 
-// ── DRV2605L Vibration Helpers ───────────────────────────────
-// The DRV2605L library uses ROM waveform slots (1–123) for
-// ERM/LRA. We use setRealtimeValue() for precise custom pulses
-// at full amplitude, then return to 0 to stop.
+// ── DRV2605L Vibration Helpers (LRA) ────────────────────────
+// For LRA motors, Real-Time Playback (RTP) mode is used for
+// precise duration control. The DRV2605L auto-resonance loop
+// (closed-loop LRA mode, CTRL3 bit 0 = 0) continuously tracks
+// the motor's resonant frequency, so RTP amplitude is applied
+// at the correct drive frequency automatically.
 //
-// Alternatively, individual waveform slots can be used for
-// hardware-timed effects (no delay() needed), but custom
-// durations are cleaner with real-time mode for this application.
+// RTP value range: 0 (off) → 127 (full scale in signed mode).
+// LRA motors respond sharply — 127 is full rated amplitude.
+// Lower values (e.g. 80) give reduced intensity haptics.
 
-// Drive the ERM at full amplitude for onMs, then stop.
-// Uses real-time playback mode (RTP) for duration control.
+// Drive the LRA at full amplitude for onMs, then stop.
+// Uses real-time playback (RTP) mode for exact duration control.
 void pulse(int onMs, int offMs = 0) {
   drv.setMode(DRV2605_MODE_REALTIME);
-  drv.setRealtimeValue(127);  // 127 = ~50% amplitude (0–255 range)
+  drv.setRealtimeValue(127);  // 127 = full LRA amplitude (signed 8-bit)
   delay(onMs);
-  drv.setRealtimeValue(0);
-  drv.setMode(DRV2605_MODE_INTTRIG); // return to internal trigger mode
+  drv.setRealtimeValue(0);    // stop motor (brake)
+  drv.setMode(DRV2605_MODE_INTTRIG); // return to trigger mode
   if (offMs > 0) delay(offMs);
 }
 
@@ -226,12 +229,12 @@ void setup() {
   unsigned long t = millis();
   while (!Serial && millis() - t < 2000) {}
 
-  // ── DRV2605L Init ──────────────────────────────────────────
-  // The DRV2605L communicates over I²C (address 0x5A).
+  // ── DRV2605L Init (LRA mode) ──────────────────────────────
+  // The DRV2605L communicates over I²C at fixed address 0x5A.
   // Wire.begin() uses XIAO D4 (SDA) and D5 (SCL) by default.
   Wire.begin();
   if (!drv.begin()) {
-    Serial.println("ERROR: DRV2605L not found! Check wiring.");
+    Serial.println("ERROR: DRV2605L not found! Check I²C wiring (D4=SDA, D5=SCL).");
     boardState = STATE_BLE_ERROR;
     updateLED();
     while (1) {
@@ -240,10 +243,48 @@ void setup() {
     }
   }
 
-  drv.selectLibrary(1);             // ERM library (use 6 for LRA motors)
-  drv.setMode(DRV2605_MODE_INTTRIG); // internal trigger mode (default)
+  // ── LRA-specific register configuration ───────────────────
+  //
+  // Step 1: Select LRA ROM waveform library.
+  //   Library 6 = LRA. This is different from ERM libraries 1–5.
+  drv.selectLibrary(6);
 
-  Serial.println("DRV2605L initialised.");
+  // Step 2: Set N_ERM_LRA bit in register 0x1A (CTRL1) — tells
+  //   the driver this is an LRA, not an ERM motor.
+  //   Bit 7 of 0x1A: 0 = ERM, 1 = LRA
+  drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);
+
+  // Step 3: Enable closed-loop LRA (auto-resonance tracking).
+  //   Register 0x1D (CTRL4), bit 2 = LRA_OPEN_LOOP.
+  //   Clear this bit → closed-loop (auto-resonance ON). This is
+  //   critical: open-loop drives at a fixed freq and wastes power;
+  //   closed-loop locks onto the motor's true resonant frequency.
+  drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);
+
+  // Step 4: Set RATED_VOLTAGE register (0x16).
+  //   Formula: RATED_VOLTAGE = V_rated * 255 / (1.8 * sqrt(2))
+  //   For a 3.0V LRA: 3.0 * 255 / 2.546 ≈ 301 → capped to 255.
+  //   For a 2.0V LRA (common 10mm coin): 2.0 * 255 / 2.546 ≈ 200.
+  //   ↓ Adjust this value to match YOUR motor's rated voltage:
+  drv.writeRegister8(0x16, 0x50);   // ≈ 1.8V RMS — safe default for 3V LRA
+                                     // Increase toward 0xFF for higher amplitude
+
+  // Step 5: Set OD_CLAMP register (0x17) — overdrive clamp voltage.
+  //   This limits the peak drive voltage during the attack phase.
+  //   Formula: OD_CLAMP = V_od * 255 / (1.8 * sqrt(2))
+  //   Typically set 10–20% above rated. For 3V motor → ~3.3V → 0xC8.
+  drv.writeRegister8(0x17, 0x89);   // ≈ 3.0V overdrive clamp
+
+  // Step 6: Set drive mode to internal trigger (default). The pulse()
+  //   function switches to RTP mode when needed and returns here.
+  drv.setMode(DRV2605_MODE_INTTRIG);
+
+  Serial.println("DRV2605L initialised in LRA closed-loop mode.");
+  Serial.print(  "  RATED_VOLTAGE (0x16): 0x"); Serial.println(drv.readRegister8(0x16), HEX);
+  Serial.print(  "  OD_CLAMP      (0x17): 0x"); Serial.println(drv.readRegister8(0x17), HEX);
+  Serial.print(  "  CTRL1         (0x1A): 0x"); Serial.println(drv.readRegister8(0x1A), HEX);
+  Serial.print(  "  CTRL4         (0x1D): 0x"); Serial.println(drv.readRegister8(0x1D), HEX);
+
   Serial.println("Startup vibration sequence...");
   startupVibrationSequence();
 

@@ -12,6 +12,7 @@
 | WLY602040 3.7V 400mAh LiPo battery | 1 | 6×20×40 mm, ~PCM protected |
 | DRV2605L Haptic Motor Driver breakout | 1 | Adafruit #2305 or equivalent; I²C, 3.3V-compatible |
 | External ERM vibration motor (coin/pancake) | 1 | 3V ERM, e.g. 10mm × 2.7mm coin cell motor; ~1.0–1.5Ω coil |
+| 1N5819 Schottky Diode | 2 | For dual-voltage OR loop to prevent brownouts |
 | 4× pin header / jumper wires (female–female) | — | For SDA, SCL, VIN, GND from XIAO to DRV2605L breakout |
 | 2× thin motor leads (~5 cm) | — | Solder from DRV2605L OUTP/OUTN pads to motor terminals |
 | Elastic armband strap (~30mm wide) | 1 | Nylon or silicone |
@@ -64,16 +65,23 @@ D6/TX│ 7        8│ VIN (5V from USB)
 
 ## 🔌 Wiring Diagram
 
-### DRV2605L Haptic Driver → XIAO BLE
+### DRV2605L Haptic Driver → XIAO BLE (Dual-Voltage OR Loop)
+
+To prevent the motor from causing voltage drops (brownouts) on the 3.3V line when running, we use a dual-voltage OR loop with two 1N5819 Schottky diodes. This allows the driver to pull from the 5V USB line when plugged in, and gracefully fall back to 3.3V battery power when unplugged.
 
 | DRV2605L Pin | Connect To | XIAO Pin |
 |---|---|---|
-| VIN | 3.3V pad | Pin 14 |
+| VIN | Diode OR Loop Output | Pin 8 (5V) & Pin 14 (3.3V) |
 | GND | GND pad | Pin 13 |
 | SDA | D4/SDA | Pin 5 |
 | SCL | D5/SCL | Pin 6 |
 | OUTP | Motor (+) terminal | — |
 | OUTN | Motor (−) terminal | — |
+
+**OR Loop Wiring:**
+- Connect the **Anode** of Diode 1 to XIAO **Pin 8 (5V)**.
+- Connect the **Anode** of Diode 2 to XIAO **Pin 14 (3.3V)**.
+- Twist both **Cathodes** (the striped ends) together and connect them to DRV2605L **VIN**.
 
 > [!TIP]
 > Use short (~5 cm) silicone-insulated wires between the DRV2605L OUTP/OUTN pads and the ERM motor leads. Twist the two motor wires together to minimise EMI and strain on the solder joints.
@@ -96,18 +104,21 @@ Insert a single-pole switch in series on the BAT+ line:
 
 ### Complete Wiring at a Glance
 
-```
-  ┌────────────────┐        ┌──────────────────┐
-  │  XIAO nRF52840 │        │   DRV2605L       │
-  │                │        │                  │
-  │   3.3V (14) ───┼────────┼─ VIN             │
-  │    GND  (13) ──┼────────┼─ GND             │
-  │  D4/SDA (5)  ──┼────────┼─ SDA             │
-  │  D5/SCL (6)  ──┼────────┼─ SCL             │
-  │                │        │                  │
-  │                │        │  OUTP ───────────┼──→ Motor (+)
-  │                │        │  OUTN ───────────┼──→ Motor (−)
-  └────────────────┘        └──────────────────┘
+```text
+  ┌────────────────┐                        ┌──────────────────┐
+  │  XIAO nRF52840 │                        │   DRV2605L       │
+  │                │                        │                  │
+  │   5V VIN (8) ──┼───[>| 1N5819 ]────┐    │                  │
+  │                │                   ├───┼─ VIN              │
+  │   3.3V  (14) ──┼───[>| 1N5819 ]────┘    │                  │
+  │                │                        │                  │
+  │    GND  (13) ──┼────────────────────────┼─ GND             │
+  │  D4/SDA  (5) ──┼────────────────────────┼─ SDA             │
+  │  D5/SCL  (6) ──┼────────────────────────┼─ SCL             │
+  │                │                        │                  │
+  │                │                        │  OUTP ───────────┼──→ Motor (+)
+  │                │                        │  OUTN ───────────┼──→ Motor (−)
+  └────────────────┘                        └──────────────────┘
         │
   BAT+ (bottom) ──→ LiPo Red (+)
   BAT− (bottom) ──→ LiPo Black (−)
@@ -321,13 +332,16 @@ Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
 
 ### Step 2: Connect DRV2605L to XIAO
 
-1. Use short female-female jumper wires (or directly solder wires):
-   - DRV2605L **VIN** → XIAO **3.3V** (pin 14)
+1. Build the Dual-Voltage OR Loop for **VIN**:
+   - Solder the anode (non-striped end) of a 1N5819 diode to XIAO **Pin 8 (5V)**.
+   - Solder the anode of a second 1N5819 diode to XIAO **Pin 14 (3.3V)**.
+   - Join the cathodes (striped ends) of both diodes and connect to DRV2605L **VIN**.
+2. Connect the remaining pins with short wires:
    - DRV2605L **GND** → XIAO **GND** (pin 13)
    - DRV2605L **SDA** → XIAO **D4** (pin 5)
    - DRV2605L **SCL** → XIAO **D5** (pin 6)
-2. Secure the DRV2605L breakout flat against the XIAO with double-sided foam tape
-3. Apply hot glue or Kapton tape for extra strain relief on the wires
+3. Secure the DRV2605L breakout flat against the XIAO with double-sided foam tape
+4. Apply hot glue or Kapton tape for extra strain relief on the wires
 
 ### Step 3: Attach ERM Motor to DRV2605L
 
