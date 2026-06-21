@@ -35,7 +35,7 @@ void setup() {
 void pulseVibrate(int onMs, int offMs, int reps) {
   for (int i = 0; i < reps; i++) {
     drv.setMode(DRV2605_MODE_REALTIME);
-    drv.setRealtimeValue(127);  // ~50% amplitude (0–255)
+    drv.setRealtimeValue(127);  // full amplitude (RTP is signed 8-bit: 0 = off, 127 = max)
     delay(onMs);
     drv.setRealtimeValue(0);
     drv.setMode(DRV2605_MODE_INTTRIG);

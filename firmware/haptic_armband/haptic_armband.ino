@@ -96,56 +96,135 @@ unsigned long lastHeartbeatMs    = 0;
 bool          heartbeatActive    = false;  // true once first HB received
 const unsigned long HB_TIMEOUT_MS = 3000; // >3 s with no HB → stutter warning
 
-// ── DRV2605L Vibration Helpers (LRA) ────────────────────────
-// For LRA motors, Real-Time Playback (RTP) mode is used for
-// precise duration control. The DRV2605L auto-resonance loop
-// (closed-loop LRA mode, CTRL3 bit 0 = 0) continuously tracks
-// the motor's resonant frequency, so RTP amplitude is applied
-// at the correct drive frequency automatically.
-//
-// RTP value range: 0 (off) → 127 (full scale in signed mode).
-// LRA motors respond sharply — 127 is full rated amplitude.
-// Lower values (e.g. 80) give reduced intensity haptics.
+// ── Battery update interval ──────────────────────────────────
+unsigned long lastBatteryUpdate   = 0;   // init'd to millis() at end of setup()
+const unsigned long BATTERY_INTERVAL_MS = 30000;
 
-// Drive the LRA at full amplitude for onMs, then stop.
-// Uses real-time playback (RTP) mode for exact duration control.
-void pulse(int onMs, int offMs = 0) {
+// ── Non-Blocking Motor State Machine ─────────────────────────
+// All motor timing is tracked here — no delay() calls anywhere in the
+// main loop. A new pulse sequence immediately preempts any in-progress one.
+//
+// A "sequence" is a flat array of alternating on/off durations (ms):
+//   { onMs, offMs, onMs, offMs, ... }
+// The machine steps through them one phase at a time.
+
+// Maximum phases in a single sequence (on+off counts as 2 phases each pulse)
+#define MAX_MOTOR_PHASES 16
+
+static int           motorPhases[MAX_MOTOR_PHASES];  // durations in ms
+static int           motorPhaseCount  = 0;           // how many phases are loaded
+static int           motorPhaseIndex  = 0;           // which phase is active
+static unsigned long motorPhaseStart  = 0;           // when the current phase began
+static bool          motorRunning     = false;       // true while a sequence is active
+
+// Load a new sequence and start it immediately (preempts anything running).
+// phases: alternating on/off durations, e.g. {50, 0} for a 50ms single tap.
+// count:  number of entries in phases[].
+void motorStart(const int* phases, int count) {
+  // Stop motor immediately if one was running
+  drv.setRealtimeValue(0);
+  drv.setMode(DRV2605_MODE_INTTRIG);
+
+  // Clamp to buffer size
+  if (count > MAX_MOTOR_PHASES) count = MAX_MOTOR_PHASES;
+  for (int i = 0; i < count; i++) motorPhases[i] = phases[i];
+  motorPhaseCount = count;
+  motorPhaseIndex = 0;
+  motorPhaseStart = millis();
+  motorRunning    = true;
+
+  // Start first phase (ON)
   drv.setMode(DRV2605_MODE_REALTIME);
-  drv.setRealtimeValue(127);  // 127 = full LRA amplitude (signed 8-bit)
-  delay(onMs);
-  drv.setRealtimeValue(0);    // stop motor (brake)
-  drv.setMode(DRV2605_MODE_INTTRIG); // return to trigger mode
-  if (offMs > 0) delay(offMs);
+  drv.setRealtimeValue(127);  // full LRA amplitude (signed 8-bit: 0=off, 127=max)
 }
+
+// Stop the motor immediately and clear the sequence.
+void motorStop() {
+  drv.setRealtimeValue(0);
+  drv.setMode(DRV2605_MODE_INTTRIG);
+  motorRunning    = false;
+  motorPhaseCount = 0;
+  motorPhaseIndex = 0;
+}
+
+// Call every loop iteration — advances phase timing without blocking.
+void motorUpdate() {
+  if (!motorRunning) return;
+
+  unsigned long elapsed = millis() - motorPhaseStart;
+  if (elapsed < (unsigned long)motorPhases[motorPhaseIndex]) return; // still in this phase
+
+  // Advance to next phase
+  motorPhaseIndex++;
+  if (motorPhaseIndex >= motorPhaseCount) {
+    // Sequence complete — ensure motor is off
+    motorStop();
+    return;
+  }
+
+  motorPhaseStart = millis();
+  bool isOnPhase  = (motorPhaseIndex % 2 == 0); // even indices = ON, odd = OFF
+  if (isOnPhase) {
+    drv.setMode(DRV2605_MODE_REALTIME);
+    drv.setRealtimeValue(127);
+  } else {
+    drv.setRealtimeValue(0);
+    drv.setMode(DRV2605_MODE_INTTRIG);
+  }
+}
+
+// ── Vibration Pattern Helpers ────────────────────────────────
+// Each function encodes its pulse sequence as a flat on/off array and
+// passes it to motorStart(). The motor state machine handles the rest
+// without blocking.
 
 // 0x01 — tap registered (mirrors navigator.vibrate(50))
 void vibrateTap() {
-  pulse(50);
+  static const int seq[] = { 50, 0 };
+  motorStart(seq, 2);
 }
 
 // 0x02 — run complete (mirrors navigator.vibrate([100,50,200]))
 void vibrateRunComplete() {
-  pulse(100, 50);
-  pulse(200);
+  static const int seq[] = { 100, 50, 200, 0 };
+  motorStart(seq, 4);
 }
 
 // Stutter warning — fired by watchdog when heartbeat is lost
 void vibrateStutterWarning() {
-  for (int i = 0; i < 3; i++) {
-    pulse(40, 40);
-  }
+  static const int seq[] = { 40, 40, 40, 40, 40, 0 };
+  motorStart(seq, 6);
 }
 
-// ── Startup Vibration Sequence ───────────────────────────────
+// Boot sequence — three escalating pulses (alive confirmation)
+// NOTE: Called from setup() before BLE is running. A brief blocking
+// startup is acceptable here since no BLE events exist yet.
 void startupVibrationSequence() {
-  pulse(60,  120);
-  pulse(120, 120);
-  pulse(250,  80);
+  static const int seq[] = { 60, 120, 120, 120, 250, 80 };
+  motorStart(seq, 6);
+  // Block until startup sequence finishes — safe here because BLE isn't
+  // up yet and no events can be dropped.
+  while (motorRunning) motorUpdate();
 }
 
-// ── Disconnect Vibration ─────────────────────────────────────
+// Disconnect buzz — rapid 6-pulse burst.
+// Called only AFTER BLE.advertise() so device is already discoverable
+// while the pattern plays non-blockingly.
 void vibrateDisconnect() {
-  for (int i = 0; i < 6; i++) pulse(50, 50);
+  static const int seq[] = { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 0 };
+  motorStart(seq, 12);
+}
+
+// BLE-ready confirmation double-tap (called from setup)
+void vibrateBleReady() {
+  static const int seq[] = { 80, 70, 80, 0 };
+  motorStart(seq, 4);
+  while (motorRunning) motorUpdate(); // finish before entering loop
+}
+
+// Connect-confirm single tap (called on new central connection)
+void vibrateConnected() {
+  vibrateTap();
 }
 
 // ── Battery Reading ──────────────────────────────────────────
@@ -236,11 +315,8 @@ void setup() {
   if (!drv.begin()) {
     Serial.println("ERROR: DRV2605L not found! Check I²C wiring (D4=SDA, D5=SCL).");
     boardState = STATE_BLE_ERROR;
-    updateLED();
-    while (1) {
-      setLED(true, false, false); delay(100);
-      setLED(false, false, false); delay(200);
-    }
+    updateLED(); // solid red — motor unavailable, keep LED on for diagnosis
+    while (1) {} // halt — do NOT buzz; DRV2605L is unreachable
   }
 
   // ── LRA-specific register configuration ───────────────────
@@ -262,21 +338,22 @@ void setup() {
   drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);
 
   // Step 4: Set RATED_VOLTAGE register (0x16).
-  //   Formula: RATED_VOLTAGE = V_rated * 255 / (1.8 * sqrt(2))
-  //   For a 3.0V LRA: 3.0 * 255 / 2.546 ≈ 301 → capped to 255.
-  //   For a 2.0V LRA (common 10mm coin): 2.0 * 255 / 2.546 ≈ 200.
-  //   ↓ Adjust this value to match YOUR motor's rated voltage:
-  drv.writeRegister8(0x16, 0x50);   // ≈ 1.8V RMS — safe default for 3V LRA
-                                     // Increase toward 0xFF for higher amplitude
+  //   Formula: RATED_VOLTAGE = V_rated_rms * 255 / (1.8 * sqrt(2))
+  //                          = V_rated_rms * 255 / 2.5456
+  //   Motor is rated at 1.8V RMS → 1.8 * 255 / 2.5456 ≈ 180 = 0xB4
+  //   ↓ Adjust this value if using a different motor:
+  drv.writeRegister8(0x16, 0xB4);   // ≈ 1.8V RMS for 1.8V-rated LRA
+                                     // Decrease for lower-rated motors (e.g.
+                                     // 0x78 for 1.2V, 0x96 for 1.5V)
 
   // Step 5: Set OD_CLAMP register (0x17) — overdrive clamp voltage.
   //   This limits the peak drive voltage during the attack phase.
   //   Formula: OD_CLAMP = V_od * 255 / (1.8 * sqrt(2))
-  //   Typically set 10–20% above rated. For 3V motor → ~3.3V → 0xC8.
+  //   Typically set 10–20% above rated. For 1.8V rated → ~2.1V → 0xCB.
   drv.writeRegister8(0x17, 0x89);   // ≈ 3.0V overdrive clamp
 
-  // Step 6: Set drive mode to internal trigger (default). The pulse()
-  //   function switches to RTP mode when needed and returns here.
+  // Step 6: Set drive mode to internal trigger (default). The motor
+  //   state machine switches to RTP mode per-phase as needed.
   drv.setMode(DRV2605_MODE_INTTRIG);
 
   Serial.println("DRV2605L initialised in LRA closed-loop mode.");
@@ -286,14 +363,30 @@ void setup() {
   Serial.print(  "  CTRL4         (0x1D): 0x"); Serial.println(drv.readRegister8(0x1D), HEX);
 
   Serial.println("Startup vibration sequence...");
-  startupVibrationSequence();
+  startupVibrationSequence(); // blocks until complete (safe — BLE not yet running)
 
   // BLE init
   if (!BLE.begin()) {
     Serial.println("ERROR: BLE init failed!");
     boardState = STATE_BLE_ERROR;
-    updateLED();
-    while (1) { pulse(50, 200); } // rapid distress buzz
+    updateLED(); // solid red
+    // BUG 6 FIX: Play SOS every 10 s then return to silent solid-red LED.
+    // This alerts the user without draining the battery to zero.
+    static const int sosPulses[] = {
+      100, 80, 100, 80, 100, 80,   // · · ·
+      300, 80, 300, 80, 300, 80,   // — — —
+      100, 80, 100, 80, 100, 0     // · · ·
+    };
+    unsigned long lastSos = millis() - 10001UL; // fire immediately on first entry
+    while (1) {
+      unsigned long now = millis();
+      if (now - lastSos > 10000UL) {
+        lastSos = now;
+        motorStart(sosPulses, 18);
+      }
+      motorUpdate();
+      updateLED(); // keep solid red LED updated
+    }
   }
 
   // ── Build GATT table ────────────────────────────────────────
@@ -320,15 +413,20 @@ void setup() {
   Serial.println("BLE Haptic Armband ready. Advertising...");
   Serial.println("Service UUID: 12345678-1234-1234-1234-123456789012");
 
-  // BLE-ready double-tap confirmation
-  pulse(80, 70); pulse(80);
+  // BLE-ready double-tap confirmation (blocks until done — safe here)
+  vibrateBleReady();
+
+  // BUG 3 FIX: Initialise lastBatteryUpdate to NOW so the first periodic
+  // battery read fires after a full BATTERY_INTERVAL_MS, not immediately.
+  lastBatteryUpdate = millis();
 }
 
 // ── Loop ─────────────────────────────────────────────────────
-unsigned long lastBatteryUpdate = 0;
-const unsigned long BATTERY_INTERVAL_MS = 30000;
-
 void loop() {
+  // Advance the non-blocking motor state machine on every tick.
+  // This ensures motor timing is honoured regardless of BLE activity.
+  motorUpdate();
+
   updateLED();
 
   BLEDevice central = BLE.central();
@@ -341,14 +439,19 @@ void loop() {
     heartbeatActive    = false;
     lastHeartbeatMs    = millis();
     updateLED(); // immediately go green
-    vibrateTap(); // single connect-confirm pulse
+    vibrateConnected(); // single connect-confirm pulse (non-blocking)
 
     while (central.connected()) {
-      // BUG FIX: BLE.poll() MUST be called on every iteration of the inner loop.
+      // BLE.poll() MUST be called on every iteration of the inner loop.
       // ArduinoBLE only processes incoming packets (writes, disconnects, etc.)
       // during a poll. Without this, hapticChar.written() never returns true
       // and all touch commands are silently dropped.
       BLE.poll();
+
+      // Advance motor state machine (replaces all delay() inside old pulse()).
+      // BLE.poll() + motorUpdate() together ensure both BLE responsiveness
+      // and accurate motor timing with zero blocking.
+      motorUpdate();
 
       updateLED();
 
@@ -357,12 +460,13 @@ void loop() {
       // ── Handle haptic commands ──────────────────────────────
       if (hapticChar.written()) {
         uint8_t cmd = hapticChar.value();
-        Serial.print("CMD: 0x0"); Serial.println(cmd, HEX);
+        // BUG 1 FIX: Use "0x" prefix — "0x0" would corrupt logs for cmd >= 0x10
+        Serial.print("CMD: 0x"); Serial.println(cmd, HEX);
         switch (cmd) {
           case 0x01: vibrateTap();        break; // tap registered
           case 0x02: vibrateRunComplete(); break; // run complete
           default:
-            Serial.print("Unknown cmd: "); Serial.println(cmd);
+            Serial.print("Unknown cmd: 0x"); Serial.println(cmd, HEX);
             break;
         }
       }
@@ -373,11 +477,14 @@ void loop() {
         heartbeatActive = true;
       }
 
-      // Watchdog: if HB was ever active and now >3 s has lapsed → stutter
+      // BUG 2 FIX: Watchdog — if HB was active and >3 s has lapsed → stutter.
+      // After firing, reset lastHeartbeatMs to NOW so the watchdog cannot
+      // immediately re-trigger the moment heartbeat resumes after a dropout.
       if (heartbeatActive && (now - lastHeartbeatMs > HB_TIMEOUT_MS)) {
         Serial.println("Heartbeat lost! Stutter warning.");
         vibrateStutterWarning();
-        heartbeatActive = false; // one warning per dropout, re-arms on next HB
+        heartbeatActive = false; // one warning per dropout; re-arms on next HB
+        lastHeartbeatMs = millis(); // prevent instant re-trigger on HB resume
       }
 
       // ── Periodic battery update ─────────────────────────────
@@ -389,22 +496,26 @@ void loop() {
 
         if (pct < 15) {
           boardState = STATE_LOW_BATTERY;
-          // SOS: three shorts, three longs, three shorts
-          for (int i = 0; i < 3; i++) pulse(100, 80);
-          for (int i = 0; i < 3; i++) pulse(300, 80);
-          for (int i = 0; i < 3; i++) pulse(100, 80);
+          // SOS: three shorts, three longs, three shorts (non-blocking)
+          static const int sosSeq[] = {
+            100, 80, 100, 80, 100, 80,   // · · ·
+            300, 80, 300, 80, 300, 80,   // — — —
+            100, 80, 100, 80, 100, 0     // · · ·
+          };
+          motorStart(sosSeq, 18);
         } else {
           boardState = STATE_CONNECTED;
         }
       }
     }
 
-    // Central disconnected
+    // BUG 7 FIX: Call BLE.advertise() FIRST so the device is immediately
+    // discoverable while the disconnect buzz plays non-blockingly.
     Serial.println("Disconnected.");
     heartbeatActive = false;
     boardState = STATE_ADVERTISING;
     updateLED();
-    vibrateDisconnect(); // rapid buzz on disconnect
-    BLE.advertise();     // re-start advertising
+    BLE.advertise();       // re-start advertising immediately
+    vibrateDisconnect();   // non-blocking — plays while device is already visible
   }
 }

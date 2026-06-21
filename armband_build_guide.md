@@ -13,6 +13,7 @@
 | DRV2605L Haptic Motor Driver breakout | 1 | Adafruit #2305 or equivalent; I²C, 3.3V-compatible |
 | External ERM or LRA vibration motor | 1 | 3V ERM (e.g. coin motor) or LRA (e.g. Z-axis linear actuator) |
 | 1N5819 Schottky Diode | 2 | For dual-voltage OR loop to prevent brownouts |
+| 10µF to 100µF Capacitor | 1 | Electrolytic or ceramic. Decoupling capacitor across DRV2605L VIN/GND |
 | 4× pin header / jumper wires (female–female) | — | For SDA, SCL, VIN, GND from XIAO to DRV2605L breakout |
 | 2× thin motor leads (~5 cm) | — | Solder from DRV2605L OUTP/OUTN pads to motor terminals |
 | Elastic armband strap (~30mm wide) | 1 | Nylon or silicone |
@@ -51,8 +52,8 @@ D0  │ 1         14│ 3.3V
 D1  │ 2         13│ GND
 D2  │ 3         12│ RST
 D3  │ 4         11│ GND (also bottom)
-D4/SDA│ 5      10│ BAT- (bottom pad)
-D5/SCL│ 6       9│ BAT+ (bottom pad)
+D4/SDA│ 5      10│ BAT- (bottom pad)  ← verify against official Seeed schematic
+D5/SCL│ 6       9│ BAT+ (bottom pad)  ← verify against official Seeed schematic
 D6/TX│ 7        8│ VIN (5V from USB)
     └─────────────┘
 ```
@@ -78,10 +79,11 @@ To prevent the motor from causing voltage drops (brownouts) on the 3.3V line whe
 | OUTP | Motor (+) terminal | — |
 | OUTN | Motor (−) terminal | — |
 
-**OR Loop Wiring:**
+**OR Loop & Power Wiring:**
 - Connect the **Anode** of Diode 1 to XIAO **Pin 8 (5V)**.
 - Connect the **Anode** of Diode 2 to XIAO **Pin 14 (3.3V)**.
 - Twist both **Cathodes** (the striped ends) together and connect them to DRV2605L **VIN**.
+- Connect a **10µF to 100µF capacitor** directly across the DRV2605L **VIN** and **GND** pins. *(If using polarized electrolytic, positive leg to VIN, negative to GND).*
 
 > [!TIP]
 > Use short (~5 cm) silicone-insulated wires between the DRV2605L OUTP/OUTN pads and the motor leads. Twist the two motor wires together to minimise EMI and strain on the solder joints.
@@ -110,8 +112,8 @@ Insert a single-pole switch in series on the BAT+ line:
   │                │                        │                  │
   │   5V VIN (8) ──┼───[>| 1N5819 ]────┐    │                  │
   │                │                   ├───┼─ VIN              │
-  │   3.3V  (14) ──┼───[>| 1N5819 ]────┘    │                  │
-  │                │                        │                  │
+  │   3.3V  (14) ──┼───[>| 1N5819 ]────┘    │  │               │
+  │                │                        │  ┴ 10-100µF Cap  │
   │    GND  (13) ──┼────────────────────────┼─ GND             │
   │  D4/SDA  (5) ──┼────────────────────────┼─ SDA             │
   │  D5/SCL  (6) ──┼────────────────────────┼─ SCL             │
@@ -211,7 +213,7 @@ void setup() {
 void pulseVibrate(int onMs, int offMs, int reps) {
   for (int i = 0; i < reps; i++) {
     drv.setMode(DRV2605_MODE_REALTIME);
-    drv.setRealtimeValue(127);  // ~50% amplitude (0–255)
+    drv.setRealtimeValue(127);  // full amplitude (RTP is signed 8-bit: 0 = off, 127 = max)
     delay(onMs);
     drv.setRealtimeValue(0);
     drv.setMode(DRV2605_MODE_INTTRIG);
@@ -242,7 +244,7 @@ See [`firmware/haptic_armband/haptic_armband.ino`](./firmware/haptic_armband/hap
 |---|---|
 | Motor driver | DRV2605L via I²C (Wire.h + Adafruit_DRV2605) |
 | Vibration control | `drv.setMode(DRV2605_MODE_REALTIME)` + `setRealtimeValue(127)` |
-| Amplitude | 127/255 (~50%) — increase to 200–255 for stronger feedback |
+| Amplitude | 127 = full rated amplitude (RTP is signed 8-bit, not unsigned) |
 | Motor library | ERM = `drv.selectLibrary(1)`; LRA = `drv.selectLibrary(6)` |
 | BLE service UUID | `12345678-1234-1234-1234-123456789012` |
 | Tap command | Write `0x01` to haptic characteristic → 50 ms pulse |
@@ -265,16 +267,27 @@ The DRV2605L supports two motor types:
 | **ERM** (coin/pager, DC motor) | `DRV2605_LIBRARY_ERM_CLOSED_LOOP` | `drv.selectLibrary(1)` |
 | **LRA** (linear resonant actuator) | `DRV2605_LIBRARY_LRA` | `drv.selectLibrary(6)` |
 
-This firmware targets **ERM coin motors** (library 1) by default. If you use an LRA, you must configure the driver for LRA mode in your `setup()` function:
+This firmware targets **LRA motors** (library 6) in closed-loop auto-resonance mode by default. If you use an ERM motor instead, change `drv.selectLibrary(6)` to `drv.selectLibrary(1)` and remove the `N_ERM_LRA` (0x1A bit 7) and `LRA_OPEN_LOOP` (0x1D bit 2) register writes in `setup()`. For reference, here is the correct LRA configuration block:
 
 ```cpp
   drv.selectLibrary(6); // 6 = LRA library
-  drv.useLRA();         // Tell driver it's an LRA
+
+  // Set N_ERM_LRA bit (register 0x1A, bit 7): 1 = LRA, 0 = ERM
+  // NOTE: drv.useLRA() does NOT exist in the Adafruit library — use the
+  // raw register write below.
+  drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);
+
+  // Enable closed-loop auto-resonance (register 0x1D, bit 2 = LRA_OPEN_LOOP)
+  // Clear bit → closed-loop ON (tracks motor's true resonant frequency)
+  drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);
 
   // Set Rated Voltage & Overdrive Clamp for your specific LRA
-  // (Values below are examples for a typical 2.0Vrms LRA)
-  drv.writeRegister8(DRV2605_REG_RATEDV, 0x53);
-  drv.writeRegister8(DRV2605_REG_CLAMPV, 0x68);
+  // Formula: value = V_rms * 255 / (1.8 * sqrt(2)) = V_rms * 255 / 2.5456
+  // (Values below are examples for a 1.8V RMS rated LRA)
+  drv.writeRegister8(DRV2605_REG_RATEDV, 0xB4); // ≈ 1.8V RMS
+  // NOTE: DRV2605_REG_CLAMPV is NOT defined in the Adafruit library — use
+  // the raw register address 0x17 for the OD_CLAMP register.
+  drv.writeRegister8(0x17, 0x89);               // ≈ 3.0V overdrive clamp
 ```
 
 ### Waveform ROM Effects (Alternative to RTP)
@@ -343,12 +356,14 @@ Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
    - Solder the anode (non-striped end) of a 1N5819 diode to XIAO **Pin 8 (5V)**.
    - Solder the anode of a second 1N5819 diode to XIAO **Pin 14 (3.3V)**.
    - Join the cathodes (striped ends) of both diodes and connect to DRV2605L **VIN**.
-2. Connect the remaining pins with short wires:
+2. Add a **Decoupling Capacitor**:
+   - Solder a 10µF–100µF capacitor across the **VIN** and **GND** pins on the DRV2605L. (Positive to VIN, negative to GND).
+3. Connect the remaining pins with short wires:
    - DRV2605L **GND** → XIAO **GND** (pin 13)
    - DRV2605L **SDA** → XIAO **D4** (pin 5)
    - DRV2605L **SCL** → XIAO **D5** (pin 6)
-3. Secure the DRV2605L breakout flat against the XIAO with double-sided foam tape
-4. Apply hot glue or Kapton tape for extra strain relief on the wires
+4. Secure the DRV2605L breakout flat against the XIAO with double-sided foam tape
+5. Apply hot glue or Kapton tape for extra strain relief on the wires
 
 ### Step 3: Attach Motor to DRV2605L
 
@@ -437,7 +452,7 @@ Add these to your sketch for production use:
 // Low-power advertising interval (saves ~15% power vs default)
 void setup() {
   // ...
-  BLE.setAdvertisingInterval(800);  // 500ms (units of 0.625ms)
+  BLE.setAdvertisingInterval(800);  // = 500 ms (BLE spec unit = 0.625 ms; 800 × 0.625 ms = 500 ms)
   // ...
 }
 
