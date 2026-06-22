@@ -760,7 +760,6 @@ button.danger:active {
   height: 100%;
   width: 0%;
   background: var(--color-primary);
-  transition: none;
   transition: box-shadow 0.1s ease;
 }
 #visualMetronomeBar.fulfilled {
@@ -795,7 +794,7 @@ button.danger:active {
   -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
 
-  transition: transform 40ms linear, background-color 50ms linear;
+  transition: transform 40ms linear;
 
   /* Allow long text labels to wrap gracefully */
   white-space: normal;
@@ -2693,6 +2692,26 @@ body.state-running {
   cursor: default;
   border-color: var(--border-base);
   color: var(--text-muted);
+}
+
+/* FW-5 FIX: Disconnect button (shown only when connected) */
+.armband-disconnect-btn {
+  flex-shrink: 0;
+  padding: 0.45rem 1.1rem;
+  border-radius: 8px;
+  border: 1px solid hsl(0, 60%, 55%);
+  background: transparent;
+  color: hsl(0, 60%, 55%);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+  white-space: nowrap;
+}
+
+.armband-disconnect-btn:hover {
+  background: hsl(0, 60%, 55%);
+  color: #fff;
 }
 
 /* ── Header icon — connected state ──────────────────────────────────── */

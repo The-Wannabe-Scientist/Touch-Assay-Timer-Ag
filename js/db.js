@@ -606,3 +606,51 @@ export async function markOrphanRunsStopped() {
     });
   });
 }
+
+/**
+ * C4: Crash-guard recovery — called at startup to merge any sessionStorage
+ * snapshot written by the beforeunload handler into the IDB run record.
+ *
+ * When the tab is killed while hidden on mobile, neither `unload` nor a
+ * resumed `visibilitychange` fires. The only surviving data is the
+ * synchronous sessionStorage write from `beforeunload`. This function reads
+ * that snapshot and updates the IDB record if the snapshot has more values
+ * than what was last committed (i.e. data recorded after the last flush).
+ *
+ * Safe to call unconditionally on every startup — exits immediately if no
+ * guard exists or if the IDB record already has equal or more data.
+ */
+export async function recoverCrashGuard() {
+  try {
+    const raw = sessionStorage.getItem("touchAssayCrashGuard");
+    if (!raw) return;
+    sessionStorage.removeItem("touchAssayCrashGuard");
+
+    const guard = JSON.parse(raw);
+    if (!guard?.assayId || !guard?.trialId || !guard?.runId) return;
+
+    const db    = await openDB();
+    const tx    = db.transaction(STORES.RUNS, "readwrite");
+    const store = tx.objectStore(STORES.RUNS);
+
+    const existing = await new Promise((resolve, reject) => {
+      const req = store.get(guard.runId);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror   = () => reject(req.error);
+    });
+
+    if (
+      existing &&
+      existing.status === "active" &&
+      Array.isArray(guard.values) &&
+      guard.values.length > (existing.values?.length ?? 0)
+    ) {
+      const recovered = guard.values.length - (existing.values?.length ?? 0);
+      existing.values = guard.values;
+      store.put(existing);
+      console.log(`[CrashGuard] Recovered ${recovered} value(s) for run ${guard.runId}`);
+    }
+  } catch {
+    // sessionStorage or IDB unavailable (e.g. Private Browsing) — silent no-op
+  }
+}

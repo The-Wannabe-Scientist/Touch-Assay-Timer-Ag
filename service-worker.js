@@ -71,9 +71,8 @@ self.addEventListener("activate", (event) => {
           if (name !== CACHE_NAME) return caches.delete(name);
         })
       );
-    })
+    }).then(() => self.clients.claim())  // H6: chain into waitUntil so claim() fires after old caches are purged
   );
-  self.clients.claim();
 });
 
 // 3. FETCH: Stale-While-Revalidate Strategy
@@ -86,6 +85,9 @@ self.addEventListener("fetch", (event) => {
       const fetchPromise = fetch(event.request).then((networkResponse) => {
         // Cache only successful same-origin responses; skip opaque (cross-origin)
         // responses to avoid inflated storage costs (~7 MB padding per entry)
+        // NOTE: Cross-origin resources (e.g. Google Fonts) are cached during install
+        // but never revalidated here — this is intentional. Fonts are immutable CDN
+        // assets and permanent caching is the accepted trade-off. (C5)
         if (networkResponse && networkResponse.status === 200) {
           caches.open(CACHE_NAME).then((cache) => {
             cache.put(event.request, networkResponse.clone());

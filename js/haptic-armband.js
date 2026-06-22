@@ -1,7 +1,7 @@
 /**
  * @file haptic-armband.js
  * @description Manages the Web Bluetooth GATT connection to the researcher's
- * haptic armband (Seeed XIAO nRF52840 + coin ERM motor).
+ * haptic armband (Seeed XIAO nRF52840 + DRV2605L haptic driver + LRA motor).
  *
  * The armband mirrors navigator.vibrate() patterns from the host device exactly:
  *
@@ -44,6 +44,7 @@ let _hbChar             = null;
 let _battChar           = null;   // Battery Level characteristic (0x2A19)
 let _hbTimer            = null;
 let _connected          = false;
+let _hbWasActive        = false;  // FW-7 FIX: track if HB was running before disconnect
 let _onDisconnectCb     = null;
 let _onReconnectCb      = null;  // () => void — fired after a successful auto-reconnect
 let _onBatteryUpdateCb  = null;  // (level: 0-100) => void
@@ -204,6 +205,7 @@ function _handleBatteryUpdate(e) {
 
 function _handleDisconnect() {
   _connected = false;
+  _hbWasActive = _hbTimer !== null;  // FW-7 FIX: remember if heartbeat was running
   _stopHeartbeat();
   _battChar = null;  // GATT handles are invalid after disconnect
   _onDisconnectCb?.();
@@ -218,6 +220,14 @@ function _handleDisconnect() {
       _hbChar       = await service.getCharacteristic(HEARTBEAT_UUID);
       await _subscribeBattery(server);  // re-subscribe after reconnect
       _connected    = true;
+      // FW-7 FIX: Restart heartbeat if it was running before the dropout.
+      // Without this, a brief BLE disconnect during an active run stops
+      // the heartbeat permanently → firmware watchdog fires stutter
+      // warnings every 3 s for the rest of the run.
+      if (_hbWasActive) {
+        _hbWasActive = false;
+        armbandStartHeartbeat();
+      }
       console.log("[HapticArmband] Auto-reconnected.");
       // Notify the UI so it can restore the "connected" appearance.
       _onReconnectCb?.();

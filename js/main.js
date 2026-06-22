@@ -43,7 +43,8 @@ import {
 import {
   saveAssay, loadAllAssays, hydrateAssay, deleteAssay,
   saveTrial, markTrialCompleted, markTrialAbandoned,
-  saveRun, abandonAllActiveTrialsInDB, markOrphanRunsStopped, getIdbAvailable
+  saveRun, abandonAllActiveTrialsInDB, markOrphanRunsStopped, getIdbAvailable,
+  recoverCrashGuard
 }                                                      from "./db.js";
 import {
   isAudioReady, setVoiceMode, loadVoices, speak, stopSpeech,
@@ -344,6 +345,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       headerHome:           document.getElementById("headerHomeBtn"),
       armbandHeaderBtn:     document.getElementById("armbandHeaderBtn"),
       connectArmband:       document.getElementById("connectArmband"),
+      disconnectArmband:    document.getElementById("disconnectArmband"),
     },
     Displays: {
       liveProgress:     document.getElementById("liveProgress"),
@@ -392,7 +394,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   // parallel IDB transactions that could silently abort each other).
   Promise.allSettled([
     abandonAllActiveTrialsInDB(),
-    markOrphanRunsStopped()
+    markOrphanRunsStopped(),
+    recoverCrashGuard()      // C4: merge sessionStorage snapshot into IDB on startup
   ]).then(() => {
     if (!getIdbAvailable()) {
       const banner = document.getElementById("idbWarningBanner");
@@ -481,6 +484,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function showScreen(screenElement) {
     UI.Displays.overflowMenu.hidden = true;
+    UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");  // M9: reset aria-expanded
     document.body.classList.add("state-overlay");
 
     // Collapse all overlay screens first to avoid stacking
@@ -1280,6 +1284,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Called once during initialisation.
    */
   function initializeSettings() {
+    try {
     // Warmup settings
     UI.Settings.warmupToggle.checked              = isWarmupEnabled;
     UI.Settings.warmupDurationInput.value         = warmupDuration;
@@ -1328,6 +1333,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     // We don't apply it here at startup because there's no data yet;
     // it gets applied in completeRunNormally() / stopRunEarly() when
     // the table is first shown (or kept hidden) according to preference.
+    } catch {
+      // H5: localStorage unavailable (e.g. Private Browsing with strict settings) — use defaults
+    }
   }
 
   /**
@@ -1335,7 +1343,8 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Called after each run ends so the table respects the user's toggle setting.
    */
   function applyProgressVisibilityPreference() {
-    const pref      = localStorage.getItem("touchAssayProgressVisible");
+    let pref = null;
+    try { pref = localStorage.getItem("touchAssayProgressVisible"); } catch {} // L7: guard for Private Browsing
     const container = document.getElementById("assayProgress");
     if (!container) return;
     // Default: show the table ("true" or no stored pref = visible)
@@ -1454,7 +1463,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     currentAssay.genotypes.forEach(g => {
       html += `<tr>` +
-              `<td>${g}</td>` +
+              `<td>${escapeHTML(g)}</td>` +
               `<td>${summary[g].total}</td>` +
               `<td>${summary[g].eligible}</td>` +
               `<td>${summary[g].ineligible}</td>` +
@@ -1600,15 +1609,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       html += `
         <div class="saved-assay-row">
           <div class="assay-row-header">
-            <input type="checkbox" class="assay-select-checkbox" data-assay-id="${assay.assayId}">
+            <input type="checkbox" class="assay-select-checkbox" data-assay-id="${escapeHTML(assay.assayId)}">
             <div class="assay-info">
               ${escapeHTML(assay.assayName) || "Untitled"}${assay.genotypes && assay.genotypes.length ? ` (${escapeHTML(assay.genotypes.join(', '))})` : ''} — ${assay.createdAt ? new Date(assay.createdAt).toLocaleString() : "Unknown date"}
             </div>
           </div>
           <div class="assay-actions">
-            <button class="secondary" data-action="start"  data-assay-id="${assay.assayId}">Start New Trial</button>
-            <button class="secondary" data-action="export" data-assay-id="${assay.assayId}">Export</button>
-            <button class="danger"    data-action="delete" data-assay-id="${assay.assayId}"
+            <button class="secondary" data-action="start"  data-assay-id="${escapeHTML(assay.assayId)}">Start New Trial</button>
+            <button class="secondary" data-action="export" data-assay-id="${escapeHTML(assay.assayId)}">Export</button>
+            <button class="danger"    data-action="delete" data-assay-id="${escapeHTML(assay.assayId)}"
               data-assay-name="${escapeHTML(assay.assayName)}">Delete</button>
           </div>
         </div>
@@ -2176,6 +2185,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Armband Connected");
       UI.Buttons.connectArmband.textContent = "Connected \u2713";
       UI.Buttons.connectArmband.disabled    = true;
+      // FW-5 FIX: Show disconnect button so user can cleanly switch armbands
+      UI.Buttons.disconnectArmband.removeAttribute("hidden");
     }
 
     /**
@@ -2198,6 +2209,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             UI.Displays.armbandBatteryLevel.setAttribute("hidden", "");
             UI.Buttons.connectArmband.disabled    = false;
             UI.Buttons.connectArmband.textContent = "Reconnect";
+            UI.Buttons.disconnectArmband.setAttribute("hidden", "");  // FW-5: hide disconnect btn
             _lastBattWarnLevel = 100;  // re-arm threshold warnings after reconnect
             showToast("Haptic armband disconnected", "warning", 4000);
           },
@@ -2229,6 +2241,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     // When the armband is disconnected (yellow icon) the click opens the picker
     // to reconnect; when already connected it is a no-op (picker will reject).
     UI.Buttons.armbandHeaderBtn.addEventListener("click", () => _connectArmband(UI.Buttons.armbandHeaderBtn));
+
+    // FW-5 FIX: Disconnect button — cleanly tears down the BLE connection
+    // so the user can pair a different armband without reloading the page.
+    UI.Buttons.disconnectArmband.addEventListener("click", async () => {
+      await armbandDisconnect();
+      UI.Displays.armbandStatusSettings.textContent = "Not connected";
+      UI.Displays.armbandStatusSettings.className   = "armband-status";
+      UI.Buttons.armbandHeaderBtn.classList.remove("armband-connected");
+      UI.Buttons.armbandHeaderBtn.classList.add("armband-disconnected");
+      UI.Buttons.armbandHeaderBtn.setAttribute("title", "Connect Armband");
+      UI.Displays.armbandBatteryLevel.setAttribute("hidden", "");
+      UI.Buttons.connectArmband.disabled    = false;
+      UI.Buttons.connectArmband.textContent = "Connect";
+      UI.Buttons.disconnectArmband.setAttribute("hidden", "");
+      _lastBattWarnLevel = 100;
+      showToast("Haptic armband disconnected", "info", 3000);
+    });
   }
 
   // ── Finish trial button ─────────────────────────────────────────────────

@@ -189,11 +189,11 @@ The timing engine uses a **two-layer architecture** for accuracy:
 
 The timer supports an optional external **Haptic Armband** (built on the Seeed XIAO nRF52840) worn by the researcher. This allows the researcher to feel precise tactile feedback without relying on audio or screen visuals.
 
-The armband uses a **DRV2605L haptic motor driver** (I²C) paired with an **external ERM or LRA vibration motor**, giving clean, consistent, and adjustable haptic output without overloading any GPIO pin.
+The armband uses a **DRV2605L haptic motor driver** (I²C) paired with an **external LRA (Linear Resonant Actuator) vibration motor**, giving clean, consistent, and adjustable haptic output without overloading any GPIO pin.
 
 - **Zero-Latency Mirroring:** The armband perfectly mirrors the native device haptics (a crisp 50ms pulse on tap, and an ascending pattern on trial completion) via a direct Web Bluetooth (GATT) connection.
 - **Dual-Voltage Power Routing:** Seamlessly switches between battery and USB power via a diode OR loop, preserving battery life and preventing voltage drops during high-intensity haptic pulses.
-- **Safety Watchdog:** A 2-second heartbeat ensures the armband vibrates autonomously if the app crashes or drops the connection.
+- **Safety Watchdog:** A heartbeat sent every 2 seconds ensures the armband detects connection loss within 3 seconds — if no heartbeat arrives, the armband vibrates a stutter warning autonomously.
 - **Battery Monitoring:** Uses the standard BLE Battery Service to display the armband's battery percentage in the header, with smart threshold warnings at ≤20% and ≤10%.
 
 > See [`armband_build_guide.md`](./armband_build_guide.md) for the full parts list, wiring diagram, and step-by-step assembly instructions.
@@ -204,7 +204,7 @@ The armband uses a **DRV2605L haptic motor driver** (I²C) paired with an **exte
 - **Booting up:** Solid White
 - **Advertising / Waiting to connect:** Slow Blue Blink
 - **Connected:** Solid Green
-- **Low Battery (< 15%):** Fast Amber (Red+Green) Blink
+- **Low Battery (≤20%):** Fast Amber (Red+Green) Blink; SOS pattern at ≤10%
 - **Fatal Error:** Solid Red
 
 **Vibration Patterns:**

@@ -6,8 +6,7 @@
 //  Hardware: DRV2605L haptic driver (I²C) + LRA motor
 //    DRV2605L SDA → D4 (XIAO I²C SDA)
 //    DRV2605L SCL → D5 (XIAO I²C SCL)
-//    DRV2605L VIN → 3.3V (logic supply)
-//    DRV2605L VM  → LiPo BAT+ (motor supply, up to 3.7V)
+//    DRV2605L VIN → Dual-voltage OR loop (5V USB + 3.3V battery via Schottky diodes)
 //    DRV2605L GND → GND
 //    LRA motor    → DRV2605L OUTP / OUTN (polarity-sensitive!)
 //
@@ -162,7 +161,7 @@ void motorUpdate() {
     return;
   }
 
-  motorPhaseStart = millis();
+  motorPhaseStart += motorPhases[motorPhaseIndex - 1]; // FW-8 FIX: ideal phase boundary prevents timing drift
   bool isOnPhase  = (motorPhaseIndex % 2 == 0); // even indices = ON, odd = OFF
   if (isOnPhase) {
     drv.setMode(DRV2605_MODE_REALTIME);
@@ -246,10 +245,7 @@ int readBatteryPercent() {
   digitalWrite(VBAT_ENABLE_PIN, HIGH);
   delayMicroseconds(500); // allow divider to settle
 
-  // AR_INTERNAL2V4 = 2.4V internal reference (Seeed nRF52 BSP constant)
-  analogReference(AR_INTERNAL2V4);
-  analogReadResolution(12); // 12-bit: 0–4095
-
+  // analogReference and analogReadResolution are configured once in setup().
   int raw = analogRead(PIN_VBAT);
 
   // Disable divider FET to save power between reads
@@ -311,7 +307,13 @@ void setup() {
   // ── DRV2605L Init (LRA mode) ──────────────────────────────
   // The DRV2605L communicates over I²C at fixed address 0x5A.
   // Wire.begin() uses XIAO D4 (SDA) and D5 (SCL) by default.
+  // L1: Configure ADC reference and resolution once here, not per-call in readBatteryPercent().
+  // AR_INTERNAL2V4 = 2.4V internal reference (Seeed nRF52 BSP constant)
+  analogReference(AR_INTERNAL2V4);
+  analogReadResolution(12); // 12-bit: 0–4095
+
   Wire.begin();
+  Wire.setClock(400000);  // 400 kHz Fast Mode (DRV2605L supports up to 400 kHz)
   if (!drv.begin()) {
     Serial.println("ERROR: DRV2605L not found! Check I²C wiring (D4=SDA, D5=SCL).");
     boardState = STATE_BLE_ERROR;
@@ -325,42 +327,59 @@ void setup() {
   //   Library 6 = LRA. This is different from ERM libraries 1–5.
   drv.selectLibrary(6);
 
-  // Step 2: Set N_ERM_LRA bit in register 0x1A (CTRL1) — tells
+  // Step 2: Set N_ERM_LRA bit in register 0x1A (Feedback Control) — tells
   //   the driver this is an LRA, not an ERM motor.
   //   Bit 7 of 0x1A: 0 = ERM, 1 = LRA
   drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);
 
   // Step 3: Enable closed-loop LRA (auto-resonance tracking).
-  //   Register 0x1D (CTRL4), bit 2 = LRA_OPEN_LOOP.
+  //   Register 0x1D (Control3), bit 2 = LRA_OPEN_LOOP.
   //   Clear this bit → closed-loop (auto-resonance ON). This is
   //   critical: open-loop drives at a fixed freq and wastes power;
   //   closed-loop locks onto the motor's true resonant frequency.
   drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);
 
   // Step 4: Set RATED_VOLTAGE register (0x16).
-  //   Formula: RATED_VOLTAGE = V_rated_rms * 255 / (1.8 * sqrt(2))
-  //                          = V_rated_rms * 255 / 2.5456
-  //   Motor is rated at 1.8V RMS → 1.8 * 255 / 2.5456 ≈ 180 = 0xB4
+  //   Formula (LRA, closed-loop): RATED_VOLTAGE = V_rated_rms * 255 / 5.3
+  //   Motor rated at 1.8V RMS → 1.8 * 255 / 5.3 ≈ 87 = 0x57
   //   ↓ Adjust this value if using a different motor:
-  drv.writeRegister8(0x16, 0xB4);   // ≈ 1.8V RMS for 1.8V-rated LRA
-                                     // Decrease for lower-rated motors (e.g.
-                                     // 0x78 for 1.2V, 0x96 for 1.5V)
+  drv.writeRegister8(0x16, 0x57);   // ≈ 1.8V RMS for 1.8V-rated LRA
 
   // Step 5: Set OD_CLAMP register (0x17) — overdrive clamp voltage.
   //   This limits the peak drive voltage during the attack phase.
-  //   Formula: OD_CLAMP = V_od * 255 / (1.8 * sqrt(2))
-  //   Typically set 10–20% above rated. For 1.8V rated → ~2.1V → 0xCB.
-  drv.writeRegister8(0x17, 0x89);   // ≈ 3.0V overdrive clamp
+  //   Formula (LRA): OD_CLAMP = V_od * 255 / 5.6
+  //   Typically set 10–20% above rated. For 1.8V rated → ~2.1V:
+  //   2.1 * 255 / 5.6 ≈ 96 = 0x60
+  drv.writeRegister8(0x17, 0x60);   // ≈ 2.1V overdrive clamp (~17% above rated)
 
-  // Step 6: Set drive mode to internal trigger (default). The motor
+  // Step 6: Run auto-calibration (measures motor back-EMF and populates
+  //   A_CAL_COMP (0x18), A_CAL_BEMF (0x19), and BEMF_GAIN bits).
+  //   Required for reliable closed-loop LRA operation.
+  drv.setMode(DRV2605_MODE_AUTOCAL);
+  drv.go();
+  unsigned long calStart = millis();
+  while ((drv.readRegister8(0x0C) & 0x01) && (millis() - calStart < 2000)) {
+    delay(10);
+  }
+  uint8_t calStatus = drv.readRegister8(0x00);
+  if (calStatus & 0x08) {
+    Serial.println("WARNING: DRV2605L auto-calibration failed (DIAG_RESULT set).");
+    Serial.println("  Check motor wiring and RATED_VOLTAGE/OD_CLAMP values.");
+  } else {
+    Serial.println("DRV2605L auto-calibration complete.");
+  }
+
+  // Step 7: Set drive mode to internal trigger (default). The motor
   //   state machine switches to RTP mode per-phase as needed.
   drv.setMode(DRV2605_MODE_INTTRIG);
 
   Serial.println("DRV2605L initialised in LRA closed-loop mode.");
-  Serial.print(  "  RATED_VOLTAGE (0x16): 0x"); Serial.println(drv.readRegister8(0x16), HEX);
-  Serial.print(  "  OD_CLAMP      (0x17): 0x"); Serial.println(drv.readRegister8(0x17), HEX);
-  Serial.print(  "  CTRL1         (0x1A): 0x"); Serial.println(drv.readRegister8(0x1A), HEX);
-  Serial.print(  "  CTRL4         (0x1D): 0x"); Serial.println(drv.readRegister8(0x1D), HEX);
+  Serial.print(  "  RATED_VOLTAGE  (0x16): 0x"); Serial.println(drv.readRegister8(0x16), HEX);
+  Serial.print(  "  OD_CLAMP       (0x17): 0x"); Serial.println(drv.readRegister8(0x17), HEX);
+  Serial.print(  "  FEEDBACK_CTRL  (0x1A): 0x"); Serial.println(drv.readRegister8(0x1A), HEX);
+  Serial.print(  "  CONTROL3       (0x1D): 0x"); Serial.println(drv.readRegister8(0x1D), HEX);
+  Serial.print(  "  A_CAL_COMP     (0x18): 0x"); Serial.println(drv.readRegister8(0x18), HEX);
+  Serial.print(  "  A_CAL_BEMF     (0x19): 0x"); Serial.println(drv.readRegister8(0x19), HEX);
 
   Serial.println("Startup vibration sequence...");
   startupVibrationSequence(); // blocks until complete (safe — BLE not yet running)
@@ -407,6 +426,17 @@ void setup() {
   // Advertise the haptic service UUID so Chrome's filter finds it
   BLE.setLocalName("TouchAssayArmband");
   BLE.setAdvertisedService(hapticService);
+
+  // FW-1 FIX: Reduce advertising power — 800 units = 500 ms interval.
+  // Default (160 = 100 ms) is far too aggressive for a battery device
+  // that may advertise for hours between sessions (~15% power savings).
+  BLE.setAdvertisingInterval(800);
+
+  // FW-2 FIX: Request a relaxed connection interval (30–50 ms).
+  // Haptic commands arrive at most ~1/sec during a run; the default
+  // ~7.5 ms polls 130×/sec and wastes radio power.
+  BLE.setConnectionInterval(24, 40);  // units = 1.25 ms → 30–50 ms
+
   BLE.advertise();
 
   boardState = STATE_ADVERTISING;
@@ -438,7 +468,20 @@ void loop() {
     boardState         = STATE_CONNECTED;
     heartbeatActive    = false;
     lastHeartbeatMs    = millis();
-    updateLED(); // immediately go green
+
+    // FW-4 FIX: Immediately check battery so we don't falsely show
+    // solid green for up to 30 s when battery is actually low.
+    int initPct = readBatteryPercent();
+    batteryChar.writeValue((uint8_t)initPct);
+    Serial.print("Initial battery: "); Serial.print(initPct); Serial.println("%");
+    if (initPct <= 10) {
+      boardState = STATE_LOW_BATTERY;
+    } else if (initPct <= 20) {
+      boardState = STATE_LOW_BATTERY;
+    }
+    lastBatteryUpdate = millis(); // reset timer so next periodic read is a full interval away
+
+    updateLED(); // immediately show correct state (green or amber)
     vibrateConnected(); // single connect-confirm pulse (non-blocking)
 
     while (central.connected()) {
@@ -494,17 +537,52 @@ void loop() {
         Serial.print("Battery: "); Serial.print(pct); Serial.println("%");
         lastBatteryUpdate = now;
 
-        if (pct < 15) {
+        if (pct <= 10) {
           boardState = STATE_LOW_BATTERY;
-          // SOS: three shorts, three longs, three shorts (non-blocking)
+          // Critical SOS: three shorts, three longs, three shorts (non-blocking)
           static const int sosSeq[] = {
             100, 80, 100, 80, 100, 80,   // · · ·
             300, 80, 300, 80, 300, 80,   // — — —
             100, 80, 100, 80, 100, 0     // · · ·
           };
           motorStart(sosSeq, 18);
+          Serial.println("CRITICAL: Battery <=10%!");
+        } else if (pct <= 20) {
+          boardState = STATE_LOW_BATTERY;
+          // Warning: three short pulses
+          static const int warnSeq[] = { 80, 100, 80, 100, 80, 0 };
+          motorStart(warnSeq, 6);
+          Serial.println("WARNING: Battery <=20%");
         } else {
           boardState = STATE_CONNECTED;
+        }
+
+      }
+
+      // ── FW-3 FIX: Independent I²C health check (every 5 s) ────
+      // Moved out of the 30 s battery block so a dead I²C bus is
+      // detected within 5 s, not 30. Includes auto-recovery.
+      static unsigned long lastI2cCheck = 0;
+      if (now - lastI2cCheck > 5000UL) {
+        lastI2cCheck = now;
+        Wire.beginTransmission(0x5A);
+        if (Wire.endTransmission() != 0) {
+          Serial.println("ERROR: DRV2605L I2C lost! Attempting recovery...");
+          Wire.end();
+          delay(1);  // allow bus lines to settle
+          Wire.begin();
+          Wire.setClock(400000);
+          if (drv.begin()) {
+            drv.selectLibrary(6);
+            drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);
+            drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);
+            drv.writeRegister8(0x16, 0x57);
+            drv.writeRegister8(0x17, 0x60);
+            drv.setMode(DRV2605_MODE_INTTRIG);
+            Serial.println("DRV2605L I2C recovered.");
+          } else {
+            Serial.println("ERROR: DRV2605L recovery failed!");
+          }
         }
       }
     }
