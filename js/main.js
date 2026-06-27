@@ -58,7 +58,8 @@ import {
 }                                                      from "./export.js";
 import { showToast, dismissLatestToast }                from "./toast.js";
 import {
-  isBluetoothSupported, armbandConnect, armbandDisconnect,
+  isBluetoothSupported, isArmbandConnected,
+  armbandConnect, armbandDisconnect,
   armbandTap, armbandRunComplete,
   armbandStartHeartbeat, armbandStopHeartbeat,
 }                                                      from "./haptic-armband.js";
@@ -1435,9 +1436,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!container) return;  // Bug 8: guard against missing element
     container.innerHTML = "";
 
-    if (!currentAssay || !getActiveTrial(currentAssay)) return;
+    // BUG-F fix: call getActiveTrial once and reuse — avoids a second .find() scan.
+    const trial = currentAssay ? getActiveTrial(currentAssay) : null;
+    if (!trial) return;
 
-    const trial   = getActiveTrial(currentAssay);
     const summary = {};
 
     // Initialise counters for every declared genotype
@@ -1625,8 +1627,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     UI.Displays.savedAssaysList.innerHTML = html;
-    UI.Buttons.deleteSelectedAssays.disabled = true;
-    UI.Inputs.selectAllAssays.checked        = false;
+    UI.Buttons.deleteSelectedAssays.disabled  = true;
+    UI.Inputs.selectAllAssays.checked         = false;
+    UI.Inputs.selectAllAssays.indeterminate   = false;  // BUG-H fix: clear indeterminate on every rebuild
   }
 
   /**
@@ -1792,6 +1795,10 @@ document.addEventListener("DOMContentLoaded", async () => {
    * and the header logo/home button.
    */
   function resetToSetup() {
+    // BUG-C fix: clear the double-tap guard so a first-tap on a previous assay
+    // cannot carry over and skip the confirmation on the very next assay.
+    pendingStart = false;
+    clearTimeout(startTimeout);
     currentAssay = null;
     UI.Forms.setup.reset();
     UI.Inputs.assayName.value     = generateAutoID();
@@ -2030,6 +2037,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       // waiting up to 1 s for the runWarmup() loop's next setTimeout to fire.
       UI.Displays.warmup.hidden = true;
       UI.Buttons.tap.hidden     = false;
+      // BUG-I fix: also restore the tap button label — the Escape path was the
+      // only cancel branch that left the stale "Tap again to start…" text showing.
+      const _sel = UI.Inputs.genotypeSelect.value;
+      if (_sel && (currentState === STATES.CONFIGURED || currentState === STATES.POISED)) {
+        const _at = getActiveTrial(currentAssay);
+        const _n  = (_at?.runs.filter(r => r.genotype === _sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
+        UI.Buttons.tap.textContent = `Start ${_sel} (Animal ${_n})`;
+      }
       return;
     }
 
@@ -2194,6 +2209,10 @@ document.addEventListener("DOMContentLoaded", async () => {
      * @param {HTMLButtonElement} btn  The button that was clicked.
      */
     async function _connectArmband(btn) {
+      // BUG-D fix: guard against opening the BLE picker while already connected.
+      // Without this, a second requestDevice() call on top of an existing GATT
+      // connection leaves the old gattserverdisconnected listener dangling.
+      if (isArmbandConnected()) return;
       btn.disabled = true;
       btn.textContent = "Connecting\u2026";
 

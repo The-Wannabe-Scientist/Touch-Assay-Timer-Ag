@@ -629,27 +629,36 @@ export async function recoverCrashGuard() {
     const guard = JSON.parse(raw);
     if (!guard?.assayId || !guard?.trialId || !guard?.runId) return;
 
-    const db    = await openDB();
-    const tx    = db.transaction(STORES.RUNS, "readwrite");
-    const store = tx.objectStore(STORES.RUNS);
+    const db = await openDB();
 
-    const existing = await new Promise((resolve, reject) => {
+    // BUG-G fix: the IDB spec auto-commits a readwrite transaction once there are no
+    // pending requests. Awaiting a Promise between .get() and .put() can flush the
+    // microtask queue, trigger auto-commit, and silently drop the write — especially
+    // on Safari. The safe pattern is to queue the .put() synchronously inside
+    // onsuccess, ensuring both requests share the same transaction lifetime.
+    await new Promise((resolve, reject) => {
+      const tx    = db.transaction(STORES.RUNS, "readwrite");
+      const store = tx.objectStore(STORES.RUNS);
+      tx.oncomplete = resolve;
+      tx.onerror    = () => reject(tx.error);
+
       const req = store.get(guard.runId);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror   = () => reject(req.error);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const existing = req.result;
+        if (
+          existing &&
+          existing.status === "active" &&
+          Array.isArray(guard.values) &&
+          guard.values.length > (existing.values?.length ?? 0)
+        ) {
+          const recovered = guard.values.length - (existing.values?.length ?? 0);
+          existing.values = guard.values;
+          store.put(existing);  // queued synchronously — transaction cannot auto-commit before this
+          console.log(`[CrashGuard] Recovered ${recovered} value(s) for run ${guard.runId}`);
+        }
+      };
     });
-
-    if (
-      existing &&
-      existing.status === "active" &&
-      Array.isArray(guard.values) &&
-      guard.values.length > (existing.values?.length ?? 0)
-    ) {
-      const recovered = guard.values.length - (existing.values?.length ?? 0);
-      existing.values = guard.values;
-      store.put(existing);
-      console.log(`[CrashGuard] Recovered ${recovered} value(s) for run ${guard.runId}`);
-    }
   } catch {
     // sessionStorage or IDB unavailable (e.g. Private Browsing) — silent no-op
   }

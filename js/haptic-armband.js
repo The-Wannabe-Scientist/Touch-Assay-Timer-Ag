@@ -35,7 +35,7 @@ const BATT_LEVEL_UUID   = 0x2A19;
 // Command bytes — must match the firmware switch-case exactly
 const CMD_TAP          = new Uint8Array([0x01]);  // mirrors vibrate(50)
 const CMD_RUN_COMPLETE = new Uint8Array([0x02]);  // mirrors vibrate([100,50,200])
-const CMD_HEARTBEAT    = new Uint8Array([0x01]);
+const CMD_HEARTBEAT    = new Uint8Array([0x03]);  // BUG-A fix: must differ from CMD_TAP (0x01)
 
 // Module-level connection state
 let _device             = null;

@@ -411,10 +411,14 @@ export function buildTrialBinned2D(trial, assay) {
     summaryRows.push(sumRow);
   }
 
+  // BUG-E fix: separator rows must span the full header width so SheetJS column-width
+  // detection is consistent (same fix was applied to buildPooledBinned2D at line 691).
+  const _sep = Array(headerGenotype.length).fill("");
+
   return [
     headerGenotype, headerAnimal, headerStatus,
     ...rawRows,
-    ["", "", ""], ["", "", ""], ["", "", ""],  // Three blank separator rows
+    _sep, _sep, _sep,
     summaryHeader,
     ...summaryRows
   ];

@@ -29,12 +29,14 @@
 //    Heartbeat char: 12345678-1234-1234-1234-000000000002  (Write)
 //    Battery char:   0x2A19 / 0x180F service              (Read+Notify)
 //
-//  ── COMMAND BYTES (haptic characteristic) ───────────────────
+//  ── COMMAND BYTES (haptic characteristic, UUID ...000000000001) ──────
 //    0x01 → single tap    (50 ms)
 //    0x02 → run complete  (100 ms – 50 ms gap – 200 ms)
 //
-//  ── HEARTBEAT ───────────────────────────────────────────────
-//    JS writes 0x01 every 2 s during a run.
+//  ── HEARTBEAT (separate characteristic, UUID ...000000000002) ─────────
+//    JS writes 0x03 every 2 s during a run to the heartbeat characteristic.
+//    The firmware only checks that a write occurred — the value is validated
+//    (must equal 0x03) as a sanity guard against stray BLE writes.
 //    No heartbeat for >3 s → firmware fires stutter warning.
 // ============================================================
 
@@ -485,13 +487,20 @@ void loop() {
         switch (cmd) {
           case 0x01: vibrateTap();         break;
           case 0x02: vibrateRunComplete(); break;
+          // BUG-A fix: 0x03 is the heartbeat byte — it belongs on heartbeatChar,
+          // not here, but ignore it silently as a belt-and-suspenders guard
+          // so a misdirected write doesn't spam the Serial log as "Unknown cmd".
+          case 0x03: /* heartbeat no-op */  break;
           default:
             Serial.print("Unknown cmd: 0x"); Serial.println(cmd, HEX);
         }
       }
 
       // ── Heartbeat watchdog ───────────────────────────────
-      if (heartbeatChar.written()) {
+      // BUG-A fix: validate the written value is 0x03 (the heartbeat byte
+      // used by js/haptic-armband.js since the CMD_HEARTBEAT collision fix).
+      // Any other value is a stray write and must not suppress a real dropout.
+      if (heartbeatChar.written() && heartbeatChar.value() == 0x03) {
         lastHeartbeatMs = now;
         heartbeatActive = true;
       }

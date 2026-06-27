@@ -82,14 +82,15 @@ export function validateInputs(values) {
     errors.push(`Bin size (${values.binSize}) cannot be larger than the total stimulus count (${values.stimCount}).`);
   }
 
-  // U-1 fix: isNaN(null) returns false (Number(null) === 0), so temperature: null
-  // would silently pass as 0 °C. Use an explicit null check first.
-  if (values.temperature == null || isNaN(Number(values.temperature))) {
-    errors.push("A valid temperature is required.");
+  // BUG-B fix: temperature and humidity are optional — main.js maps an empty field
+  // to null, which is a valid "not recorded" state. Only validate when a value is
+  // actually provided (non-null), and reject only genuinely bad values (NaN, etc.).
+  if (values.temperature != null && isNaN(Number(values.temperature))) {
+    errors.push("Temperature must be a valid number.");
   }
 
-  // Same null guard as temperature above — isNaN(null) is false (Number(null) === 0)
-  if (values.humidity == null || isNaN(Number(values.humidity)) || values.humidity < 0 || values.humidity > 100) {
+  // Same optional treatment as temperature — null means the field was left blank.
+  if (values.humidity != null && (isNaN(Number(values.humidity)) || values.humidity < 0 || values.humidity > 100)) {
     errors.push("Humidity must be a valid percentage between 0 and 100.");
   }
 
