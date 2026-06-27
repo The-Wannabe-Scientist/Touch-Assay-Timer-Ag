@@ -21,6 +21,7 @@ Adapted by [Ag](https://github.com/The-Wannabe-Scientist) from [touch-assay-time
   - [4. Exporting Data](#4-exporting-data)
 - [Data Model](#data-model)
 - [Audio Cues](#audio-cues)
+- [Haptic Armband Integration](#haptic-armband-integration)
 - [Settings](#settings)
 - [Offline & PWA Installation](#offline--pwa-installation)
 - [Data Storage & Privacy](#data-storage--privacy)
@@ -187,35 +188,54 @@ The timing engine uses a **two-layer architecture** for accuracy:
 
 ## Haptic Armband Integration
 
-The timer supports an optional external **Haptic Armband** (built on the Seeed XIAO nRF52840) worn by the researcher. This allows the researcher to feel precise tactile feedback without relying on audio or screen visuals.
+The timer supports an optional external **Haptic Armband** (built on the Seeed XIAO BLE nRF52840) worn by the researcher. This allows the researcher to feel precise tactile feedback without relying on audio or screen visuals.
 
-The armband uses a **DRV2605L haptic motor driver** (I²C) paired with an **external LRA (Linear Resonant Actuator) vibration motor**, giving clean, consistent, and adjustable haptic output without overloading any GPIO pin.
+The armband uses a **DRV2605L haptic motor driver** (I²C) and supports two motor types:
 
-- **Zero-Latency Mirroring:** The armband perfectly mirrors the native device haptics (a crisp 50ms pulse on tap, and an ascending pattern on trial completion) via a direct Web Bluetooth (GATT) connection.
-- **Dual-Voltage Power Routing:** Seamlessly switches between battery and USB power via a diode OR loop, preserving battery life and preventing voltage drops during high-intensity haptic pulses.
-- **Safety Watchdog:** A heartbeat sent every 2 seconds ensures the armband detects connection loss within 3 seconds — if no heartbeat arrives, the armband vibrates a stutter warning autonomously.
-- **Battery Monitoring:** Uses the standard BLE Battery Service to display the armband's battery percentage in the header, with smart threshold warnings at ≤20% and ≤10%.
+- **LRA (Linear Resonant Actuator)** — closed-loop auto-resonance mode; crisp, precise, low-noise. Recommended.
+- **ERM (Eccentric Rotating Mass / coin motor)** — open-loop mode; louder, stronger, easier to source.
+
+Motor type is selected by a single `#define` at the top of the firmware — no other code changes needed.
+
+> [!NOTE]
+> **Clone DRV2605L boards** have an EN pin that must be driven HIGH to enable the output stage. Connect EN → XIAO D3 (handled by firmware) or hardwire EN → 3.3V. See the build guide for details.
+
+- **Zero-Latency Mirroring:** The armband mirrors the device haptics (50 ms pulse on tap, ascending pattern on run complete) via a direct Web Bluetooth (GATT) connection.
+- **Dual-Voltage Power Routing:** Switches between USB 5 V and battery 3.3 V via a Schottky diode OR loop — preserves battery life and prevents brownouts during haptic pulses.
+- **Safety Watchdog:** A heartbeat sent every 2 s detects connection loss within 3 s. If missed, the armband fires a stutter warning autonomously.
+- **Battery Monitoring:** Standard BLE Battery Service (0x180F) reports armband battery % in the app header, with warnings at ≤20% and ≤10%.
+- **External RGB LED:** An optional external RGB LED on D6/D7/D8 mirrors the onboard LED state — useful when the XIAO is enclosed.
 
 > See [`armband_build_guide.md`](./armband_build_guide.md) for the full parts list, wiring diagram, and step-by-step assembly instructions.
 
 ### Armband Signals & Feedback
 
-**Visual Indicators (XIAO Onboard RGB LED):**
-- **Booting up:** Solid White
-- **Advertising / Waiting to connect:** Slow Blue Blink
-- **Connected:** Solid Green
-- **Low Battery (≤20%):** Fast Amber (Red+Green) Blink; SOS pattern at ≤10%
-- **Fatal Error:** Solid Red
+**LED states** (onboard XIAO RGB and optional external LED behave identically):
 
-**Vibration Patterns:**
-- **Boot Sequence:** Three escalating pulses (alive confirmation)
-- **BLE Ready / Advertising:** Double tap
-- **Connected:** Single tap
-- **Disconnected:** Rapid buzz (6 quick pulses)
-- **Low Battery:** SOS pattern (··· ─── ···)
-- **Fatal Error:** Rapid infinite pulsing
+| State | LED |
+|---|---|
+| Booting | Solid white |
+| Advertising / waiting to connect | Slow blue blink (1 s) |
+| BLE connected | Solid green |
+| Low battery (≤ 20%) | Fast amber blink (300 ms) |
+| Fatal error | Solid red |
 
-*Note: The armband features require a Chromium-based browser (Chrome, Edge). On unsupported browsers like Safari or Firefox, the feature degrades gracefully and is hidden from the UI.*
+**Vibration patterns:**
+
+| Event | Pattern |
+|---|---|
+| Boot alive confirmation | Three escalating pulses |
+| BLE ready to connect | Double tap |
+| Central device connected | Single tap |
+| Central device disconnected | Rapid 6-pulse burst |
+| Tap registered (cmd `0x01`) | 50 ms pulse |
+| Run complete (cmd `0x02`) | 100 ms · pause · 200 ms |
+| Heartbeat lost (> 3 s) | 3× stutter |
+| Battery ≤ 20% | Three short pulses |
+| Battery ≤ 10% (critical) | SOS (··· ─── ···) |
+| BLE init failed | SOS loop every 10 s |
+
+*The armband features require a Chromium-based browser (Chrome, Edge). On unsupported browsers (Safari, Firefox) the feature degrades gracefully and is hidden from the UI.*
 
 ---
 
@@ -265,22 +285,28 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
 
 ```
 .
-├── index.html          # Single-page app shell; all screens defined here
-├── styles.css          # All styling (vanilla CSS, no framework)
-├── manifest.json       # PWA manifest (name, icons, display mode)
-├── service-worker.js   # Offline caching via Cache API
-├── icon-192.png        # PWA icon (192×192)
-├── icon-512.png        # PWA icon (512×512, maskable)
-└── js/
-    ├── main.js         # App controller — state machine, event handling, UI updates
-    ├── models.js       # Data model factories (createAssay, createTrial, createRun)
-    ├── db.js           # IndexedDB persistence layer
-    ├── audio.js        # Web Audio API metronome + Web Speech API countdown
-    ├── haptic-armband.js # Web Bluetooth GATT module for wearable integration
-    ├── export.js       # Excel (SheetJS) / CSV / HTML preview generation
-    ├── utils.js        # Binning, Touch Index, pooled-run computation
-    ├── toast.js        # Non-blocking notification toasts
-    └── timer-worker.js # Web Worker — drift-compensated ISI scheduler
+├── index.html              # Single-page app shell; all screens defined here
+├── styles.css              # All styling (vanilla CSS, no framework)
+├── manifest.json           # PWA manifest (name, icons, display mode)
+├── service-worker.js       # Offline caching via Cache API
+├── icon-192.png            # PWA icon (192×192)
+├── icon-512.png            # PWA icon (512×512, maskable)
+├── armband_build_guide.md  # Full hardware build guide for the haptic armband
+├── js/
+│   ├── main.js             # App controller — state machine, event handling, UI updates
+│   ├── models.js           # Data model factories (createAssay, createTrial, createRun)
+│   ├── db.js               # IndexedDB persistence layer
+│   ├── audio.js            # Web Audio API metronome + Web Speech API countdown
+│   ├── haptic-armband.js   # Web Bluetooth GATT module for wearable integration
+│   ├── export.js           # Excel (SheetJS) / CSV / HTML preview generation
+│   ├── utils.js            # Binning, Touch Index, pooled-run computation
+│   ├── toast.js            # Non-blocking notification toasts
+│   └── timer-worker.js     # Web Worker — drift-compensated ISI scheduler
+└── firmware/
+    ├── haptic_armband/
+    │   └── haptic_armband.ino  # Full BLE firmware (LRA or ERM — set #define at top)
+    └── haptic_test/
+        └── haptic_test.ino     # Hardware verification sketch (no BLE required)
 ```
 
 ---
