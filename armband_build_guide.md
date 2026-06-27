@@ -1,27 +1,30 @@
 # 🦾 BLE Haptic Armband Build Guide
 
-**Components:** Seeed Studio XIAO BLE nRF52840 · WLY602040 3.7V 400mAh LiPo · DRV2605L Haptic Driver · LRA (Linear Resonant Actuator) Vibration Motor
+**Components:** Seeed Studio XIAO BLE nRF52840 · WLY602040 3.7V 400mAh LiPo · DRV2605L Haptic Driver · LRA or ERM Vibration Motor
 
 ---
 
-## 📦 Full Bill of Materials
+## 📦 Bill of Materials
 
 | Component | Qty | Notes |
 |---|---|---|
-| Seeed Studio XIAO BLE nRF52840 | 1 | **Not** the Sense variant unless you want IMU |
-| WLY602040 3.7V 400mAh LiPo battery | 1 | 6×20×40 mm, ~PCM protected |
-| DRV2605L Haptic Motor Driver breakout | 1 | Adafruit #2305 or equivalent; I²C, 3.3V-compatible |
-| LRA vibration motor, 1.8V RMS rated | 1 | Z-axis linear resonant actuator (e.g. Jinlong G0832012D or equivalent); observe +/- polarity |
-| 1N5819 Schottky Diode | 2 | For dual-voltage OR loop to prevent brownouts |
-| 10µF to 100µF Capacitor | 1 | Electrolytic or ceramic. Decoupling capacitor across DRV2605L VIN/GND |
-| 4× pin header / jumper wires (female–female) | — | For SDA, SCL, VIN, GND from XIAO to DRV2605L breakout |
-| 2× thin motor leads (~5 cm) | — | Solder from DRV2605L OUTP/OUTN pads to motor terminals |
-| Elastic armband strap (~30mm wide) | 1 | Nylon or silicone |
+| Seeed Studio XIAO BLE nRF52840 | 1 | **Not** the Sense variant unless you want the IMU |
+| WLY602040 3.7V 400mAh LiPo battery | 1 | 6×20×40 mm, PCM protected |
+| DRV2605L Haptic Motor Driver breakout | 1 | Adafruit #2305 or clone; I²C, 3.3V-compatible |
+| **Option A:** LRA motor, 1.8V RMS | 1 | Z-axis linear resonant actuator (e.g. Jinlong G0832012D). Observe +/− polarity. |
+| **Option B:** ERM coin motor, 3V | 1 | Eccentric rotating mass (standard coin vibration motor). No strict polarity. |
+| 1N5819 Schottky Diode | 2 | Dual-voltage OR loop for DRV2605L VIN |
+| 10µF–100µF Capacitor | 1 | Decoupling cap across DRV2605L VIN/GND |
+| **Optional:** External RGB LED (common-cathode) | 1 | For visible status outside enclosure. See wiring below. |
+| 220Ω resistor | 3 | One per LED colour channel (only if using external RGB LED) |
+| Jumper wires / pin headers | — | SDA, SCL, VIN, GND, EN from XIAO to DRV2605L |
+| Thin motor leads (~5 cm) | 2 | Solder to DRV2605L OUTP / OUTN |
+| Elastic armband strap (~30 mm wide) | 1 | Nylon or silicone |
 | Velcro strip | 1 pair | ~30 mm × 60 mm |
-| Small enclosure / 3D-printed shell | 1 | ~55×25×14 mm (slightly deeper to fit DRV2605L breakout) |
-| Kapton tape or hot glue | — | For strain relief & insulation |
-| USB-C cable | 1 | For programming & charging |
-| **Optional:** On/off toggle switch (SPDT) | 1 | Wired in series on BAT+ line |
+| Small enclosure / 3D-printed shell | 1 | ~55×25×14 mm |
+| Kapton tape or hot glue | — | Strain relief & insulation |
+| USB-C cable | 1 | Programming & charging |
+| **Optional:** SPDT on/off switch | 1 | Wired in series on BAT+ line |
 
 **Tools:** Soldering iron + solder, wire strippers, multimeter, Arduino IDE
 
@@ -30,16 +33,19 @@
 ## ⚠️ Critical Safety Notes
 
 > [!CAUTION]
-> **LiPo polarity is fatal to the board.** Always verify BAT+ (red wire) and BAT− (black wire) with a multimeter BEFORE soldering. Reversing polarity will instantly destroy the XIAO.
+> **LiPo polarity is fatal to the board.** Always verify BAT+ (red) and BAT− (black) with a multimeter BEFORE soldering. Reversing polarity destroys the XIAO instantly.
 
 > [!WARNING]
-> The DRV2605L is a **dedicated haptic driver IC** — do NOT connect the motor directly to any GPIO pin. The DRV2605L controls motor current via its internal H-bridge; the GPIO pins of the XIAO can only handle ~5 mA standard drive (up to 15 mA high-drive) and will be damaged or produce very weak vibration if used directly.
+> The DRV2605L is a **dedicated haptic driver** — never connect the motor directly to a GPIO pin. XIAO GPIO pins handle ≤15 mA; the motor requires up to 200 mA and must be driven via the DRV2605L's internal H-bridge.
 
 > [!NOTE]
-> The XIAO nRF52840 runs at **3.3V logic**. The DRV2605L breakout board (Adafruit #2305) includes a 3.3V regulator and level-shifter, so it accepts both 3.3V and 5V power on VIN — power it via the **dual-voltage OR loop** described in the Wiring section.
+> The XIAO nRF52840 runs at **3.3V logic**. The Adafruit DRV2605L breakout includes a 3.3V regulator and level-shifter, accepting both 3.3V and 5V on VIN. Power it via the dual-voltage OR loop described below.
+
+> [!IMPORTANT]
+> **Clone DRV2605L boards** (non-Adafruit) have an **EN pin** that floats LOW by default, disabling the output stage entirely. Connect EN → XIAO D3 (firmware drives it HIGH) or hardwire EN → 3.3V. If you skip this, the motor will never vibrate regardless of correct register settings.
 
 > [!TIP]
-> The DRV2605L I²C address is fixed at **0x5A**. If you use another I²C device (e.g. an IMU), ensure there is no address conflict.
+> The DRV2605L I²C address is fixed at **0x5A**. If adding another I²C device (e.g. IMU), ensure no address conflict.
 
 ---
 
@@ -51,60 +57,44 @@
 D0  │ 1         14│ 3.3V
 D1  │ 2         13│ GND
 D2  │ 3         12│ RST
-D3  │ 4         11│ GND (also bottom)
-D4/SDA│ 5      10│ BAT- (bottom pad)  ← verify against official Seeed schematic
-D5/SCL│ 6       9│ BAT+ (bottom pad)  ← verify against official Seeed schematic
-D6/TX│ 7        8│ VIN (5V from USB)
+D3  │ 4         11│ GND
+D4/SDA│ 5      10│ BAT− (bottom pad)
+D5/SCL│ 6       9│ BAT+ (bottom pad)
+D6  │ 7         8│ VIN (5V from USB)
     └─────────────┘
+       D7  D8  (additional pads on back, near USB-C)
 ```
 
-**Bottom pads (must be soldered for battery):**
-- `BAT+` → Red wire of LiPo
-- `BAT−` → Black wire of LiPo
+> [!NOTE]
+> D7 and D8 are exposed on the back pads. Verify against the [official Seeed schematic](https://wiki.seeedstudio.com/XIAO_BLE/) before soldering.
+
+**Bottom pads (required for battery):**
+- `BAT+` → LiPo red wire
+- `BAT−` → LiPo black wire
 
 ---
 
-## 🔌 Wiring Diagram
+## 🔌 Wiring
 
-### DRV2605L Haptic Driver → XIAO BLE (Dual-Voltage OR Loop)
+### DRV2605L → XIAO (Dual-Voltage OR Loop)
 
-To prevent the motor from causing voltage drops (brownouts) on the 3.3V line when running, we use a dual-voltage OR loop with two 1N5819 Schottky diodes. This allows the driver to pull from the 5V USB line when plugged in, and gracefully fall back to 3.3V battery power when unplugged.
+The dual-voltage OR loop prevents brownouts when the motor draws current peaks. It lets the DRV2605L draw from 5V USB when plugged in and fall back to 3.3V battery when unplugged.
 
 | DRV2605L Pin | Connect To | XIAO Pin |
 |---|---|---|
-| VIN | Diode OR Loop Output | Pin 8 (5V) & Pin 14 (3.3V) |
-| GND | GND pad | Pin 13 |
+| VIN | OR loop output (cathodes of both diodes) | Pin 8 (5V) & Pin 14 (3.3V) via 1N5819s |
+| GND | GND | Pin 13 |
 | SDA | D4/SDA | Pin 5 |
 | SCL | D5/SCL | Pin 6 |
+| **EN** | **D3** | Pin 4 *(clone boards only — see caution above)* |
 | OUTP | Motor (+) terminal | — |
 | OUTN | Motor (−) terminal | — |
 
-**OR Loop & Power Wiring:**
-- Connect the **Anode** of Diode 1 to XIAO **Pin 8 (5V)**.
-- Connect the **Anode** of Diode 2 to XIAO **Pin 14 (3.3V)**.
-- Twist both **Cathodes** (the striped ends) together and connect them to DRV2605L **VIN**.
-- Connect a **10µF to 100µF capacitor** directly across the DRV2605L **VIN** and **GND** pins. *(If using polarized electrolytic, positive leg to VIN, negative to GND).*
-
-> [!TIP]
-> Use short (~5 cm) silicone-insulated wires between the DRV2605L OUTP/OUTN pads and the motor leads. Twist the two motor wires together to minimise EMI and strain on the solder joints.
-
-> [!NOTE]
-> **LRA motors are polarity-sensitive.** If your LRA has +/- markings, connect + to OUTP and - to OUTN. Reversing polarity may damage the motor or result in no vibration.
-
-### LiPo Battery → XIAO BLE (bottom pads)
-
-```
-  LiPo Red (+)  ──→ BAT+ (bottom pad)
-  LiPo Black (−) ──→ BAT− (bottom pad)
-```
-
-**Optional power switch:**  
-Insert a single-pole switch in series on the BAT+ line:
-```
-  LiPo Red (+) ──→ [SWITCH] ──→ BAT+
-```
-
-### Complete Wiring at a Glance
+**OR loop wiring:**
+1. Anode of Diode 1 → XIAO **Pin 8 (5V)**
+2. Anode of Diode 2 → XIAO **Pin 14 (3.3V)**
+3. Cathodes (striped ends) of both → DRV2605L **VIN**
+4. 10µF–100µF cap across DRV2605L **VIN** and **GND** (positive leg to VIN)
 
 ```text
   ┌────────────────┐                        ┌──────────────────┐
@@ -113,10 +103,11 @@ Insert a single-pole switch in series on the BAT+ line:
   │   5V VIN (8) ──┼───[>| 1N5819 ]────┐    │                  │
   │                │                   ├───┼─ VIN              │
   │   3.3V  (14) ──┼───[>| 1N5819 ]────┘    │  │               │
-  │                │                        │  ┴ 10-100µF Cap  │
+  │                │                        │  ┴ 10–100µF Cap  │
   │    GND  (13) ──┼────────────────────────┼─ GND             │
   │  D4/SDA  (5) ──┼────────────────────────┼─ SDA             │
   │  D5/SCL  (6) ──┼────────────────────────┼─ SCL             │
+  │      D3  (4) ──┼────────────────────────┼─ EN  (clone only)│
   │                │                        │                  │
   │                │                        │  OUTP ───────────┼──→ Motor (+)
   │                │                        │  OUTN ───────────┼──→ Motor (−)
@@ -125,6 +116,67 @@ Insert a single-pole switch in series on the BAT+ line:
   BAT+ (bottom) ──→ LiPo Red (+)
   BAT− (bottom) ──→ LiPo Black (−)
 ```
+
+### Motor Selection & Polarity
+
+| Motor Type | OUTP | OUTN | Polarity |
+|---|---|---|---|
+| **LRA** | Motor (+) | Motor (−) | **Sensitive** — must match markings |
+| **ERM** | Either wire | Either wire | Not sensitive (only affects spin direction) |
+
+> [!TIP]
+> Twist the two motor leads together to minimise EMI. Keep leads short (≤5 cm).
+
+### External RGB LED (optional)
+
+An external RGB LED can be mounted anywhere on the enclosure or strap to show the same status as the onboard LED.
+
+```
+  XIAO D6 ──→ 220Ω ──→ R anode  ┐
+  XIAO D7 ──→ 220Ω ──→ G anode  ├─ Common-Cathode RGB LED
+  XIAO D8 ──→ 220Ω ──→ B anode  ┘
+  GND ───────────────→ Cathode
+```
+
+If your LED is **common-anode** instead, uncomment `#define EXT_RGB_COMMON_ANODE` in the firmware.
+
+### LiPo Battery → XIAO (bottom pads)
+
+```
+  LiPo Red (+)   ──→ BAT+ (bottom pad)
+  LiPo Black (−) ──→ BAT− (bottom pad)
+```
+
+**Optional power switch:** Insert a SPDT switch in-line on the red (BAT+) wire.
+
+---
+
+## 🚥 LED & Vibration Status Reference
+
+### LED states (both onboard and external LED, identical behaviour)
+
+| State | LED |
+|---|---|
+| Booting | **Solid white** |
+| Advertising / waiting to connect | **Slow blue blink** (1 s period) |
+| BLE connected | **Solid green** |
+| Low battery (≤ 20%) | **Fast amber blink** (300 ms period) |
+| Fatal error (BLE or driver failed) | **Solid red** |
+
+### Vibration patterns
+
+| Event | Pattern |
+|---|---|
+| Boot alive confirmation | Three escalating pulses |
+| BLE ready to connect | Double tap |
+| Central device connected | Single tap |
+| Central device disconnected | Rapid 6-pulse burst |
+| Tap registered (cmd 0x01) | 50 ms pulse |
+| Run complete (cmd 0x02) | 100 ms · pause · 200 ms |
+| Heartbeat lost (>3 s) | 3× stutter |
+| Battery ≤ 20% | Three short pulses |
+| Battery ≤ 10% (critical) | SOS (··· ─── ···) |
+| BLE init failed | SOS loop every 10 s |
 
 ---
 
@@ -141,7 +193,7 @@ Download Arduino IDE 2.x from [arduino.cc](https://www.arduino.cc/en/software).
    https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
    ```
 3. Go to **Tools → Board → Boards Manager**
-4. Search **"seeed nrf52"**, install **Seeed nRF52 mbed-enabled Boards** (recommended — Serial works out of the box)
+4. Search **"seeed nrf52"** → install **Seeed nRF52 mbed-enabled Boards**
 
 ### Step 3 — Select Board & Port
 
@@ -149,325 +201,186 @@ Download Arduino IDE 2.x from [arduino.cc](https://www.arduino.cc/en/software).
 - **Tools → Port → (your USB-C port)**
 
 > [!NOTE]
-> If the board is not detected, **double-tap the Reset button**. The orange LED will fade — this is bootloader mode. Try uploading again.
+> If the board is not detected, **double-tap the Reset button**. The orange LED fades — this is bootloader mode. Try uploading again.
 
 ### Step 4 — Install Required Libraries
 
-You need **two** libraries:
-
 #### ArduinoBLE
-1. **Sketch → Include Library → Manage Libraries**
-2. Search **"ArduinoBLE"**, click **Install**
+**Sketch → Include Library → Manage Libraries** → search **"ArduinoBLE"** → Install
 
-#### Adafruit DRV2605 Library
-1. **Sketch → Include Library → Manage Libraries**
-2. Search **"Adafruit DRV2605"**, click **Install**
-3. When prompted to install dependencies, click **Install All** (installs Adafruit BusIO)
+#### Adafruit DRV2605
+**Sketch → Include Library → Manage Libraries** → search **"Adafruit DRV2605"** → Install → **Install All** (includes Adafruit BusIO dependency)
 
 > [!IMPORTANT]
-> Both libraries are required. The sketch will fail to compile without `Adafruit_DRV2605.h` and `Adafruit_BusIO`.
+> Both libraries are required. Compilation will fail without `Adafruit_DRV2605.h` and `Adafruit_BusIO`.
 
 ---
 
-## 🖥️ Firmware Code
+## 🖥️ Firmware Files
 
-### Basic Standalone Vibration Pattern
+All firmware lives in the [`firmware/`](./firmware/) directory. There are two sketches:
 
-This sketch runs a haptic heartbeat pattern on boot — no BLE required. Great for testing wiring.
-
-```cpp
-// ============================================================
-//  haptic_test.ino  —  Basic vibration pattern test
-//  Board: Seeed XIAO BLE nRF52840
-//  Hardware: DRV2605L haptic driver (I²C) + LRA motor
-//
-//  Wiring (Dual-Voltage OR Loop):
-//    DRV2605L SDA → D4 (XIAO I²C SDA)
-//    DRV2605L SCL → D5 (XIAO I²C SCL)
-//    DRV2605L VIN → Dual-voltage OR loop (5V USB + 3.3V battery via Schottky diodes)
-//    DRV2605L GND → GND
-//    LRA motor (+) → DRV2605L OUTP
-//    LRA motor (−) → DRV2605L OUTN  (observe polarity for LRA!)
-//
-//  This test sketch mirrors the LRA configuration used in haptic_armband.ino.
-//  If auto-calibration prints a WARNING, check motor wiring and register values.
-// ============================================================
-
-#include <Wire.h>
-#include <Adafruit_DRV2605.h>
-
-Adafruit_DRV2605 drv;
-
-void setup() {
-  Serial.begin(115200);
-  // L3: Wait for Serial with 2-second timeout (needed on XIAO nRF52840 with mbed core)
-  unsigned long t = millis();
-  while (!Serial && millis() - t < 2000) {}
-
-  Wire.begin();
-  Wire.setClock(400000);  // 400 kHz Fast Mode
-
-  if (!drv.begin()) {
-    Serial.println("ERROR: DRV2605L not found! Check I2C wiring (D4=SDA, D5=SCL).");
-    while (1);
-  }
-
-  // ── LRA-specific register configuration (matches haptic_armband.ino) ──────
-  // Step 1: Select LRA ROM waveform library (6 = LRA, not 1 = ERM)
-  drv.selectLibrary(6);
-
-  // Step 2: Set N_ERM_LRA bit (Feedback Control register 0x1A, bit 7 = 1 for LRA)
-  drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);
-
-  // Step 3: Enable closed-loop LRA — clear LRA_OPEN_LOOP bit (Control3 0x1D, bit 2)
-  drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);
-
-  // Step 4: Set RATED_VOLTAGE (0x16) — Formula (LRA): V_rms * 255 / 5.3
-  //   1.8V RMS → 1.8 * 255 / 5.3 ≈ 87 = 0x57
-  drv.writeRegister8(0x16, 0x57);
-
-  // Step 5: Set OD_CLAMP (0x17) — Formula (LRA): V_od * 255 / 5.6
-  //   2.1V (~17% above rated) → 2.1 * 255 / 5.6 ≈ 96 = 0x60
-  drv.writeRegister8(0x17, 0x60);
-
-  // Step 6: Auto-calibration — measures back-EMF, populates A_CAL_COMP/BEMF
-  drv.setMode(DRV2605_MODE_AUTOCAL);
-  drv.go();
-  unsigned long calStart = millis();
-  while ((drv.readRegister8(0x0C) & 0x01) && (millis() - calStart < 2000)) {
-    delay(10);
-  }
-  uint8_t calStatus = drv.readRegister8(0x00);
-  if (calStatus & 0x08) {
-    Serial.println("WARNING: DRV2605L auto-calibration failed (DIAG_RESULT set).");
-    Serial.println("  Check motor wiring and RATED_VOLTAGE/OD_CLAMP values.");
-  } else {
-    Serial.println("DRV2605L auto-calibration complete.");
-  }
-  Serial.print("  A_CAL_COMP (0x18): 0x"); Serial.println(drv.readRegister8(0x18), HEX);
-  Serial.print("  A_CAL_BEMF (0x19): 0x"); Serial.println(drv.readRegister8(0x19), HEX);
-
-  // Step 7: Internal trigger mode for normal operation
-  drv.setMode(DRV2605_MODE_INTTRIG);
-
-  Serial.println("Haptic Armband - DRV2605L LRA Vibration Test");
-}
-
-// Drive LRA at full amplitude for onMs, then silent for offMs
-void pulseVibrate(int onMs, int offMs, int reps) {
-  for (int i = 0; i < reps; i++) {
-    drv.setMode(DRV2605_MODE_REALTIME);
-    drv.setRealtimeValue(127);  // full LRA amplitude (RTP signed 8-bit: 0=off, 127=max)
-    delay(onMs);
-    drv.setRealtimeValue(0);
-    drv.setMode(DRV2605_MODE_INTTRIG);
-    if (offMs > 0) delay(offMs);
-  }
-}
-
-void loop() {
-  // Double-tap pattern
-  pulseVibrate(100, 80, 2);
-  delay(2000);
-
-  // Long pulse
-  pulseVibrate(500, 0, 1);
-  delay(2000);
-}
-```
-
----
-
-### Full BLE-Controlled Haptic Armband
-
-This is the main firmware. It exposes a **BLE GATT service** that the Touch Assay Timer web app connects to. The DRV2605L is controlled over I²C using real-time playback (RTP) mode for precise custom pulse durations.
-
-See [`firmware/haptic_armband/haptic_armband.ino`](./firmware/haptic_armband/haptic_armband.ino) for the complete sketch — summarised key points below:
-
-| Feature | Implementation |
+| File | Purpose |
 |---|---|
-| Motor driver | DRV2605L via I²C (Wire.h + Adafruit_DRV2605) |
-| Vibration control | `drv.setMode(DRV2605_MODE_REALTIME)` + `setRealtimeValue(127)` |
-| Amplitude | 127 = full rated amplitude (RTP is signed 8-bit, not unsigned) |
-| Motor library | ERM = `drv.selectLibrary(1)`; LRA = `drv.selectLibrary(6)` |
-| BLE service UUID | `12345678-1234-1234-1234-123456789012` |
-| Tap command | Write `0x01` to haptic characteristic → 50 ms pulse |
-| Run complete | Write `0x02` → ascending 100 ms + 200 ms pattern |
-| Heartbeat watchdog | No HB for >3 s → 3× stutter pattern |
+| [`firmware/haptic_test/haptic_test.ino`](./firmware/haptic_test/haptic_test.ino) | Hardware verification — runs vibration patterns on boot, no BLE needed |
+| [`firmware/haptic_armband/haptic_armband.ino`](./firmware/haptic_armband/haptic_armband.ino) | Full BLE firmware — connects to the Touch Assay Timer web app |
 
-> [!TIP]
-> The RTP value range for LRA is **0–127** (signed 8-bit). Values above 127 wrap to negative polarity and will cancel drive rather than increase amplitude. Always use 127 as maximum.
+### Choosing LRA or ERM motor
 
----
-
-## 🔋 DRV2605L Driver Notes
-
-### ERM vs LRA Motor Selection
-
-The DRV2605L supports two motor types:
-
-| Motor Type | Library Constant | `selectLibrary()` |
-|---|---|---|
-| **ERM** (coin/pager, DC motor) | `DRV2605_LIBRARY_ERM_CLOSED_LOOP` | `drv.selectLibrary(1)` |
-| **LRA** (linear resonant actuator) | `DRV2605_LIBRARY_LRA` | `drv.selectLibrary(6)` |
-
-This firmware targets **LRA motors** (library 6) in closed-loop auto-resonance mode by default. If you use an ERM motor instead, change `drv.selectLibrary(6)` to `drv.selectLibrary(1)` and remove the `N_ERM_LRA` (0x1A bit 7) and `LRA_OPEN_LOOP` (0x1D bit 2) register writes in `setup()`. For reference, here is the correct LRA configuration block:
+Both sketches support both motor types via a single switch at the **top of the file**. Open the sketch and keep only one of:
 
 ```cpp
-  drv.selectLibrary(6); // 6 = LRA library
-
-  // Set N_ERM_LRA bit (Feedback Control register 0x1A, bit 7): 1 = LRA, 0 = ERM
-  // NOTE: drv.useLRA() does NOT exist in the Adafruit library — use the
-  // raw register write below.
-  drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);
-
-  // Enable closed-loop auto-resonance (Control3 register 0x1D, bit 2 = LRA_OPEN_LOOP)
-  // Clear bit → closed-loop ON (tracks motor's true resonant frequency)
-  drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);
-
-  // Set Rated Voltage & Overdrive Clamp for your specific LRA
-  // Formula (LRA closed-loop): RATED_VOLTAGE = V_rms * 255 / 5.3
-  // Formula (LRA closed-loop): OD_CLAMP      = V_od  * 255 / 5.6
-  // (Values below are for a 1.8V RMS rated LRA)
-  drv.writeRegister8(0x16, 0x57); // RATED_VOLTAGE ≈ 1.8V RMS
-  drv.writeRegister8(0x17, 0x60); // OD_CLAMP ≈ 2.1V (~17% above rated)
-
-  // Run auto-calibration — measures back-EMF, populates A_CAL_COMP (0x18) and A_CAL_BEMF (0x19)
-  drv.setMode(DRV2605_MODE_AUTOCAL);
-  drv.go();
-  unsigned long calStart = millis();
-  while ((drv.readRegister8(0x0C) & 0x01) && (millis() - calStart < 2000)) { delay(10); }
-  if (drv.readRegister8(0x00) & 0x08) {
-    Serial.println("WARNING: auto-cal failed — check motor wiring and register values.");
-  }
-
-  drv.setMode(DRV2605_MODE_INTTRIG); // back to normal operation
+#define MOTOR_LRA   // ← keep this for an LRA motor
+// #define MOTOR_ERM   // ← keep this for an ERM coin motor
 ```
 
-### Waveform ROM Effects (Alternative to RTP)
+Swap the comments to change motor type. The correct registers, voltages, and calibration routines are applied automatically.
 
-The DRV2605L includes 123 pre-programmed haptic waveforms in ROM. These run entirely in hardware (no `delay()` needed) and are ideal for consistent, timed patterns. Example:
+### Choosing external LED type
+
+Also at the top of each file:
+
 ```cpp
-// Play ROM effect #14 (sharp click) then stop
-drv.setWaveform(0, 14);  // slot 0: effect #14
-drv.setWaveform(1, 0);   // slot 1: end
-drv.go();
+#define USE_EXTERNAL_RGB        // comment out to disable external LED entirely
+// #define EXT_RGB_COMMON_ANODE // uncomment only if your LED is common-anode
 ```
-See the [DRV2605L datasheet](https://www.ti.com/lit/ds/symlink/drv2605l.pdf) for the full effect library table.
+
+### Voltage values — adjusting for your motor
+
+If your specific motor has different ratings, change these two register values in the `initMotor()` function:
+
+**LRA:**
+```
+RATED_VOLTAGE (0x16) = V_rms × 255 / 5.3   (default: 0x57 = 1.8V RMS)
+OD_CLAMP      (0x17) = V_od  × 255 / 5.6   (default: 0x60 = 2.1V, ~17% above rated)
+```
+
+**ERM:**
+```
+RATED_VOLTAGE (0x16) = V_rated × 255 / 5.3  (default: 0x90 = 3.0V)
+OD_CLAMP      (0x17) = V_peak  × 255 / 5.6  (default: 0x96 = 3.3V)
+```
 
 ---
 
-## 🚥 LED and Vibration Signals Reference
-
-The armband provides hardware-level feedback via the onboard RGB LED and the vibration motor to indicate its current state.
-
-**Visual Indicators (XIAO Onboard RGB LED):**
-- **Booting up:** Solid White
-- **Advertising / Waiting to connect:** Slow Blue Blink
-- **Connected:** Solid Green
-- **Low Battery (≤ 20%):** Fast Amber (Red+Green) Blink
-- **Fatal Error:** Solid Red
-
-**Vibration Patterns:**
-- **Boot Sequence:** Three escalating pulses (alive confirmation)
-- **BLE Ready / Advertising:** Double tap
-- **Connected:** Single tap
-- **Disconnected:** Rapid buzz (6 quick pulses)
-- **Low Battery:** SOS pattern (··· ─── ···)
-- **Fatal Error:** Rapid infinite pulsing
-
----
-
-## 📱 Connecting via Phone (No App Needed)
-
-Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
-
-1. Open the app → Scan → find **"TouchAssayArmband"**
-2. Connect
-3. Navigate to the custom service UUID `12345678-1234-1234-1234-123456789012`
-4. Write a **byte value** to the Haptic characteristic:
-
-| Value | Pattern |
-|---|---|
-| `0x01` | Single tap (50 ms) |
-| `0x02` | Run complete (100 ms pause 200 ms) |
-
----
-
-## 🏗️ Physical Assembly — Step by Step
+## 🏗️ Physical Assembly
 
 ### Step 1: Solder Battery to XIAO
 
 1. Tin the `BAT+` and `BAT−` pads on the underside of the XIAO
-2. **Verify polarity with multimeter** — red wire measures positive relative to black
+2. **Verify polarity with multimeter** before soldering
 3. Solder red wire to `BAT+`, black to `BAT−`
-4. Apply Kapton tape over the solder joints for insulation
-5. **Optional:** solder the on/off switch in-line on the red wire
+4. Apply Kapton tape over joints for insulation
+5. *(Optional)* Solder on/off switch in-line on the red wire
 
 ### Step 2: Connect DRV2605L to XIAO
 
-1. Build the Dual-Voltage OR Loop for **VIN**:
-   - Solder the anode (non-striped end) of a 1N5819 diode to XIAO **Pin 8 (5V)**.
-   - Solder the anode of a second 1N5819 diode to XIAO **Pin 14 (3.3V)**.
-   - Join the cathodes (striped ends) of both diodes and connect to DRV2605L **VIN**.
-2. Add a **Decoupling Capacitor**:
-   - Solder a 10µF–100µF capacitor across the **VIN** and **GND** pins on the DRV2605L. (Positive to VIN, negative to GND).
-3. Connect the remaining pins with short wires:
-   - DRV2605L **GND** → XIAO **GND** (pin 13)
-   - DRV2605L **SDA** → XIAO **D4** (pin 5)
-   - DRV2605L **SCL** → XIAO **D5** (pin 6)
-4. Secure the DRV2605L breakout flat against the XIAO with double-sided foam tape
-5. Apply hot glue or Kapton tape for extra strain relief on the wires
+1. **OR Loop (VIN):** Solder anodes of two 1N5819 diodes to XIAO **Pin 8 (5V)** and **Pin 14 (3.3V)**. Twist cathodes together → DRV2605L **VIN**.
+2. **Decoupling cap:** Solder 10µF–100µF cap across DRV2605L **VIN** and **GND**. (Positive → VIN)
+3. **Signal wires:** DRV2605L **GND → Pin 13**, **SDA → D4**, **SCL → D5**
+4. **EN wire:** DRV2605L **EN → D3** *(clone boards only)*
+5. Secure DRV2605L flat against XIAO with foam tape; hot-glue wire strain relief
 
-### Step 3: Attach Motor to DRV2605L
+### Step 3: Connect Motor
 
-1. Strip ~5 mm from each motor lead
-2. Tin both leads and the DRV2605L **OUTP** and **OUTN** pads
-3. Solder motor leads to OUTP and OUTN. (For ERMs, polarity only affects spin direction. For LRAs, observe +/- markings if present).
-4. Apply a small drop of hot glue at the solder joint for strain relief
-5. Twist the two motor leads together to reduce EMI
+1. Strip ~5 mm from each motor lead; tin leads and DRV2605L OUTP / OUTN pads
+2. Solder motor leads:
+   - **LRA:** Match +/− markings to OUTP/OUTN
+   - **ERM:** Either orientation (swap if spin direction is wrong)
+3. Hot-glue joints for strain relief; twist leads together
 
-### Step 4: Test Electronics (Before Enclosing)
+### Step 4: Connect External RGB LED (optional)
+
+1. Bend LED legs, insert 220Ω resistors in series on the R/G/B anodes
+2. Run wires to XIAO **D6 (R), D7 (G), D8 (B)**; cathode to **GND**
+3. Mount LED at a visible spot on the enclosure or strap
+
+### Step 5: Test Before Enclosing
 
 1. Connect XIAO via USB-C
-2. Upload the `haptic_test.ino` sketch first
-3. Open **Serial Monitor at 115200 baud** — confirm "DRV2605L auto-calibration complete" and "DRV2605L LRA Vibration Test" appear
-4. Verify the motor buzzes the double-tap + long-pulse pattern
-5. If Serial prints "ERROR: DRV2605L not found!" — check SDA/SCL wiring and ensure `Wire.begin()` is called
-6. If Serial prints "WARNING: auto-calibration failed" — check motor wiring and verify register values match your LRA's spec sheet
-7. Then upload `haptic_armband.ino` and test BLE from your phone
+2. Open the sketch `firmware/haptic_test/haptic_test.ino`
+3. **Set motor type:** ensure the correct `#define MOTOR_LRA` or `#define MOTOR_ERM` is active
+4. Upload and open **Serial Monitor at 115200 baud**
+
+**Expected Serial output:**
+```
+I2C scanner found: 0x5A
+LRA auto-calibration OK.       ← (or "DRV2605L: ERM open-loop mode." for ERM)
+  A_CAL_COMP (0x18): 0x0C
+  A_CAL_BEMF (0x19): 0x6C
+Haptic test ready.
+```
+
+5. Confirm motor vibrates the double-tap + long-pulse pattern
+6. External LED should be **solid green** when ready
+7. Then upload `firmware/haptic_armband/haptic_armband.ino` and test BLE
 
 > [!TIP]
-> If the motor makes noise but doesn't vibrate strongly, verify RATED_VOLTAGE (0x16 = 0x57 for 1.8V RMS) and OD_CLAMP (0x17 = 0x60) match your motor's spec sheet. Check that auto-calibration succeeded (A_CAL_COMP and A_CAL_BEMF are non-zero in Serial output). If there is no response at all, check the OUTP/OUTN solder joints with a multimeter (should read ~3V when active).
+> If the motor is silent but Serial output looks correct, check the **EN pin** is connected and driven HIGH (see Critical Notes above). This is the most common cause of 0V output on clone DRV2605L boards.
 
-### Step 5: Enclosure
+> [!TIP]
+> If `WARNING: LRA auto-calibration failed` appears, verify your RATED_VOLTAGE and OD_CLAMP values match your motor's spec sheet, and check OUTP/OUTN solder joints.
 
-**Option A — 3D Printed Shell (Recommended)**
-- Print a 55×25×14mm box with snap-fit lid
-- Add cutouts for: USB-C port, optional power switch, motor wire exit
-- Dimensions to fit XIAO (21×17.5 mm) + DRV2605L breakout (~20×20 mm) + LiPo (6×20×40 mm)
+### Step 6: Enclosure
 
-**Option B — Heat-Shrink / Fabric Pouch**
+**Option A — 3D Printed Shell (recommended)**
+- 55×25×14 mm box with snap-fit lid
+- Cutouts for: USB-C, optional switch, motor wire exit, LED window
+- Component layout: XIAO (21×17 mm) + DRV2605L (~20×20 mm) + LiPo (6×20×40 mm)
+
+**Option B — Fabric Pouch**
 - Wrap in bubble foam, slide into a sewn nylon pouch
 - Velcro the pouch to the strap
 
-### Step 6: Attach to Armband
+### Step 7: Attach to Armband
 
-1. Cut elastic strap to wrist circumference + ~40mm overlap
-2. Sew or glue Velcro: loop side on one strap end, hook side on the other
-3. Attach enclosure to the center of the strap using:
-   - Hook-and-loop (removable, for charging)
-   - Double-sided foam tape (permanent)
-4. Route the motor cable alongside the strap
-5. Position the motor at the underside (skin-contact face) of the band for best haptic sensation — attach with a small adhesive foam pad
+1. Cut elastic strap to wrist circumference + ~40 mm overlap
+2. Sew or glue Velcro: loop side on one end, hook side on the other
+3. Attach enclosure to strap centre (hook-and-loop for removability, foam tape for permanent)
+4. Route motor cable and LED wire along the strap
+5. Position motor on the **skin-contact face** of the band — attach with adhesive foam pad
 
-### Step 7: Charging
+### Step 8: Charging
 
-1. Remove the enclosure from the strap (or expose the USB-C port)
-2. Plug in any USB-C cable
-3. The **orange CHG LED** on the XIAO will illuminate during charging
-4. LED turns **off** when fully charged (~1.5–2 hours for 400mAh)
-5. Charge current is ~50mA by default (safe for the 400mAh cell)
+1. Plug in USB-C cable
+2. **Orange CHG LED** on XIAO illuminates during charging
+3. LED turns **off** when fully charged (~1.5–2 hours for 400 mAh at ~50 mA)
+
+---
+
+## 📱 Testing via Phone (No App Needed)
+
+Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
+
+1. Scan → find **"TouchAssayArmband"** → Connect
+2. Navigate to service UUID `12345678-1234-1234-1234-123456789012`
+3. Write a byte to the Haptic characteristic:
+
+| Value | Pattern |
+|---|---|
+| `0x01` | Single tap (50 ms) |
+| `0x02` | Run complete (100 ms · pause · 200 ms) |
+
+---
+
+## 🐛 Troubleshooting
+
+| Issue | Solution |
+|---|---|
+| Board not detected in IDE | Double-tap Reset; use a USB-C **data** cable (not charge-only) |
+| Upload fails | Select mbed-enabled board package; check Port selection |
+| Serial: "DRV2605L not found!" | Check SDA→D4, SCL→D5; confirm VIN has power; check EN connected and HIGH |
+| Motor silent, no Serial errors, 0V on OUTP/OUTN | **EN pin not driven HIGH** (most common issue on clone boards) |
+| Motor silent, registers look correct in Serial | Check continuity of OUTP/OUTN → motor leads with multimeter |
+| Motor cuts out immediately (overcurrent) | ERM motor stall-current exceeded driver limit; reduce OD_CLAMP temporarily; check motor spec |
+| LRA: motor vibrates but weakly | Verify RATED_VOLTAGE (0x57) and OD_CLAMP (0x60) match your motor spec; confirm auto-cal succeeded (A_CAL_COMP and A_CAL_BEMF non-zero) |
+| ERM: motor hums but doesn't spin | ERM closed-loop tracking failed; ensure open-loop is set (`0x1D` bit 5 = 1 in firmware) |
+| BLE doesn't advertise | Call `BLE.begin()` before any other BLE function |
+| Serial Monitor blank | Add `while(!Serial){}` with timeout; use mbed board package |
+| Battery draining fast | Advertising interval is already 500 ms in firmware; check no tight `delay()` loop exists |
+| Compile error: Adafruit_DRV2605.h | Install "Adafruit DRV2605" + "Adafruit BusIO" via Library Manager |
+| External LED always off | Check `#define USE_EXTERNAL_RGB` is not commented out; check 220Ω resistors; verify D6/D7/D8 continuity |
+| External LED wrong colour | Swap common-anode/cathode setting: add/remove `#define EXT_RGB_COMMON_ANODE` |
 
 ---
 
@@ -478,47 +391,6 @@ Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
 | BLE advertising + idle | ~18–22 hours |
 | BLE connected + occasional vibrations | ~10–14 hours |
 | Continuous vibration (worst case) | ~2–3 hours |
-
----
-
-## 🐛 Troubleshooting
-
-| Issue | Solution |
-|---|---|
-| Board not detected in Arduino IDE | Double-tap Reset; use USB-C **data** cable (not charge-only) |
-| Upload fails | Select mbed-enabled board package; check port selection |
-| Serial: "DRV2605L not found!" | Check SDA→D4 and SCL→D5; confirm VIN has power (3.3V on battery, ~4.7V on USB); verify `Wire.begin()` is called before `drv.begin()` |
-| Motor doesn't vibrate | Check OUTP/OUTN solder joints; confirm DRV2605L enumerated on Serial; try swapping motor leads |
-| Motor vibrates but very weakly | Verify RATED_VOLTAGE (0x57) and OD_CLAMP (0x60) match your LRA's spec; check auto-cal result in Serial; ensure motor coil resistance ~1–1.5Ω |
-| BLE doesn't advertise | Call `BLE.begin()` before any other BLE function |
-| Serial Monitor blank | Add `while(!Serial){}` with timeout; use mbed board package |
-| Battery draining fast | Add `delay()` in loop; use `BLE.poll()` instead of blocking |
-| Compile error: Adafruit_DRV2605.h not found | Install "Adafruit DRV2605" library + dependencies via Library Manager |
-
----
-
-## ⚡ Power Optimization (for extended battery life)
-
-Add these to your sketch for production use:
-
-```cpp
-#include <ArduinoBLE.h>
-
-// Low-power advertising interval (saves ~15% power vs default)
-void setup() {
-  // ...
-  BLE.setAdvertisingInterval(800);  // = 500 ms (BLE spec unit = 0.625 ms; 800 × 0.625 ms = 500 ms)
-  // ...
-}
-
-// In loop — use BLE.poll() instead of BLE.central() blocking
-void loop() {
-  BLE.poll(1000);  // poll with 1s timeout, CPU can sleep between
-  // ...
-}
-```
-
-For deep-sleep between events (advanced), use the `nrf52` SDK sleep calls or the `Adafruit_nRF52_Arduino` sleep library.
 
 ---
 
@@ -535,10 +407,11 @@ For deep-sleep between events (advanced), use the `nrf52` SDK sleep calls or the
 │                                      │
 │  ← USB-C cutout on short end →       │
 │  ← Motor wire exit on long side →    │
+│  ← LED window on top face →          │
 └──────────────────────────────────────┘
 ```
 
-Place the **LRA motor** external to the enclosure on the skin-facing side, attached with adhesive foam tape or a 3D-printed motor pocket.
+Motor mounts **externally** on the skin-facing side, attached with adhesive foam tape or a 3D-printed motor pocket.
 
 ---
 
