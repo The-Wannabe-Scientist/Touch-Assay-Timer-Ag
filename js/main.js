@@ -2194,6 +2194,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     function _setArmbandConnectedUI() {
       UI.Displays.armbandStatusSettings.textContent = "Connected \u2713";
       UI.Displays.armbandStatusSettings.className   = "armband-status armband-connected";
+      // Restore header icon button — remove the "connecting" pending class and
+      // re-enable it (it was disabled during the picker/GATT handshake).
+      UI.Buttons.armbandHeaderBtn.classList.remove("armband-connecting");
+      UI.Buttons.armbandHeaderBtn.disabled = false;
       UI.Buttons.armbandHeaderBtn.classList.add("armband-connected");
       UI.Buttons.armbandHeaderBtn.classList.remove("armband-disconnected");
       UI.Buttons.armbandHeaderBtn.setAttribute("title", "Armband Connected");
@@ -2213,8 +2217,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Without this, a second requestDevice() call on top of an existing GATT
       // connection leaves the old gattserverdisconnected listener dangling.
       if (isArmbandConnected()) return;
+
+      const isHeaderBtn = btn === UI.Buttons.armbandHeaderBtn;
       btn.disabled = true;
-      btn.textContent = "Connecting\u2026";
+      if (isHeaderBtn) {
+        // Do NOT set textContent here — it would destroy the SVG icon child node.
+        // Use a CSS class to signal the pending state instead.
+        btn.classList.add("armband-connecting");
+      } else {
+        btn.textContent = "Connecting\u2026";
+      }
 
       try {
         await armbandConnect(
@@ -2251,7 +2263,11 @@ document.addEventListener("DOMContentLoaded", async () => {
           showToast("Could not connect armband: " + err.message, "error");
         }
         btn.disabled = false;
-        btn.textContent = "Connect";
+        if (btn === UI.Buttons.armbandHeaderBtn) {
+          btn.classList.remove("armband-connecting");
+        } else {
+          btn.textContent = "Connect";
+        }
       }
     }
 

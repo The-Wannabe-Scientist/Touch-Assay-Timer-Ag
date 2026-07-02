@@ -2727,6 +2727,21 @@ body.state-running {
   background: rgba(251, 146, 60, 0.08);
 }
 
+/* ── Header icon — connecting/pairing in progress ────────────────────── */
+/* Applied while the BLE picker is open / GATT handshake is in flight.    */
+/* Uses opacity pulse only — does NOT touch textContent so the SVG survives. */
+.header-icon-btn.armband-connecting {
+  color: #60a5fa;          /* blue tint for "pending" */
+  border-color: rgba(96, 165, 250, 0.35);
+  background: rgba(96, 165, 250, 0.08);
+  animation: bt-connecting-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes bt-connecting-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
 /* ── Battery level badge — sits inline in the header button ──────────── */
 /* The header button expands its width automatically to accommodate the text.
    The badge inherits the button's current colour (green/amber/red) so the
