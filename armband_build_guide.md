@@ -13,8 +13,8 @@
 | DRV2605L Haptic Motor Driver breakout | 1 | Adafruit #2305 or clone; I²C, 3.3V-compatible |
 | **Option A:** LRA motor, 1.8V RMS | 1 | Z-axis linear resonant actuator (e.g. Jinlong G0832012D). Observe +/− polarity. |
 | **Option B:** ERM coin motor, 3V | 1 | Eccentric rotating mass (standard coin vibration motor). No strict polarity. |
-| 1N5819 Schottky Diode | 2 | Dual-voltage OR loop for DRV2605L VIN |
-| 10µF–100µF Capacitor | 1 | Decoupling cap across DRV2605L VIN/GND |
+| 1N5819 Schottky Diode | 2 | Dual-voltage OR loop for DRV2605L VIN (LiPo BAT+ & USB 5V) |
+| 220µF–470µF Capacitor | 1 | Bulk decoupling cap across DRV2605L VIN/GND — larger value required because DRV2605L is now fed directly from battery |
 | **Optional:** External RGB LED (common-cathode) | 1 | For visible status outside enclosure. See wiring below. |
 | 220Ω resistor | 3 | One per LED colour channel (only if using external RGB LED) |
 | Jumper wires / pin headers | — | SDA, SCL, VIN, GND, EN from XIAO to DRV2605L |
@@ -76,25 +76,31 @@ D6  │ 7         8│ VIN (5V from USB)
 
 ## 🔌 Wiring
 
-### DRV2605L → XIAO (Dual-Voltage OR Loop)
+### DRV2605L → XIAO (Dual-Voltage OR Loop — Direct Battery Power)
 
-The dual-voltage OR loop prevents brownouts when the motor draws current peaks. It lets the DRV2605L draw from 5V USB when plugged in and fall back to 3.3V battery when unplugged.
+The DRV2605L is powered **directly from the LiPo battery** in an OR loop with USB 5V. This bypasses the XIAO's onboard 3.3V regulator entirely, removing it from the motor power path. The DRV2605L can now draw its full peak current (up to ~400 mA) from the battery without risk of browning out the microcontroller.
 
-| DRV2605L Pin | Connect To | XIAO Pin |
+> [!IMPORTANT]
+> The two diode anodes connect to **XIAO Pin 8 (USB 5V)** and the **LiPo BAT+ wire directly** — **not** to XIAO Pin 14 (3.3V). Do NOT connect the battery side of the OR loop to Pin 14.
+
+| DRV2605L Pin | Connect To | Source |
 |---|---|---|
-| VIN | OR loop output (cathodes of both diodes) | Pin 8 (5V) & Pin 14 (3.3V) via 1N5819s |
-| GND | GND | Pin 13 |
-| SDA | D4/SDA | Pin 5 |
-| SCL | D5/SCL | Pin 6 |
-| **EN** | **D3** | Pin 4 *(clone boards only — see caution above)* |
+| VIN | OR loop output (cathodes of both diodes) | XIAO Pin 8 (5V USB) & LiPo BAT+ wire, via 1N5819s |
+| GND | GND | XIAO Pin 13 |
+| SDA | D4/SDA | XIAO Pin 5 |
+| SCL | D5/SCL | XIAO Pin 6 |
+| **EN** | **D3** | XIAO Pin 4 *(clone boards only — see caution above)* |
 | OUTP | Motor (+) terminal | — |
 | OUTN | Motor (−) terminal | — |
 
 **OR loop wiring:**
-1. Anode of Diode 1 → XIAO **Pin 8 (5V)**
-2. Anode of Diode 2 → XIAO **Pin 14 (3.3V)**
+1. Anode of Diode 1 → XIAO **Pin 8 (5V USB)**
+2. Anode of Diode 2 → **LiPo BAT+ wire** (tap the same red wire soldered to the XIAO's BAT+ bottom pad)
 3. Cathodes (striped ends) of both → DRV2605L **VIN**
-4. 10µF–100µF cap across DRV2605L **VIN** and **GND** (positive leg to VIN)
+4. **220µF–470µF** electrolytic cap across DRV2605L **VIN** and **GND** (positive leg to VIN)
+
+> [!TIP]
+> Tap Diode 2's anode directly at the LiPo wire junction before the XIAO's BAT+ pad — a short 5 cm wire is ideal. Keep the large decoupling cap physically close to the DRV2605L's VIN/GND pins to absorb startup current spikes.
 
 ```text
   ┌────────────────┐                        ┌──────────────────┐
@@ -102,9 +108,8 @@ The dual-voltage OR loop prevents brownouts when the motor draws current peaks. 
   │                │                        │                  │
   │   5V VIN (8) ──┼───[>| 1N5819 ]────┐    │                  │
   │                │                   ├───┼─ VIN              │
-  │   3.3V  (14) ──┼───[>| 1N5819 ]────┘    │  │               │
-  │                │                        │  ┴ 10–100µF Cap  │
-  │    GND  (13) ──┼────────────────────────┼─ GND             │
+  │                │    [>| 1N5819 ]────┘    │  │               │
+  │    GND  (13) ──┼────────────────────────┼─ GND    220–470µF┴│
   │  D4/SDA  (5) ──┼────────────────────────┼─ SDA             │
   │  D5/SCL  (6) ──┼────────────────────────┼─ SCL             │
   │      D3  (4) ──┼────────────────────────┼─ EN  (clone only)│
@@ -114,6 +119,8 @@ The dual-voltage OR loop prevents brownouts when the motor draws current peaks. 
   └────────────────┘                        └──────────────────┘
         │
   BAT+ (bottom) ──→ LiPo Red (+)
+        │
+        └──→ [>| 1N5819 ] ──→ DRV2605L VIN  (Diode 2 anode taps here)
   BAT− (bottom) ──→ LiPo Black (−)
 ```
 
@@ -275,8 +282,8 @@ OD_CLAMP      (0x17) = V_peak  × 255 / 5.6  (default: 0x96 = 3.3V)
 
 ### Step 2: Connect DRV2605L to XIAO
 
-1. **OR Loop (VIN):** Solder anodes of two 1N5819 diodes to XIAO **Pin 8 (5V)** and **Pin 14 (3.3V)**. Twist cathodes together → DRV2605L **VIN**.
-2. **Decoupling cap:** Solder 10µF–100µF cap across DRV2605L **VIN** and **GND**. (Positive → VIN)
+1. **OR Loop (VIN):** Solder anode of Diode 1 → XIAO **Pin 8 (5V USB)**. Solder anode of Diode 2 → **LiPo BAT+ wire** (tap the same red wire at the BAT+ pad — *not* XIAO Pin 14). Twist both cathodes together → DRV2605L **VIN**.
+2. **Decoupling cap:** Solder a **220µF–470µF** electrolytic cap across DRV2605L **VIN** and **GND**. (Positive → VIN). Mount the cap as close to the DRV2605L pins as possible.
 3. **Signal wires:** DRV2605L **GND → Pin 13**, **SDA → D4**, **SCL → D5**
 4. **EN wire:** DRV2605L **EN → D3** *(clone boards only)*
 5. Secure DRV2605L flat against XIAO with foam tape; hot-glue wire strain relief
