@@ -1,17 +1,24 @@
 // ============================================================
-//  haptic_test.ino  —  DRV2605L Vibration Pattern Test
+//  haptic_test.ino  —  DRV2605L Diagnostic + Vibration Test
 //  Board: Seeed XIAO BLE nRF52840
-//  Hardware: DRV2605L haptic driver (I²C) + LRA or ERM motor
+//  Hardware: DRV2605L haptic driver (I²C) + ERM coin motor
+//
+//  ── WHAT THIS DOES ──────────────────────────────────────────
+//  1. Dumps all key DRV2605L registers BEFORE and AFTER init.
+//  2. Holds RTP output ON continuously for 10 s so you can
+//     measure OUT+/OUT- with a multimeter without chasing pulses.
+//  3. Prints STATUS register every second during the ON phase.
 //
 //  ── MOTOR TYPE ──────────────────────────────────────────────
 //  Select your motor type by keeping ONE of the two lines below:
-#define MOTOR_LRA   // Linear Resonant Actuator (closed-loop, 1.8V RMS typical)
-// #define MOTOR_ERM   // Eccentric Rotating Mass coin motor (open-loop, 3V typical)
+// #define MOTOR_LRA   // Linear Resonant Actuator (closed-loop, 1.8V RMS typical)
+#define MOTOR_ERM   // Eccentric Rotating Mass coin motor (open-loop, 3V typical)
 //
 //  ── WIRING ──────────────────────────────────────────────────
 //    DRV2605L SDA → D4 (XIAO I²C SDA)
 //    DRV2605L SCL → D5 (XIAO I²C SCL)
-//    DRV2605L VIN → Dual-voltage OR loop (5V USB + 3.3V battery via Schottky diodes)
+//    DRV2605L VIN → Dual-voltage OR loop (5V USB + LiPo BAT+ directly via Schottky diodes)
+//                   220µF–470µF decoupling cap across VIN/GND. Do NOT use XIAO 3.3V pin.
 //    DRV2605L GND → GND
 //    DRV2605L EN  → D3  (clone boards only; or hardwire EN to 3.3V)
 //    Motor        → DRV2605L OUTP / OUTN
@@ -162,54 +169,132 @@ void pulseVibrate(int onMs, int offMs, int reps) {
   }
 }
 
+// ── Register dump helper ────────────────────────────────────
+void dumpRegisters(const char* label) {
+  Serial.println();
+  Serial.print("=== Register dump ["); Serial.print(label); Serial.println("] ===");
+
+  uint8_t status  = drv.readRegister8(0x00);
+  uint8_t mode    = drv.readRegister8(0x01);
+  uint8_t rtpIn   = drv.readRegister8(0x02);
+  uint8_t rated   = drv.readRegister8(0x16);
+  uint8_t odClamp = drv.readRegister8(0x17);
+  uint8_t feedBk  = drv.readRegister8(0x1A); // FEEDBACK_CTRL
+  uint8_t ctrl3   = drv.readRegister8(0x1D); // CONTROL3
+
+  Serial.print("  0x00 STATUS       : 0x"); Serial.print(status, HEX);
+  Serial.print("  DIAG_RESULT="); Serial.print((status >> 3) & 1);
+  Serial.print("  OC_DETECT=");   Serial.print((status >> 4) & 1);
+  Serial.print("  OVER_TEMP=");   Serial.println((status >> 5) & 1);
+
+  Serial.print("  0x01 MODE         : 0x"); Serial.print(mode, HEX);
+  Serial.print("  STANDBY=");     Serial.print((mode >> 6) & 1);
+  Serial.print("  MODE_BITS=");   Serial.println(mode & 0x07);
+  // MODE: 0=INTTRIG 1=EXTTRIG_EDGE 2=EXTTRIG_LEVEL 3=PWM 4=AUDIO 5=RTP 6=DIAG 7=AUTOCAL
+
+  Serial.print("  0x02 RTP_INPUT    : 0x"); Serial.println(rtpIn, HEX);
+
+  Serial.print("  0x16 RATED_VOLTAGE: 0x"); Serial.print(rated, HEX);
+  Serial.print(" (~"); Serial.print((float)rated * 5.3f / 255.0f, 2); Serial.println(" V)");
+
+  Serial.print("  0x17 OD_CLAMP     : 0x"); Serial.print(odClamp, HEX);
+  Serial.print(" (~"); Serial.print((float)odClamp * 5.6f / 255.0f, 2); Serial.println(" V)");
+
+  Serial.print("  0x1A FEEDBACK_CTRL: 0x"); Serial.print(feedBk, HEX);
+  Serial.print("  N_ERM_LRA(bit7)="); Serial.println((feedBk >> 7) & 1);
+  // 0=ERM, 1=LRA
+
+  Serial.print("  0x1D CONTROL3     : 0x"); Serial.print(ctrl3, HEX);
+  Serial.print("  ERM_OPEN_LOOP(bit5)="); Serial.println((ctrl3 >> 5) & 1);
+  // ERM_OPEN_LOOP bit5=1 → open-loop (required for small ERMs)
+  Serial.println("===========================================");
+}
+
 void setup() {
-  // Init external LED first — gives immediate visual feedback before Serial opens
   initExtLED();
 
   Serial.begin(115200);
   unsigned long t = millis();
   while (!Serial && millis() - t < 2000) {}
 
-  // ── Enable DRV2605L output stage (EN pin on clone boards) ───
-  // Must be driven HIGH before Wire.begin() to ungate the H-bridge output.
+  // ── EN pin HIGH before Wire.begin() ─────────────────────────
   pinMode(DRV_EN_PIN, OUTPUT);
   digitalWrite(DRV_EN_PIN, HIGH);
-  delay(10); // allow EN to settle
+  delay(10);
 
   Wire.begin();
-  Wire.setClock(400000); // 400 kHz Fast Mode
+  Wire.setClock(400000);
 
-  Serial.println("\nRunning I2C scanner...");
-  int nDevices = 0;
+  Serial.println("\n>>> DIAGNOSTIC HAPTIC TEST");
+  Serial.println("Running I2C scanner...");
   for (byte addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
       Serial.print("  Found: 0x");
       if (addr < 16) Serial.print("0");
       Serial.println(addr, HEX);
-      nDevices++;
     }
   }
-  Serial.println(nDevices ? "I2C scan complete.\n" : "No I2C devices found.\n");
+  Serial.println("I2C scan complete.");
 
   if (!drv.begin()) {
-    Serial.println("ERROR: DRV2605L not found! Check I2C wiring (SDA=D4, SCL=D5).");
-    setExtLED(true, false, false); // solid red
+    Serial.println("ERROR: DRV2605L not found!");
+    setExtLED(true, false, false);
     while (1);
   }
+  Serial.println("DRV2605L responded to begin().");
 
-  initMotor();
+  dumpRegisters("AFTER begin(), BEFORE manual init");
 
-  Serial.println("Haptic test ready.");
-  setExtLED(false, true, false); // solid green — init OK
+  // ── ERM open-loop setup — explicit, step by step ─────────────
+  Serial.println("\n--- Configuring ERM open-loop ---");
+
+  drv.selectLibrary(1);                    // Library 1 = ERM
+  drv.useERM();                            // clear N_ERM_LRA bit
+
+  uint8_t c3 = drv.readRegister8(0x1D);
+  c3 |= 0x20;                              // set ERM_OPEN_LOOP bit5
+  drv.writeRegister8(0x1D, c3);
+
+  drv.writeRegister8(0x16, 0x90);          // RATED_VOLTAGE ~3.0 V
+  drv.writeRegister8(0x17, 0x96);          // OD_CLAMP ~3.3 V
+
+  // Explicitly clear STANDBY (bit6) and set MODE=0 (INTTRIG)
+  uint8_t modeReg = drv.readRegister8(0x01);
+  modeReg &= ~0x40;  // clear STANDBY
+  modeReg &= ~0x07;  // MODE = 0 (INTTRIG)
+  drv.writeRegister8(0x01, modeReg);
+
+  dumpRegisters("AFTER manual init");
+
+  // ── Switch to RTP and hold ON for 10 s ───────────────────────
+  Serial.println("\n>>> OUTPUT ON — measure OUT+ to GND now.");
+  Serial.println(">>> Expect ~3.0 to 3.3 V and motor vibrating.");
+  Serial.println();
+
+  drv.setMode(DRV2605_MODE_REALTIME);  // 0x05 = RTP mode
+  drv.setRealtimeValue(127);           // 0x7F = max amplitude
+
+  for (int i = 1; i <= 10; i++) {
+    delay(1000);
+    uint8_t s = drv.readRegister8(0x00);
+    uint8_t m = drv.readRegister8(0x01);
+    uint8_t r = drv.readRegister8(0x02);
+    Serial.print("  t="); Serial.print(i);
+    Serial.print("s  STATUS=0x"); Serial.print(s, HEX);
+    Serial.print("  MODE=0x");   Serial.print(m, HEX);
+    Serial.print("  RTP=0x");    Serial.print(r, HEX);
+    if (s & 0x08) Serial.print("  *** DIAG FAULT ***");
+    if (m & 0x40) Serial.print("  *** STANDBY ACTIVE ***");
+    Serial.println();
+  }
+
+  drv.setRealtimeValue(0);
+  drv.setMode(DRV2605_MODE_INTTRIG);
+  Serial.println("\n>>> Output OFF. Paste the full log above for analysis.");
+  setExtLED(false, true, false);
 }
 
 void loop() {
-  // Double-tap pattern
-  pulseVibrate(100, 80, 2);
-  delay(2000);
-
-  // Long pulse
-  pulseVibrate(500, 0, 1);
-  delay(2000);
+  // Diagnostic runs once in setup() — nothing here.
 }

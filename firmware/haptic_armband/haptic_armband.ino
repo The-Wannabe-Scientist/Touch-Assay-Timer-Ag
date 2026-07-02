@@ -11,7 +11,8 @@
 //  ── WIRING ──────────────────────────────────────────────────
 //    DRV2605L SDA → D4 (XIAO I²C SDA)
 //    DRV2605L SCL → D5 (XIAO I²C SCL)
-//    DRV2605L VIN → Dual-voltage OR loop (5V USB + 3.3V battery via Schottky diodes)
+//    DRV2605L VIN → Dual-voltage OR loop (5V USB + LiPo BAT+ directly via Schottky diodes)
+//                   220µF–470µF decoupling cap across VIN/GND. Do NOT use XIAO 3.3V pin.
 //    DRV2605L GND → GND
 //    DRV2605L EN  → D3  (clone boards only; or hardwire EN to 3.3V)
 //    Motor        → DRV2605L OUTP / OUTN

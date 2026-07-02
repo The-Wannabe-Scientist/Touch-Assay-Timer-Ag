@@ -201,7 +201,7 @@ Motor type is selected by a single `#define` at the top of the firmware — no o
 > **Clone DRV2605L boards** have an EN pin that must be driven HIGH to enable the output stage. Connect EN → XIAO D3 (handled by firmware) or hardwire EN → 3.3V. See the build guide for details.
 
 - **Zero-Latency Mirroring:** The armband mirrors the device haptics (50 ms pulse on tap, ascending pattern on run complete) via a direct Web Bluetooth (GATT) connection.
-- **Dual-Voltage Power Routing:** Switches between USB 5 V and battery 3.3 V via a Schottky diode OR loop — preserves battery life and prevents brownouts during haptic pulses.
+- **Dual-Voltage Power Routing:** Switches between USB 5 V and LiPo BAT+ directly via a Schottky diode OR loop — bypasses the XIAO's 3.3V regulator entirely, allowing the DRV2605L to draw its full peak current from the battery without browning out the microcontroller.
 - **Safety Watchdog:** A heartbeat sent every 2 s detects connection loss within 3 s. If missed, the armband fires a stutter warning autonomously.
 - **Battery Monitoring:** Standard BLE Battery Service (0x180F) reports armband battery % in the app header, with warnings at ≤20% and ≤10%.
 - **External RGB LED:** An optional external RGB LED on D6/D7/D8 mirrors the onboard LED state — useful when the XIAO is enclosed.
