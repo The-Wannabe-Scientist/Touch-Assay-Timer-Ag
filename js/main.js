@@ -60,7 +60,7 @@ import { showToast, dismissLatestToast }                from "./toast.js";
 import {
   isBluetoothSupported, isArmbandConnected,
   armbandConnect, armbandDisconnect,
-  armbandTap, armbandRunComplete,
+  armbandTap, armbandRunComplete, armbandTest,
   armbandStartHeartbeat, armbandStopHeartbeat,
 }                                                      from "./haptic-armband.js";
 
@@ -347,6 +347,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       armbandHeaderBtn:     document.getElementById("armbandHeaderBtn"),
       connectArmband:       document.getElementById("connectArmband"),
       disconnectArmband:    document.getElementById("disconnectArmband"),
+      testArmband:          document.getElementById("testArmband"),
     },
     Displays: {
       liveProgress:     document.getElementById("liveProgress"),
@@ -2206,6 +2207,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       UI.Buttons.connectArmband.disabled    = true;
       // FW-5 FIX: Show disconnect button so user can cleanly switch armbands
       UI.Buttons.disconnectArmband.removeAttribute("hidden");
+      // Enable the Test Vibration button now that the armband is ready
+      UI.Buttons.testArmband.disabled = false;
     }
 
     /**
@@ -2290,8 +2293,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       UI.Buttons.connectArmband.disabled    = false;
       UI.Buttons.connectArmband.textContent = "Connect";
       UI.Buttons.disconnectArmband.setAttribute("hidden", "");
+      UI.Buttons.testArmband.disabled = true;  // disable test btn — no armband connected
       _lastBattWarnLevel = 100;
       showToast("Haptic armband disconnected", "info", 3000);
+    });
+
+    // Settings: Test Vibration button — sends a single tap to confirm the armband is alive.
+    UI.Buttons.testArmband.addEventListener("click", () => {
+      armbandTest();
+      // Brief visual confirmation so the user knows the command was dispatched.
+      const btn = UI.Buttons.testArmband;
+      btn.classList.add("armband-test-active");
+      showToast("Test vibration sent ⚡", "info", 1800);
+      setTimeout(() => btn.classList.remove("armband-test-active"), 200);
     });
   }
 

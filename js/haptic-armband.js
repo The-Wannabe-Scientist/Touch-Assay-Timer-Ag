@@ -133,6 +133,16 @@ export function armbandRunComplete() {
 }
 
 /**
+ * Fires a single test tap to verify the armband is alive and responding.
+ * Intended for the Settings screen "Test Vibration" button only.
+ * Sends CMD_TAP (0x01) — identical payload to armbandTap() but kept as a
+ * separate export so call-sites remain semantically distinct.
+ */
+export function armbandTest() {
+  _write(_hapticChar, CMD_TAP);
+}
+
+/**
  * Starts the 2-second heartbeat writer.
  * Call immediately after timerWorker.postMessage("start").
  */

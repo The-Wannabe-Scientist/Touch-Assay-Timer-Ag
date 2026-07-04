@@ -2714,6 +2714,56 @@ body.state-running {
   color: #fff;
 }
 
+/* ── Test Vibration row ───────────────────────────────────────────── */
+.armband-test-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-base);
+  flex-wrap: wrap;
+}
+
+.armband-test-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+  padding: 0.4rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--color-primary);
+  background: transparent;
+  color: var(--color-primary);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, transform 0.1s ease, opacity 0.18s ease;
+  white-space: nowrap;
+}
+
+.armband-test-btn:hover:not(:disabled) {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.armband-test-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.armband-test-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+  border-color: var(--border-base);
+  color: var(--text-muted);
+}
+
+.armband-test-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
 /* ── Header icon — connected state ──────────────────────────────────── */
 .header-icon-btn.armband-connected {
   color: #4ade80;   /* green tint that reads well on the dark header */
