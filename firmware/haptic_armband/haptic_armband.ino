@@ -5,8 +5,8 @@
 //
 //  ── MOTOR TYPE ──────────────────────────────────────────────
 //  Select your motor type by keeping ONE of the two lines below:
-#define MOTOR_LRA   // Linear Resonant Actuator (closed-loop, 1.8V RMS typical)
-// #define MOTOR_ERM   // Eccentric Rotating Mass coin motor (open-loop, 3V typical)
+//#define MOTOR_LRA   // Linear Resonant Actuator (closed-loop, 1.8V RMS typical)
+#define MOTOR_ERM   // Eccentric Rotating Mass coin motor (open-loop, 3V typical)
 //
 //  ── WIRING ──────────────────────────────────────────────────
 //    DRV2605L SDA → D4 (XIAO I²C SDA)
@@ -19,10 +19,13 @@
 //                   (LRA: observe +/− polarity. ERM: polarity only affects spin direction)
 //
 //  ── EXTERNAL RGB LED (optional) ─────────────────────────────
-//    R anode → 220Ω → D6      Green  = connected
-//    G anode → 220Ω → D7      Blue   = advertising
-//    B anode → 220Ω → D8      Amber  = low battery
+//    R anode → 270Ω → D6      Green  = connected
+//    G anode → 100Ω → D7      Blue   = advertising
+//    B anode → 100Ω → D8      Amber  = low battery
 //    Cathode → GND             Red    = error
+//    NOTE: Use per-channel resistors — green/blue Vf ≈ 2.8V on a 3.3V rail
+//    needs ≤100Ω to reach 5mA. A single 220Ω on all channels will produce
+//    near-zero current through green and blue.
 //
 //  ── GATT layout (must match js/haptic-armband.js exactly) ───
 //    Service UUID:   12345678-1234-1234-1234-123456789012
@@ -155,16 +158,27 @@ unsigned long lastBatteryUpdate = 0;
 const unsigned long BATTERY_INTERVAL_MS = 30000;
 
 // ── Non-Blocking Motor State Machine ─────────────────────────
-// Sequences are flat arrays of alternating on/off durations (ms):
-//   { onMs, offMs, onMs, offMs, ... , lastOnMs, 0 }
-// The final 0 signals end-of-sequence.
+// Two drive modes share motorRunning:
+//
+//  RTP mode (default):
+//    motorStart() — alternating on/off phases in motorPhases[]
+//    motorUpdate() steps through phases using millis() timing.
+//
+//  Waveform mode (INTTRIG, selected patterns only):
+//    motorWaveformStart() — loads up to 4 chained DRV2605L ROM effects and fires GO.
+//    motorUpdate() polls the GO bit (reg 0x0C) every 20 ms to detect completion.
+//    Used for vibrateTap() and vibrateRunComplete() because the internal effect ROM
+//    includes proper resonant frequency sweeps, braking pulses, and pre-optimised
+//    timings that make LRA taps feel sharper than raw RTP square waves.
 #define MAX_MOTOR_PHASES 18
 
 static int           motorPhases[MAX_MOTOR_PHASES];
-static int           motorPhaseCount = 0;
-static int           motorPhaseIndex = 0;
-static unsigned long motorPhaseStart = 0;
-static bool          motorRunning    = false;
+static int           motorPhaseCount    = 0;
+static int           motorPhaseIndex    = 0;
+static unsigned long motorPhaseStart    = 0;
+static bool          motorRunning       = false;
+static bool          motorWaveformMode  = false;  // true = INTTRIG waveform playback active
+static unsigned long motorWaveformPollMs = 0;     // last GO-bit poll timestamp (throttle)
 
 void motorStart(const int* phases, int count) {
   drv.setRealtimeValue(0);
@@ -182,6 +196,10 @@ void motorStart(const int* phases, int count) {
 }
 
 void motorStop() {
+  if (motorWaveformMode) {
+    drv.writeRegister8(0x0C, 0);  // clear GO bit — aborts in-progress waveform immediately
+    motorWaveformMode = false;
+  }
   drv.setRealtimeValue(0);
   drv.setMode(DRV2605_MODE_INTTRIG);
   motorRunning    = false;
@@ -192,6 +210,21 @@ void motorStop() {
 void motorUpdate() {
   if (!motorRunning) return;
 
+  // ── Waveform mode: poll GO bit to detect playback completion ──
+  // Throttled to one I²C read every 20 ms to keep loop overhead negligible.
+  if (motorWaveformMode) {
+    unsigned long now = millis();
+    if (now - motorWaveformPollMs >= 20) {
+      motorWaveformPollMs = now;
+      if (!(drv.readRegister8(0x0C) & 0x01)) {  // GO bit cleared → playback done
+        motorRunning      = false;
+        motorWaveformMode = false;
+      }
+    }
+    return;
+  }
+
+  // ── RTP mode: step through on/off phase array ──────────────
   unsigned long elapsed = millis() - motorPhaseStart;
   if (elapsed < (unsigned long)motorPhases[motorPhaseIndex]) return;
 
@@ -213,36 +246,68 @@ void motorUpdate() {
   }
 }
 
+// Arms up to 4 chained DRV2605L internal ROM effects and fires GO non-blockingly.
+// Effect numbers (1–123) index TI's pre-optimised waveform library.
+// Terminate the chain early with 0 (unused slots auto-terminated at slot 4).
+// Compatible with both MOTOR_LRA (library 6) and MOTOR_ERM (library 1) builds;
+// the same effect index uses waveform data matched to whichever library initMotor() selected.
+void motorWaveformStart(uint8_t e0, uint8_t e1 = 0, uint8_t e2 = 0, uint8_t e3 = 0) {
+  motorStop();                          // abort any in-progress RTP or waveform sequence
+  drv.setMode(DRV2605_MODE_INTTRIG);
+  drv.setWaveform(0, e0);
+  drv.setWaveform(1, e1);
+  drv.setWaveform(2, e2);
+  drv.setWaveform(3, e3);
+  drv.setWaveform(4, 0);               // end-of-sequence sentinel (belt-and-suspenders)
+  drv.go();
+  motorRunning        = true;
+  motorWaveformMode   = true;
+  motorWaveformPollMs = millis();
+}
+
 // ── Vibration Pattern Helpers ────────────────────────────────
+// NOTE: LRA physics — the resonant mass needs ~20–30 ms to ring up to full amplitude
+// and ~80 ms to fully damp. Pulses shorter than ~80 ms feel weak; gaps shorter than
+// ~80 ms blur consecutive bursts together. ERM has no such constraint.
+// The durations below are shared by both MOTOR_LRA and MOTOR_ERM builds and are
+// already tuned for LRA; the ERM will tolerate them fine.
 
 void vibrateTap() {                    // 0x01 — tap registered
-  static const int seq[] = { 50, 0 };
-  motorStart(seq, 2);
+  // Effect 1: Strong Click 100%
+  // TI's waveform ROM hits the resonant frequency with a precise sweep + active braking
+  // pulse — far sharper attack and stop than an RTP square wave can produce.
+  motorWaveformStart(1);
 }
 
 void vibrateRunComplete() {            // 0x02 — run complete
-  static const int seq[] = { 100, 50, 200, 0 };
-  motorStart(seq, 4);
+  // Effect 10 (Double Click 100%) chained into Effect 47 (Long Buzz 100%):
+  // two sharp knocks → sustained buzz = unambiguous "run finished" signal.
+  // The DRV2605L plays both in sequence autonomously; GO bit clears when done.
+  motorWaveformStart(10, 47);
 }
 
 void vibrateStutterWarning() {         // heartbeat watchdog
-  static const int seq[] = { 40, 40, 40, 40, 40, 0 };
+  // 3-pulse rapid-fire; 90 ms on / 80 ms off preserves LRA inter-pulse clarity
+  static const int seq[] = { 90, 80, 90, 80, 90, 0 };
   motorStart(seq, 6);
 }
 
 void startupVibrationSequence() {      // boot alive confirmation (blocking — BLE not up yet)
-  static const int seq[] = { 60, 120, 120, 120, 250, 80 };
+  // Ascending ramp: short→medium→long so the user feels amplitude building at boot
+  static const int seq[] = { 80, 100, 150, 100, 300, 80 };
   motorStart(seq, 6);
   while (motorRunning) motorUpdate();
 }
 
 void vibrateDisconnect() {             // rapid 6-pulse burst
-  static const int seq[] = { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 0 };
+  // 80 ms on / 80 ms off: fastest clean cadence an LRA can produce distinctly
+  static const int seq[] = { 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 0 };
   motorStart(seq, 12);
 }
 
 void vibrateBleReady() {               // double-tap on BLE ready (blocking — safe here)
-  static const int seq[] = { 80, 70, 80, 0 };
+  // 120 ms taps with 80 ms gap: strong, unmistakable ready signal
+  static const int seq[] = { 120, 80, 120, 0 };
   motorStart(seq, 4);
   while (motorRunning) motorUpdate();
 }
@@ -256,7 +321,7 @@ void vibrateConnected() { vibrateTap(); }
 int readBatteryPercent() {
   pinMode(VBAT_ENABLE_PIN, OUTPUT);
   digitalWrite(VBAT_ENABLE_PIN, HIGH);
-  delayMicroseconds(500);
+  delayMicroseconds(1000);  // bumped 500→1000 µs: more settling time on 1MΩ divider under motor load
 
   int raw = analogRead(PIN_VBAT);
   digitalWrite(VBAT_ENABLE_PIN, LOW);
@@ -301,9 +366,15 @@ void updateLED() {
 void initMotor() {
   drv.selectLibrary(6);                                          // library 6 = LRA
   drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);    // N_ERM_LRA = 1 (LRA)
-  drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);   // closed-loop (auto-resonance)
-  drv.writeRegister8(0x16, 0x57);  // RATED_VOLTAGE: 1.8V RMS × 255/5.3 ≈ 87
-  drv.writeRegister8(0x17, 0x60);  // OD_CLAMP:      2.1V × 255/5.6 ≈ 96
+  drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);   // closed-loop (auto-resonance tracking)
+  drv.writeRegister8(0x22, 0x00);  // LRARESON_PERIOD = 0 → let closed-loop track resonant freq freely
+  // ── Haptic strength tuning (LRA) ─────────────────────────────
+  // Raised from 0x57/0x60 (1.8V RMS / 2.1V peak) to 0x7F/0xA4 (2.5V RMS / 3.6V peak).
+  // 0x7F = max RATED_VOLTAGE for a 2.5V-rated LRA (2.5 × 255/5.3 ≈ 120 → use 0x78 for exactly 2.5V).
+  // 0xA4 = OD_CLAMP ceiling that gives strong attack transients without exceeding 5.3V rail.
+  // If your LRA is rated lower (e.g. 2.0V RMS), drop 0x16 to 0x62 and 0x17 to 0x80.
+  drv.writeRegister8(0x16, 0x78);  // RATED_VOLTAGE: 2.5V RMS × 255/5.3 ≈ 120
+  drv.writeRegister8(0x17, 0xA4);  // OD_CLAMP:      3.6V peak × 255/5.6 ≈ 164
 
   drv.setMode(DRV2605_MODE_AUTOCAL);
   drv.go();
@@ -313,12 +384,12 @@ void initMotor() {
   if (drv.readRegister8(0x00) & 0x08) {
     Serial.println("WARNING: LRA auto-calibration failed. Check motor wiring.");
   } else {
-    Serial.println("LRA auto-calibration OK.");
+    Serial.println("LRA auto-calibration OK (high-drive).");
     Serial.print("  A_CAL_COMP (0x18): 0x"); Serial.println(drv.readRegister8(0x18), HEX);
     Serial.print("  A_CAL_BEMF (0x19): 0x"); Serial.println(drv.readRegister8(0x19), HEX);
   }
   drv.setMode(DRV2605_MODE_INTTRIG);
-  Serial.println("DRV2605L: LRA closed-loop mode.");
+  Serial.println("DRV2605L: LRA closed-loop mode (high-drive).");
 }
 
 // I2C recovery restores full LRA config
@@ -327,8 +398,9 @@ void recoverMotor() {
   drv.selectLibrary(6);
   drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);
   drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);
-  drv.writeRegister8(0x16, 0x57);
-  drv.writeRegister8(0x17, 0x60);
+  drv.writeRegister8(0x22, 0x00);
+  drv.writeRegister8(0x16, 0x78);
+  drv.writeRegister8(0x17, 0xA4);
   drv.setMode(DRV2605_MODE_INTTRIG);
 }
 #endif
@@ -339,10 +411,14 @@ void initMotor() {
   drv.selectLibrary(1);                                          // library 1 = ERM
   drv.useERM();                                                  // clears N_ERM_LRA bit
   drv.writeRegister8(0x1D, drv.readRegister8(0x1D) | 0x20);    // ERM open-loop
-  drv.writeRegister8(0x16, 0x90);  // RATED_VOLTAGE: 3.0V × 255/5.3 ≈ 144
-  drv.writeRegister8(0x17, 0x96);  // OD_CLAMP:      3.3V × 255/5.6 ≈ 150
+  // ── Haptic strength tuning ───────────────────────────────────
+  // Raised from 0x90/0x96 (3.0V/3.3V) to 0xC0/0xD0 (4.0V/4.4V)
+  // to push the ERM harder within its 5.3V output headroom.
+  // Do NOT exceed 0xFF/0xFF; stay within your motor's rated voltage.
+  drv.writeRegister8(0x16, 0xC0);  // RATED_VOLTAGE: ~4.0V × 255/5.3 ≈ 193
+  drv.writeRegister8(0x17, 0xD0);  // OD_CLAMP:      ~4.4V × 255/5.6 ≈ 208
   drv.setMode(DRV2605_MODE_INTTRIG);
-  Serial.println("DRV2605L: ERM open-loop mode.");
+  Serial.println("DRV2605L: ERM open-loop mode (high-drive).");
 }
 
 // I2C recovery restores full ERM config
@@ -351,8 +427,8 @@ void recoverMotor() {
   drv.selectLibrary(1);
   drv.useERM();
   drv.writeRegister8(0x1D, drv.readRegister8(0x1D) | 0x20);
-  drv.writeRegister8(0x16, 0x90);
-  drv.writeRegister8(0x17, 0x96);
+  drv.writeRegister8(0x16, 0xC0);
+  drv.writeRegister8(0x17, 0xD0);
   drv.setMode(DRV2605_MODE_INTTRIG);
 }
 #endif
