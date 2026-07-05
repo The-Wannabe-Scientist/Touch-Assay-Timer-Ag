@@ -2,6 +2,9 @@
 
 **Components:** Seeed Studio XIAO BLE nRF52840 · WLY602040 3.7V 400mAh LiPo · DRV2605L Haptic Driver · LRA or ERM Vibration Motor
 
+> [!IMPORTANT]
+> **Power architecture (DRV2605L):** The DRV2605L is powered **directly from the LiPo battery** (and USB 5 V when present) through a Schottky OR-diode loop — **not** from the XIAO's 3.3 V pin. The XIAO's onboard LDO can only supply ~150 mA; the DRV2605L can draw up to ~400 mA peak. Powering it from 3.3 V will brown-out the microcontroller mid-vibration.
+
 ---
 
 ## 📦 Bill of Materials
@@ -13,10 +16,11 @@
 | DRV2605L Haptic Motor Driver breakout | 1 | Adafruit #2305 or clone; I²C, 3.3V-compatible |
 | **Option A:** LRA motor, 1.8V RMS | 1 | Z-axis linear resonant actuator (e.g. Jinlong G0832012D). Observe +/− polarity. |
 | **Option B:** ERM coin motor, 3V | 1 | Eccentric rotating mass (standard coin vibration motor). No strict polarity. |
-| 1N5819 Schottky Diode | 2 | Dual-voltage OR loop for DRV2605L VIN (LiPo BAT+ & USB 5V) |
-| 220µF–470µF Capacitor | 1 | Bulk decoupling cap across DRV2605L VIN/GND — larger value required because DRV2605L is now fed directly from battery |
-| **Optional:** External RGB LED (common-cathode) | 1 | For visible status outside enclosure. See wiring below. |
-| 220Ω resistor | 3 | One per LED colour channel (only if using external RGB LED) |
+| 1N5819 Schottky Diode | 2 | OR-diode loop: one from XIAO Pin 8 (USB 5 V), one from LiPo BAT+ wire direct |
+| 220µF–470µF electrolytic capacitor | 1 | Bulk decoupling across DRV2605L VIN/GND — positive leg to VIN |
+| **Optional:** External RGB LED (common-cathode, separate R/G/B) | 1 | For visible status outside enclosure. See wiring + resistor table below. |
+| **270 Ω resistor** | 1 | Red LED current-limit (5 mA @ Vf ≈ 2.0 V, 3.3 V rail) |
+| **100 Ω resistor** | 2 | Green & Blue LED current-limit (5 mA @ Vf ≈ 2.8–3.0 V, 3.3 V rail) |
 | Jumper wires / pin headers | — | SDA, SCL, VIN, GND, EN from XIAO to DRV2605L |
 | Thin motor leads (~5 cm) | 2 | Solder to DRV2605L OUTP / OUTN |
 | Elastic armband strap (~30 mm wide) | 1 | Nylon or silicone |
@@ -78,50 +82,58 @@ D6  │ 7         8│ VIN (5V from USB)
 
 ### DRV2605L → XIAO (Dual-Voltage OR Loop — Direct Battery Power)
 
-The DRV2605L is powered **directly from the LiPo battery** in an OR loop with USB 5V. This bypasses the XIAO's onboard 3.3V regulator entirely, removing it from the motor power path. The DRV2605L can now draw its full peak current (up to ~400 mA) from the battery without risk of browning out the microcontroller.
+The DRV2605L is powered **directly from the LiPo battery** in an OR-diode loop with USB 5 V. This removes the DRV completely from the XIAO's 3.3 V rail. The DRV2605L can draw up to ~400 mA peak during motor startup — far more than the XIAO's onboard LDO (~150 mA max) can supply without browning out.
 
 > [!IMPORTANT]
-> The two diode anodes connect to **XIAO Pin 8 (USB 5V)** and the **LiPo BAT+ wire directly** — **not** to XIAO Pin 14 (3.3V). Do NOT connect the battery side of the OR loop to Pin 14.
+> **Diode anode sources are:**
+> - **Diode 1 anode → XIAO Pin 8 (USB 5 V)** — provides power when USB cable is connected
+> - **Diode 2 anode → LiPo BAT+ wire directly** — tap the red wire *before* it reaches the XIAO BAT+ pad, **not** XIAO Pin 14 (3.3 V) and **not** XIAO Pin 8
+>
+> Both cathodes (striped ends) join at a single node → DRV2605L VIN. Whichever source is higher wins; the Schottky diodes prevent back-feed.
 
-| DRV2605L Pin | Connect To | Source |
+| DRV2605L Pin | Connect To | Notes |
 |---|---|---|
-| VIN | OR loop output (cathodes of both diodes) | XIAO Pin 8 (5V USB) & LiPo BAT+ wire, via 1N5819s |
-| GND | GND | XIAO Pin 13 |
-| SDA | D4/SDA | XIAO Pin 5 |
-| SCL | D5/SCL | XIAO Pin 6 |
-| **EN** | **D3** | XIAO Pin 4 *(clone boards only — see caution above)* |
-| OUTP | Motor (+) terminal | — |
-| OUTN | Motor (−) terminal | — |
+| VIN | OR loop output (joined cathodes) | ~3.7–4.2 V from LiPo, or ~4.3 V from USB-5V-minus-diode-drop |
+| GND | XIAO Pin 13 (GND) | Common ground |
+| SDA | XIAO D4 (Pin 5) | I²C data |
+| SCL | XIAO D5 (Pin 6) | I²C clock |
+| **EN** | **XIAO D3 (Pin 4)** | **Clone boards only** — firmware drives HIGH. Adafruit breakout: not needed |
+| OUTP | Motor (+) terminal | |
+| OUTN | Motor (−) terminal | |
 
-**OR loop wiring:**
-1. Anode of Diode 1 → XIAO **Pin 8 (5V USB)**
-2. Anode of Diode 2 → **LiPo BAT+ wire** (tap the same red wire soldered to the XIAO's BAT+ bottom pad)
-3. Cathodes (striped ends) of both → DRV2605L **VIN**
-4. **220µF–470µF** electrolytic cap across DRV2605L **VIN** and **GND** (positive leg to VIN)
+**Step-by-step OR loop wiring:**
+1. Solder **Diode 1 anode** → XIAO **Pin 8 (5 V USB)**
+2. Run a short (~5 cm) wire from the **LiPo red (+) wire**, tap it *before* the XIAO BAT+ pad → **Diode 2 anode**
+3. Twist both **cathodes** (striped ends) together → DRV2605L **VIN**
+4. Solder a **220 µF–470 µF** electrolytic cap across DRV2605L **VIN / GND** (positive → VIN), as close to the VIN/GND pins as possible
 
 > [!TIP]
-> Tap Diode 2's anode directly at the LiPo wire junction before the XIAO's BAT+ pad — a short 5 cm wire is ideal. Keep the large decoupling cap physically close to the DRV2605L's VIN/GND pins to absorb startup current spikes.
+> The 1N5819 Schottky drop is ~0.3 V. When on battery alone the DRV sees ~3.4–3.9 V (3.7–4.2 V LiPo minus 0.3 V). The DRV2605L VIN range is 2.5–5.2 V — this is fully within spec.
+
+> [!WARNING]
+> **Never connect Diode 2 anode to XIAO Pin 14 (3.3 V).** That is a regulated output from the XIAO LDO, not a battery tap. Connecting it there would feed motor current backwards through the LDO and destroy it.
 
 ```text
-  ┌────────────────┐                        ┌──────────────────┐
-  │  XIAO nRF52840 │                        │   DRV2605L       │
-  │                │                        │                  │
-  │   5V VIN (8) ──┼───[>| 1N5819 ]────┐    │                  │
-  │                │                   ├───┼─ VIN              │
-  │                │    [>| 1N5819 ]────┘    │  │               │
-  │    GND  (13) ──┼────────────────────────┼─ GND    220–470µF┴│
-  │  D4/SDA  (5) ──┼────────────────────────┼─ SDA             │
-  │  D5/SCL  (6) ──┼────────────────────────┼─ SCL             │
-  │      D3  (4) ──┼────────────────────────┼─ EN  (clone only)│
-  │                │                        │                  │
-  │                │                        │  OUTP ───────────┼──→ Motor (+)
-  │                │                        │  OUTN ───────────┼──→ Motor (−)
-  └────────────────┘                        └──────────────────┘
-        │
-  BAT+ (bottom) ──→ LiPo Red (+)
-        │
-        └──→ [>| 1N5819 ] ──→ DRV2605L VIN  (Diode 2 anode taps here)
-  BAT− (bottom) ──→ LiPo Black (−)
+  LiPo BAT+ wire (red)
+  ┌──────────────────────────────────────────────────┐
+  │   (tap here for Diode 2 — BEFORE XIAO BAT+ pad) │
+  │                                                  ▼
+  │                                        [>| 1N5819 D2 ]──┐
+  │                                                          │
+  ▼                                                          ├──→ DRV2605L VIN
+  XIAO BAT+ pad (bottom)                                     │       │
+                                                             │    [220–470µF]
+  XIAO Pin 8 (5 V USB) ──[>| 1N5819 D1 ]────────────────────┘       │
+                                                                      │
+  XIAO Pin 13 (GND) ────────────────────────────────────────→ DRV GND┘
+  XIAO D4 (Pin 5)   ────────────────────────────────────────→ DRV SDA
+  XIAO D5 (Pin 6)   ────────────────────────────────────────→ DRV SCL
+  XIAO D3 (Pin 4)   ────────────────────────────────────────→ DRV EN  ← clone boards only
+
+                                               DRV2605L OUTP ──→ Motor (+)
+                                               DRV2605L OUTN ──→ Motor (−)
+
+  LiPo BAT− wire (black) ──────────────────────────────────→ XIAO BAT− pad (bottom)
 ```
 
 ### Motor Selection & Polarity
@@ -136,16 +148,31 @@ The DRV2605L is powered **directly from the LiPo battery** in an OR loop with US
 
 ### External RGB LED (optional)
 
-An external RGB LED can be mounted anywhere on the enclosure or strap to show the same status as the onboard LED.
+An external RGB LED (three separate LEDs or a single common-cathode 5 mm/3 mm RGB package) can be mounted anywhere on the enclosure or strap to show the same status as the onboard LED.
+
+#### Resistor values — calculated for optimal brightness
+
+XIAO GPIO output = **3.3 V**. Target current = **5 mA** per channel (safe, visible, long LED life).
+
+| Channel | Typical Vf | Calculation | Standard resistor | Actual current |
+|---|---|---|---|---|
+| **Red** | 2.0 V | (3.3 − 2.0) / 0.005 = 260 Ω | **270 Ω** | ≈ 4.8 mA |
+| **Green** | 2.8 V | (3.3 − 2.8) / 0.005 = 100 Ω | **100 Ω** | ≈ 5.0 mA |
+| **Blue** | 2.8 V | (3.3 − 2.8) / 0.005 = 100 Ω | **100 Ω** | ≈ 5.0 mA |
+
+> [!NOTE]
+> Vf varies by LED brand. Red is typically 1.8–2.2 V; green/blue 2.6–3.3 V. **Do not use a single 220 Ω resistor on all channels** — it will produce a dim red (only ~5 mA) but nearly zero current through green/blue if Vf ≈ 3.0–3.3 V (voltage headroom collapses). Use the per-channel values above.
+>
+> If your green or blue LED has Vf ≥ 3.1 V, drop to **68 Ω** or even **47 Ω** for green/blue. Measure across the LED with a multimeter; if it reads < 2.5 V when your resistor is connected, reduce the resistor.
 
 ```
-  XIAO D6 ──→ 220Ω ──→ R anode  ┐
-  XIAO D7 ──→ 220Ω ──→ G anode  ├─ Common-Cathode RGB LED
-  XIAO D8 ──→ 220Ω ──→ B anode  ┘
-  GND ───────────────→ Cathode
+  XIAO D6 ──→ 270 Ω ──→ R anode  ┐
+  XIAO D7 ──→ 100 Ω ──→ G anode  ├─ Common-Cathode RGB LED
+  XIAO D8 ──→ 100 Ω ──→ B anode  ┘
+  GND ──────────────────→ Cathode
 ```
 
-If your LED is **common-anode** instead, uncomment `#define EXT_RGB_COMMON_ANODE` in the firmware.
+If your LED is **common-anode** instead, uncomment `#define EXT_RGB_COMMON_ANODE` in the firmware. The same resistor values apply — just place them between XIAO D6/D7/D8 and the individual anodes, with the common anode tied to 3.3 V.
 
 ### LiPo Battery → XIAO (bottom pads)
 
@@ -298,9 +325,15 @@ OD_CLAMP      (0x17) = V_peak  × 255 / 5.6  (default: 0x96 = 3.3V)
 
 ### Step 4: Connect External RGB LED (optional)
 
-1. Bend LED legs, insert 220Ω resistors in series on the R/G/B anodes
-2. Run wires to XIAO **D6 (R), D7 (G), D8 (B)**; cathode to **GND**
-3. Mount LED at a visible spot on the enclosure or strap
+1. Bend LED legs. Insert resistors **in series on each anode lead**:
+   - **Red anode:** 270 Ω resistor → XIAO **D6**
+   - **Green anode:** 100 Ω resistor → XIAO **D7**
+   - **Blue anode:** 100 Ω resistor → XIAO **D8**
+2. Common cathode → XIAO **GND**
+3. Mount LED at a visible spot on the enclosure or strap; use Kapton tape to insulate resistor leads
+
+> [!CAUTION]
+> Do **not** use a single 220 Ω on all three channels. Green and blue have a higher forward voltage (~2.8 V). On a 3.3 V rail that leaves only ~0.5 V across 220 Ω — barely 2 mA. Use **100 Ω** for green and blue.
 
 ### Step 5: Test Before Enclosing
 
@@ -372,22 +405,48 @@ Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
 
 ## 🐛 Troubleshooting
 
+### Power & Hardware
+
 | Issue | Solution |
 |---|---|
-| Board not detected in IDE | Double-tap Reset; use a USB-C **data** cable (not charge-only) |
-| Upload fails | Select mbed-enabled board package; check Port selection |
-| Serial: "DRV2605L not found!" | Check SDA→D4, SCL→D5; confirm VIN has power; check EN connected and HIGH |
-| Motor silent, no Serial errors, 0V on OUTP/OUTN | **EN pin not driven HIGH** (most common issue on clone boards) |
-| Motor silent, registers look correct in Serial | Check continuity of OUTP/OUTN → motor leads with multimeter |
-| Motor cuts out immediately (overcurrent) | ERM motor stall-current exceeded driver limit; reduce OD_CLAMP temporarily; check motor spec |
-| LRA: motor vibrates but weakly | Verify RATED_VOLTAGE (0x57) and OD_CLAMP (0x60) match your motor spec; confirm auto-cal succeeded (A_CAL_COMP and A_CAL_BEMF non-zero) |
-| ERM: motor hums but doesn't spin | ERM closed-loop tracking failed; ensure open-loop is set (`0x1D` bit 5 = 1 in firmware) |
-| BLE doesn't advertise | Call `BLE.begin()` before any other BLE function |
-| Serial Monitor blank | Add `while(!Serial){}` with timeout; use mbed board package |
-| Battery draining fast | Advertising interval is already 500 ms in firmware; check no tight `delay()` loop exists |
-| Compile error: Adafruit_DRV2605.h | Install "Adafruit DRV2605" + "Adafruit BusIO" via Library Manager |
-| External LED always off | Check `#define USE_EXTERNAL_RGB` is not commented out; check 220Ω resistors; verify D6/D7/D8 continuity |
-| External LED wrong colour | Swap common-anode/cathode setting: add/remove `#define EXT_RGB_COMMON_ANODE` |
+| Board not detected in IDE | Double-tap Reset; use a USB-C **data** cable (not charge-only); try different USB port |
+| Upload fails | Select **Seeed nRF52 mbed-enabled Boards** package in Board Manager; verify Port is selected |
+| XIAO resets or reboots during vibration | DRV2605L drawing too much from 3.3 V — **check OR loop wiring**; VIN must come from LiPo/USB5V, not Pin 14 |
+| OR loop: DRV2605L works on USB but not on battery alone | Diode 2 anode is not connected to LiPo BAT+ — it may be floating. Tap the red wire before the BAT+ pad |
+| OR loop: DRV2605L works on battery but not on USB | Diode 1 anode is not connected to XIAO Pin 8 (5 V USB); verify with multimeter (should read ~5 V when USB plugged in) |
+| Decoupling cap polarity wrong | Electrolytic caps are polarised — positive leg to VIN, negative to GND. Reversed caps can short or explode |
+
+### DRV2605L & Motor
+
+| Issue | Solution |
+|---|---|
+| Serial: "DRV2605L not found!" | Check SDA→D4, SCL→D5 continuity; confirm VIN has power (≥2.5 V); confirm EN is HIGH |
+| Motor silent, no Serial errors, 0 V on OUTP/OUTN | **EN pin not driven HIGH** — most common issue on clone boards. Check D3 is wired to EN and firmware is uploading |
+| Motor silent, registers look correct in Serial | Check continuity of OUTP/OUTN → motor leads with multimeter; check for cold solder joints |
+| Motor cuts out immediately (overcurrent) | ERM stall-current exceeded driver limit; reduce OD_CLAMP (0x17) temporarily; verify motor rated current |
+| LRA: motor vibrates but weakly | Verify RATED_VOLTAGE (0x57) and OD_CLAMP (0x60) match your motor spec sheet; confirm auto-cal succeeded (A_CAL_COMP and A_CAL_BEMF both non-zero) |
+| LRA: `WARNING: auto-calibration failed` | Check OUTP/OUTN polarity; confirm RATED_VOLTAGE not too low; try slightly increasing OD_CLAMP |
+| ERM: motor hums but doesn't spin | ERM closed-loop tracking failed on small motor; ensure open-loop is set (`0x1D` bit 5 = 1 in firmware) |
+| DRV2605L I²C lost mid-use | Firmware has auto-recovery every 5 s; check wiring strain relief; add extra GND wire if board moves |
+
+### BLE & Software
+
+| Issue | Solution |
+|---|---|
+| BLE doesn't advertise | Ensure `BLE.begin()` succeeds before calling `BLE.advertise()` — check Serial for ERROR messages |
+| Serial Monitor blank | Ensure `while(!Serial){}` timeout in setup; use mbed board package, not standard nRF52 |
+| Battery draining fast | Advertising interval is 500 ms in firmware; confirm no tight `delay()` loop; advertising normally draws ~3–5 mA |
+| Compile error: `Adafruit_DRV2605.h` not found | Install **"Adafruit DRV2605"** + **"Adafruit BusIO"** via Library Manager → Install All |
+
+### External LED
+
+| Issue | Solution |
+|---|---|
+| External LED always off | Check `#define USE_EXTERNAL_RGB` is not commented out; verify D6/D7/D8 continuity; check resistors |
+| External LED extremely dim (green or blue especially) | Resistor too large for Vf near 3.0–3.3 V — replace 220 Ω with **100 Ω** on green/blue. Check Vf with multimeter |
+| External LED shows wrong colour | Verify wiring: D6=Red, D7=Green, D8=Blue; swap `#define EXT_RGB_COMMON_ANODE` if colours are inverted |
+| External red LED very bright, green/blue barely visible | Using the same resistor on all channels — use **270 Ω for red, 100 Ω for green/blue** |
+| LED flickers | Check solder joints on resistors; add 100 nF ceramic cap from each LED anode to GND to suppress GPIO noise |
 
 ---
 

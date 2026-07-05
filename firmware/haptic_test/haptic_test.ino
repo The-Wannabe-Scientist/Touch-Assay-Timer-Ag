@@ -25,10 +25,12 @@
 //                   (LRA: observe +/− polarity. ERM: polarity only affects spin direction)
 //
 //  ── EXTERNAL RGB LED (optional) ─────────────────────────────
-//    R anode → 220Ω → D6
-//    G anode → 220Ω → D7
-//    B anode → 220Ω → D8
+//    R anode → 270Ω → D6
+//    G anode → 100Ω → D7
+//    B anode → 100Ω → D8
 //    Cathode → GND
+//    NOTE: Per-channel values. Green/blue Vf ≈ 2.8V — on 3.3V rail, 220Ω
+//    leaves barely 2mA. 100Ω gives a proper 5mA brightness.
 //    Green = init OK.  Red = DRV2605L not found.
 // ============================================================
 
