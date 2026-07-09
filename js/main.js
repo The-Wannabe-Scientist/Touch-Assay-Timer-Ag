@@ -350,10 +350,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       testArmband:          document.getElementById("testArmband"),
     },
     Displays: {
+      tapLabel:         document.getElementById("tapButtonLabel"),
       liveProgress:     document.getElementById("liveProgress"),
       currentStim:      document.getElementById("currentStimDisplay"),
       totalStim:        document.getElementById("totalStimDisplay"),
       warmup:           document.getElementById("warmupDisplay"),
+      warmupNumber:     document.getElementById("warmupNumber"),
       binWarning:       document.getElementById("binWarning"),
       savedAssaysList:  document.getElementById("savedAssaysList"),
       previewModal:     document.getElementById("previewModal"),
@@ -436,7 +438,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Buttons.stopRun.disabled        = true;
         UI.Buttons.finishTrial.disabled    = true;
         UI.Inputs.genotypeSelect.innerHTML = "";
-        UI.Buttons.tap.textContent         = "Select Genotype to Start";
+        UI.Displays.tapLabel.textContent   = "Select Genotype to Start";
         break;
 
       case STATES.CONFIGURED:
@@ -445,7 +447,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Buttons.progress.disabled      = false;
         UI.Buttons.stopRun.disabled       = true;
         UI.Buttons.finishTrial.disabled   = true;
-        UI.Buttons.tap.textContent        = "Select Genotype to Start";
+        UI.Displays.tapLabel.textContent  = "Select Genotype to Start";
         break;
 
       case STATES.POISED:
@@ -454,7 +456,22 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Buttons.finishTrial.disabled   = false;
         UI.Buttons.progress.disabled      = false;
         UI.Buttons.stopRun.disabled       = true;
-        UI.Buttons.tap.textContent        = "Select Genotype to Start";
+        // Bug 3 fix: always recompute the tap button label based on the
+        // currently-selected genotype. Without this, completing or stopping a
+        // run snaps the label back to "Select Genotype to Start" even though
+        // the dropdown still shows the previously chosen genotype.
+        {
+          const _pSel = UI.Inputs.genotypeSelect.value;
+          if (_pSel && currentAssay) {
+            const _pAt = getActiveTrial(currentAssay);
+            const _pN  = (_pAt?.runs.filter(
+              r => r.genotype === _pSel && r.status === "completed" && r.eligibleForAnalysis
+            ).length ?? 0) + 1;
+            UI.Displays.tapLabel.textContent = `Start ${_pSel} (Animal ${_pN})`;
+          } else {
+            UI.Displays.tapLabel.textContent = "Select Genotype to Start";
+          }
+        }
         break;
 
       case STATES.RUNNING:
@@ -586,7 +603,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Transition UI
     setState(STATES.RUNNING);
-    UI.Buttons.tap.textContent       = "Tap";
+    UI.Displays.tapLabel.textContent = "Tap";
     UI.Displays.totalStim.textContent = currentAssay.stimCount;
     UI.Displays.currentStim.textContent = "1";
 
@@ -919,9 +936,9 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function stopRunEarly(reason = "Run stopped early by user") {
     isWarmingUp = false;
-    // BUG-3 fix: if warmup hid the tap button, restore it now so the UI
-    // doesn't get stuck in an invisible-button state after an external stop.
-    if (UI.Buttons.tap.hidden) UI.Buttons.tap.hidden = false;
+    // BUG-3 fix: if warmup was in progress, clear the overlay and ring class so
+    // the UI doesn't get stuck in an unresponsive state after an external stop.
+    UI.Buttons.tap.classList.remove("warming-up");
     if (!UI.Displays.warmup.hidden) UI.Displays.warmup.hidden = true;
 
     // Snapshot activeRun BEFORE stopCueLoop() nulls it. This prevents a double-stop
@@ -1026,7 +1043,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           r => r.genotype === selectedGenotype && r.status === "completed" && r.eligibleForAnalysis
         ).length ?? 0) + 1;
 
-        UI.Buttons.tap.textContent = `Tap again to start ${selectedGenotype} (Animal ${nextIndex})`;
+        UI.Displays.tapLabel.textContent = `Tap again to start ${selectedGenotype} (Animal ${nextIndex})`;
 
         clearTimeout(startTimeout);
         startTimeout = setTimeout(() => {
@@ -1043,7 +1060,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                    r.status === "completed" &&
                    r.eligibleForAnalysis
             ).length ?? 0) + 1;
-            UI.Buttons.tap.textContent = `Start ${freshGenotype} (Animal ${freshIndex})`;
+            UI.Displays.tapLabel.textContent = `Start ${freshGenotype} (Animal ${freshIndex})`;
           }
         }, 2000);
 
@@ -1133,53 +1150,60 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    isWarmingUp                    = true;
-    UI.Displays.warmup.hidden      = false;
-    UI.Buttons.tap.hidden          = true;
+    isWarmingUp = true;
+
+    // Show the countdown overlay INSIDE the tap button (button stays visible).
+    // The .warming-up class adds the pulsing ring and blocks pointer events.
+    UI.Displays.warmup.hidden = false;
+    UI.Buttons.tap.classList.add("warming-up");
 
     // Prime the TTS engine with a silent utterance so the synthesis pipeline
     // is warm before the first real voiced cue fires during the run.
     primeSpeechEngine();
 
+    /** Cleans up warmup UI without starting a run (cancelled path). */
+    const _cancelWarmupUI = () => {
+      isWarmingUp = false;
+      UI.Displays.warmup.hidden = true;
+      UI.Buttons.tap.classList.remove("warming-up");
+      // Restore the tap button label so it doesn't show the stale "Tap again…" text.
+      const sel = UI.Inputs.genotypeSelect.value;
+      if (sel && (currentState === STATES.CONFIGURED || currentState === STATES.POISED)) {
+        const at = getActiveTrial(currentAssay);
+        const n  = (at?.runs.filter(r => r.genotype === sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
+        UI.Displays.tapLabel.textContent = `Start ${sel} (Animal ${n})`;
+      }
+    };
+
     for (let i = warmupDuration; i > 0; i--) {
       // Cancel if the state has changed externally (e.g. stop was clicked)
       if (!isWarmingUp || (currentState !== STATES.CONFIGURED && currentState !== STATES.POISED)) {
-        isWarmingUp               = false;
-        UI.Displays.warmup.hidden = true;
-        UI.Buttons.tap.hidden     = false;
-        // Restore the tap button label so it doesn't show the stale "Tap again…" text.
-        const sel = UI.Inputs.genotypeSelect.value;
-        if (sel && (currentState === STATES.CONFIGURED || currentState === STATES.POISED)) {
-          const at = getActiveTrial(currentAssay);
-          const n  = (at?.runs.filter(r => r.genotype === sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
-          UI.Buttons.tap.textContent = `Start ${sel} (Animal ${n})`;
-        }
+        _cancelWarmupUI();
         return;
       }
 
-      UI.Displays.warmup.textContent = i;
+      UI.Displays.warmupNumber.textContent = i;
+      // Re-trigger the pop-in animation on every digit change (3→2→1).
+      // Removing + re-adding the animation via a class-toggle forces a reflow
+      // that restarts the @keyframe from scratch each second.
+      UI.Displays.warmupNumber.style.animation = "none";
+      void UI.Displays.warmupNumber.offsetWidth;   // trigger reflow
+      UI.Displays.warmupNumber.style.animation = "";
       playWarmupTone(1200);  // High beep each countdown second
 
       await new Promise(r => setTimeout(r, 1000));
 
       // #7: Re-check after the await — warmup may have been cancelled while suspended
       if (!isWarmingUp) {
-        UI.Displays.warmup.hidden = true;
-        UI.Buttons.tap.hidden     = false;
-        // Restore the tap button label after a mid-countdown cancel.
-        const sel = UI.Inputs.genotypeSelect.value;
-        if (sel) {
-          const at = getActiveTrial(currentAssay);
-          const n  = (at?.runs.filter(r => r.genotype === sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
-          UI.Buttons.tap.textContent = `Start ${sel} (Animal ${n})`;
-        }
+        _cancelWarmupUI();
         return;
       }
     }
 
-    isWarmingUp               = false;
+    // Countdown finished — tear down the overlay and start the run
+    isWarmingUp = false;
     UI.Displays.warmup.hidden = true;
-    UI.Buttons.tap.hidden     = false;
+    UI.Buttons.tap.classList.remove("warming-up");
 
     // Bug 2: wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
     try {
@@ -1352,6 +1376,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Default: show the table ("true" or no stored pref = visible)
     const shouldShow = pref !== "false";
     container.hidden               = !shouldShow;
+    // Bug 2 fix: also keep aria-hidden in sync so assistive tech respects the toggle
+    container.setAttribute("aria-hidden", String(!shouldShow));
     // #7/#15: Update text, icon, and aria-pressed together
     const label = UI.Buttons.progress.querySelector(".toggle-progress-label");
     const eyeOn  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
@@ -1833,6 +1859,52 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
 
+
+  /* -----------------------------------------------------------------------
+     showConfirmModal — Bug 8 fix
+     Theme-aware async confirmation dialog. Replaces blocking confirm() that
+     cannot be styled and may be suppressed in PWA / Private Browsing mode.
+   ----------------------------------------------------------------------- */
+
+  /**
+   * Shows a lightweight confirmation modal that respects the app's theme.
+   *
+   * @param {string} title      Bold heading shown at the top of the dialog.
+   * @param {string} body       Descriptive sentence shown below the heading.
+   * @param {string} [okLabel]  Label for the confirm button (default "Confirm").
+   * @returns {Promise<boolean>} Resolves true on confirm, false on cancel.
+   */
+  function showConfirmModal(title, body, okLabel = "Confirm") {
+    return new Promise(resolve => {
+      const overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      overlay.innerHTML =
+        `<div class="modal-content" style="max-width:400px">` +
+          `<div class="modal-header">` +
+            `<h2 style="font-size:1.05rem;margin:0;font-weight:700">${title}</h2>` +
+          `</div>` +
+          `<div style="padding:1.1rem 1.25rem;font-size:0.92rem;line-height:1.55;color:var(--text-muted)">${body}</div>` +
+          `<div class="modal-actions" style="gap:0.75rem;justify-content:flex-end">` +
+            `<button type="button" class="secondary" id="_confirmCancel">Cancel</button>` +
+            `<button type="button" class="danger"    id="_confirmOk">${okLabel}</button>` +
+          `</div>` +
+        `</div>`;
+      document.body.appendChild(overlay);
+
+      const cleanup = result => {
+        document.body.removeChild(overlay);
+        resolve(result);
+      };
+      overlay.querySelector("#_confirmOk").addEventListener("click",    () => cleanup(true));
+      overlay.querySelector("#_confirmCancel").addEventListener("click", () => cleanup(false));
+      overlay.addEventListener("click", e => { if (e.target === overlay) cleanup(false); });
+      const onKey = e => {
+        if (e.key === "Escape") { document.removeEventListener("keydown", onKey); cleanup(false); }
+      };
+      document.addEventListener("keydown", onKey);
+    });
+  }
+
   /* -----------------------------------------------------------------------
      Event Bindings
   ----------------------------------------------------------------------- */
@@ -2000,19 +2072,22 @@ document.addEventListener("DOMContentLoaded", async () => {
   UI.Inputs.stimCount.addEventListener("input", updateBinWarning);
   UI.Inputs.binSize.addEventListener("input",   updateBinWarning);
 
-  // ── Tap button (pointerdown avoids 300ms mobile ghost-click delay) ──────
-  UI.Buttons.tap.addEventListener("pointerdown", e => {
-    e.preventDefault();  // Prevents ghost click / double-fire on touch devices
-    executeTapAction();
-  });
-
-  // Fallback for older Android WebViews that don't implement Pointer Events
-  // reliably. The hardware debounce (TAP_COOLDOWN_MS = 80ms) prevents double-
-  // firing when both pointerdown and touchstart fire on the same interaction.
-  UI.Buttons.tap.addEventListener("touchstart", e => {
-    e.preventDefault();  // Suppress the following 300ms-delayed click
-    executeTapAction();
-  }, { passive: false });
+  // Bug 10 fix: feature-detect PointerEvent so only one event fires per touch.
+  // On modern iOS/Android *both* pointerdown and touchstart fire for the same
+  // physical touch — using both creates a double-fire risk when the 80ms
+  // TAP_COOLDOWN window is straddled by a GC pause.
+  if (window.PointerEvent) {
+    UI.Buttons.tap.addEventListener("pointerdown", e => {
+      e.preventDefault();  // Prevents ghost click / double-fire on touch devices
+      executeTapAction();
+    });
+  } else {
+    // Fallback for legacy Android WebViews that do not implement Pointer Events
+    UI.Buttons.tap.addEventListener("touchstart", e => {
+      e.preventDefault();  // Suppress the following 300ms-delayed click
+      executeTapAction();
+    }, { passive: false });
+  }
 
   // ── Space bar shortcut ──────────────────────────────────────────────────
   document.addEventListener("keydown", event => {
@@ -2031,20 +2106,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Bug 13 fix: allow Escape to cancel a warmup countdown in progress.
     // Setting isWarmingUp = false causes the runWarmup() loop to exit on its
-    // next iteration, restoring the tap button and cleaning up the display.
+    // next iteration, but we also restore the UI immediately here so the user
+    // sees instant feedback instead of waiting up to 1 s for the setTimeout.
     if (event.key === "Escape" && isWarmingUp) {
       isWarmingUp = false;
-      // L2 fix: restore UI immediately so user sees instant feedback instead of
-      // waiting up to 1 s for the runWarmup() loop's next setTimeout to fire.
+      // Hide the in-button overlay and remove the pulsing ring class
       UI.Displays.warmup.hidden = true;
-      UI.Buttons.tap.hidden     = false;
+      UI.Buttons.tap.classList.remove("warming-up");
       // BUG-I fix: also restore the tap button label — the Escape path was the
       // only cancel branch that left the stale "Tap again to start…" text showing.
       const _sel = UI.Inputs.genotypeSelect.value;
       if (_sel && (currentState === STATES.CONFIGURED || currentState === STATES.POISED)) {
         const _at = getActiveTrial(currentAssay);
         const _n  = (_at?.runs.filter(r => r.genotype === _sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
-        UI.Buttons.tap.textContent = `Start ${_sel} (Animal ${_n})`;
+        UI.Displays.tapLabel.textContent = `Start ${_sel} (Animal ${_n})`;
       }
       return;
     }
@@ -2311,7 +2386,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Finish trial button ─────────────────────────────────────────────────
   UI.Buttons.finishTrial.addEventListener("click", async () => {
-    if (!confirm("Finish this trial? You will not be able to add more runs to this trial.")) return;
+    // Bug 8 fix: replace browser-native confirm() (which is blocking, cannot be
+    // styled, and may be suppressed in PWA mode on some Android browsers) with a
+    // lightweight async modal that respects the app's theme.
+    const confirmed = await showConfirmModal(
+      "Finish this trial?",
+      "You will not be able to add more runs to this trial after confirming.",
+      "Finish Trial"
+    );
+    if (!confirmed) return;
 
     const activeTrial = getActiveTrial(currentAssay);
 
@@ -2351,6 +2434,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     const progressContainer = document.getElementById("assayProgress");
     progressContainer.hidden = !progressContainer.hidden;
     const nowVisible = !progressContainer.hidden;
+    // Bug 2 fix: keep aria-hidden in sync with the visual state
+    progressContainer.setAttribute("aria-hidden", String(!nowVisible));
     // #7/#15: Update text, icon, and aria-pressed
     const label  = UI.Buttons.progress.querySelector(".toggle-progress-label");
     const eyeOn  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
@@ -2374,7 +2459,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         r => r.genotype === selected && r.status === "completed" && r.eligibleForAnalysis
       ).length ?? 0) + 1;
 
-      UI.Buttons.tap.textContent = `Start ${selected} (Animal ${nextIndex})`;
+      UI.Displays.tapLabel.textContent = `Start ${selected} (Animal ${nextIndex})`;
 
       // Reset the double-tap guard when the genotype changes
       pendingStart = false;

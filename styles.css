@@ -187,6 +187,7 @@ body {
   display: flex;
   align-items: center;
   gap: 0.25rem;
+  position: relative;
 }
 
 .header-icon-btn {
@@ -204,7 +205,8 @@ body {
   transition: background 0.18s ease, transform 0.14s ease, box-shadow 0.18s ease;
   -webkit-tap-highlight-color: transparent;
 }
-.header-icon-btn:hover {
+.header-icon-btn:hover,
+.header-icon-btn[aria-expanded="true"] {
   background: rgba(255,255,255,0.15);
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
@@ -222,8 +224,7 @@ body {
 #overflowMenu {
   position: absolute;
   top: calc(100% + 4px);
-  /* Aligns the menu natively with the constrained header column */
-  right: max(12px, calc(50vw - 400px));
+  right: 0; /* Aligned exactly with the right edge of .header-actions */
   background: var(--bg-card);
   border: 1px solid var(--border-base);
   border-radius: 10px;
@@ -860,6 +861,78 @@ button.danger:active {
   opacity: 1;
 }
 
+/* ── Warmup-countdown state: button stays visible, countdown renders inside it */
+
+/* The tap button is non-interactive but fully visible during warmup */
+#tapButton.warming-up {
+  pointer-events: none;   /* block taps while counting down */
+  cursor: default;
+  /* Pulsing indigo ring to signal "get ready" */
+  animation: warmup-ring 1s ease-in-out infinite;
+}
+
+@keyframes warmup-ring {
+  0%   { box-shadow: 0 8px 20px rgba(0,0,0,0.15), 0 0 0 0   rgba(79, 70, 229, 0.55); }
+  50%  { box-shadow: 0 8px 20px rgba(0,0,0,0.15), 0 0 0 14px rgba(79, 70, 229, 0); }
+  100% { box-shadow: 0 8px 20px rgba(0,0,0,0.15), 0 0 0 0   rgba(79, 70, 229, 0); }
+}
+
+[data-theme="dark"] #tapButton.warming-up {
+  animation: warmup-ring-dark 1s ease-in-out infinite;
+}
+@keyframes warmup-ring-dark {
+  0%   { box-shadow: 0 8px 20px rgba(0,0,0,0.15), 0 0 0 0   rgba(99, 102, 241, 0.7); }
+  50%  { box-shadow: 0 8px 20px rgba(0,0,0,0.15), 0 0 0 16px rgba(99, 102, 241, 0); }
+  100% { box-shadow: 0 8px 20px rgba(0,0,0,0.15), 0 0 0 0   rgba(99, 102, 241, 0); }
+}
+
+/* The overlay span covers the whole button and shows the countdown number.
+   Because #tapButton uses display:flex + position:relative (added below),
+   the overlay is absolutely positioned to fill it entirely. */
+#tapButton {
+  position: relative;   /* anchor for the absolute overlay */
+}
+
+.tap-warmup-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;            /* must be above the button's own text node */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  border-radius: inherit;
+  /* Solid background matching the button's own colours — color-mix() cannot
+     accept CSS gradients, so we use the same card bg that the gradient sits on */
+  background: var(--bg-card);
+  /* Large countdown number */
+  font-size: clamp(4rem, 18vw, 7rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: var(--color-primary);
+  line-height: 1;
+}
+
+/* Pop-in animation — replays on every display:none→flex toggle (or via JS class toggle/reflow) */
+.warmup-number {
+  animation: warmup-number-in 0.18s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes warmup-number-in {
+  from { transform: scale(0.55); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+
+/* "GET READY" label above the number */
+.warmup-label {
+  font-size: clamp(0.75rem, 2.5vw, 1rem);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
 /* =====================================================================
    8. PROGRESS PANEL & DATA TABLES
    ===================================================================== */
@@ -869,11 +942,12 @@ button.danger:active {
   font-size: 1.15rem;
   font-weight: 600;
   color: var(--text-muted);
-  margin-bottom: 0.5rem;
-  font-variant-numeric: tabular-nums; 
+  font-variant-numeric: tabular-nums;
+  /* Bug 7 fix: removed margin-bottom; #tapZone gap handles spacing uniformly */
 }
 
 #assayProgress {
+  min-height: 80px;          /* Bug 4 fix: never collapses to 0 on short screens */
   max-height: 30vh;
   overflow: auto;
   border-radius: 10px;
@@ -1038,7 +1112,7 @@ th {
   margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0;
 }
 
-.warmup-display { font-size: 3rem; font-weight: bold; }
+/* .warmup-display removed — countdown now rendered via .tap-warmup-overlay inside #tapButton */
 /* #5: Export action layout — primary full-width, secondaries in a row below */
 .export-actions {
   display: flex;
@@ -2437,10 +2511,7 @@ button.secondary.btn-loading::before {
     margin-bottom: 0.2rem;
   }
 
-  /* Warmup display: smaller in landscape */
-  .warmup-display {
-    font-size: 1.75rem;
-  }
+  /* Warmup overlay: clamp() in .tap-warmup-overlay handles landscape sizing */
 
   /* Live progress: compact */
   .live-progress {
@@ -2539,9 +2610,10 @@ body.state-running {
   max-width: none;
 }
 
-/* ── Toggle progress: aligned right in assay header ───────────────────── */
+/* ── Toggle progress: now inside assay header flex row ───────────────── */
+/* Bug 1 fix: align-self removed — #assayScreen>header's align-items:center
+   handles vertical alignment now that the button lives in the header. */
 #toggleProgress {
-  align-self: flex-end;
   font-size: 0.88rem;
   padding: 0.4rem 0.85rem;
   min-height: 38px;
@@ -2839,7 +2911,7 @@ body.state-running {
   flex: 1;
   background: var(--color-primary);
   color: white;
-  border: none;
+  border: none;   /* Bug 5 fix: override the base button border that shows on dark mode */
 }
 #assayScreen > footer #finishTrial:not(:disabled):hover {
   background: var(--color-primary-hover);
@@ -2911,11 +2983,12 @@ p.instruction {
 }
 
 /* #7: Toggle progress pill button with eye icon */
+/* Bug 1 fix: removed align-self:flex-start — button now lives inside the
+   assay header flex row and inherits align-items:center from the parent. */
 #toggleProgress {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  align-self: flex-start;
   font-size: 0.82rem;
   font-weight: 600;
   padding: 0.35rem 0.75rem;
