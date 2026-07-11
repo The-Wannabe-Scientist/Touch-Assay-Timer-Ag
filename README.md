@@ -114,8 +114,8 @@ The visual metronome bar pulses at the configured ISI. Each stimulus window is c
 
 | Action | Button / Key |
 |---|---|
-| Record a **response** | Tap the large tap zone / press **Space** |
-| Record **no response** | Do nothing — the timer advances automatically |
+| Record a **non-response** | Tap the large tap zone / press **Space** |
+| Record a **response** | Do nothing — the timer advances automatically |
 | Stop a run early | **Stop Run** button |
 | Finish the current trial | **Finish Trial** button (enabled after completing ≥ 1 run) |
 
@@ -123,8 +123,8 @@ The visual metronome bar pulses at the configured ISI. Each stimulus window is c
 
 ### 3. Recording Responses
 
-- **1** is recorded when a response is logged within the stimulus window.
-- **0** is recorded when the window closes with no tap.
+- **0** is recorded when a non-response is logged within the stimulus window by tapping.
+- **1** is recorded when the window closes with no tap.
 - The live progress counter shows the current stimulus number.
 - Toggle **Hide/Show Progress** to declutter the screen during recording.
 
