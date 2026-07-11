@@ -1904,6 +1904,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     // cannot carry over and skip the confirmation on the very next assay.
     pendingStart = false;
     clearTimeout(startTimeout);
+
+    // Close any open overlay screen (settings, guidelines, saved assays).
+    // resetToSetup() can be called from the header logo while an overlay is
+    // open — without this, the overlay stays on top of the reset setup screen.
+    UI.Screens.settings.hidden    = true;
+    UI.Screens.guidelines.hidden  = true;
+    UI.Screens.savedAssays.hidden = true;
+    document.body.classList.remove("state-overlay");
+    UI.Displays.overflowMenu.hidden = true;
+    UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
+
     currentAssay = null;
     UI.Forms.setup.reset();
     UI.Inputs.assayName.value     = generateAutoID();
@@ -1935,6 +1946,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     resetTimingState();
     setState(STATES.SETUP);
   }
+
 
 
 
