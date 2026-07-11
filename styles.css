@@ -783,6 +783,31 @@ button.danger:active {
   box-shadow: 0 0 10px color-mix(in srgb, var(--color-success) 70%, transparent);
 }
 
+/* Warmup state: bar counts DOWN from full in amber, driven by CSS animation.
+   JS sets --warmup-duration on the bar element before adding the class. */
+#visualMetronomeBar.warmup {
+  background: #f59e0b;     /* amber — visually distinct from run (primary) */
+  transform-origin: right; /* countdown shrinks from right → left */
+  animation: warmup-bar-countdown var(--warmup-duration, 3s) linear forwards;
+  will-change: transform;  /* keep GPU layer active */
+}
+[data-theme="dark"] #visualMetronomeBar.warmup {
+  background: #fbbf24;
+}
+@keyframes warmup-bar-countdown {
+  from { transform: scaleX(1); }
+  to   { transform: scaleX(0); }
+}
+
+/* Counter label during warmup */
+body.state-warming-up #liveProgress {
+  color: #b45309;            /* amber-700 */
+  font-style: italic;
+}
+[data-theme="dark"] body.state-warming-up #liveProgress {
+  color: #fcd34d;
+}
+
 /* MASSIVE TAP BUTTON */
 #tapButton {
   flex: 1;
@@ -1222,11 +1247,13 @@ body.state-running #assayScreen {
               0 4px 18px rgba(0,0,0,0.04);
 }
 
-body.state-running #liveProgress {
-  display: block; 
+body.state-running #liveProgress,
+body.state-warming-up #liveProgress {
+  display: block;
 }
-body.state-running #visualMetronomeContainer {
-  display: flex; 
+body.state-running #visualMetronomeContainer,
+body.state-warming-up #visualMetronomeContainer {
+  display: flex;
 }
 
 body.state-configured #openSavedAssays,
@@ -1310,13 +1337,15 @@ body.state-running #assayScreen {
   animation: screenSlideUp 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* Live progress counter fades in when the run starts */
-body.state-running #liveProgress {
+/* Live progress counter fades in when the run/warmup starts */
+body.state-running #liveProgress,
+body.state-warming-up #liveProgress {
   animation: screenFadeIn 0.2s ease both;
 }
 
 /* Metronome container fades in */
-body.state-running #visualMetronomeContainer {
+body.state-running #visualMetronomeContainer,
+body.state-warming-up #visualMetronomeContainer {
   animation: screenFadeIn 0.2s ease both;
 }
 

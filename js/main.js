@@ -1226,6 +1226,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.tapLabel.setAttribute("aria-hidden", "true");
     UI.Buttons.tap.classList.add("warming-up");
 
+    // Show bar + counter in warmup mode: body class makes them visible,
+    // amber bar counts down via CSS animation for the full warmup duration.
+    document.body.classList.add("state-warming-up");
+    const bar = UI.Displays.metronomeBar;
+    if (bar) {
+      bar.style.setProperty("--warmup-duration", `${warmupDuration}s`);
+      bar.style.transform = ""; // let CSS animation take over
+      bar.classList.add("warmup");
+    }
+    // Show "Warmup" in the stimulus counter so experimenter knows what's happening
+    const stimDisplay = document.getElementById("currentStimDisplay");
+    if (stimDisplay) stimDisplay.textContent = "Warmup";
+
     // Prime the TTS engine with a silent utterance so the synthesis pipeline
     // is warm before the first real voiced cue fires during the run.
     primeSpeechEngine();
@@ -1233,6 +1246,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     /** Cleans up warmup UI without starting a run (cancelled path). */
     const _cancelWarmupUI = () => {
       isWarmingUp = false;
+      document.body.classList.remove("state-warming-up");
+      if (bar) {
+        bar.classList.remove("warmup");
+        bar.style.transform = "scaleX(0)"; // reset for next run
+        bar.style.removeProperty("--warmup-duration");
+      }
+      if (stimDisplay) stimDisplay.textContent = "0";
       UI.Displays.warmup.hidden = true;
       // LOW-I fix: restore accessibility on cancel path.
       UI.Displays.warmup.removeAttribute("aria-hidden");
@@ -1270,8 +1290,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     }
 
-    // Countdown finished — tear down the overlay and start the run
+    // Countdown finished — tear down warmup state and start the run
     isWarmingUp = false;
+    document.body.classList.remove("state-warming-up");
+    if (bar) {
+      bar.classList.remove("warmup");
+      bar.style.transform = "scaleX(0)"; // reset; startRun's rAF will take over
+      bar.style.removeProperty("--warmup-duration");
+    }
+    if (stimDisplay) stimDisplay.textContent = "0";
     UI.Displays.warmup.hidden = true;
     // LOW-I fix: restore accessibility on the success completion path too.
     UI.Displays.warmup.removeAttribute("aria-hidden");
