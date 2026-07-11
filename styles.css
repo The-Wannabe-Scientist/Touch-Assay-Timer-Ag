@@ -787,7 +787,7 @@ button.danger:active {
    JS sets --warmup-duration on the bar element before adding the class. */
 #visualMetronomeBar.warmup {
   background: #f59e0b;     /* amber — visually distinct from run (primary) */
-  transform-origin: right; /* countdown shrinks from right → left */
+  transform-origin: left;  /* scaleX(1→0) collapses the right edge inward — drains left-to-right */
   animation: warmup-bar-countdown var(--warmup-duration, 3s) linear forwards;
   will-change: transform;  /* keep GPU layer active */
 }
