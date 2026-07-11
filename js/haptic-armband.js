@@ -33,9 +33,9 @@ const BATT_SERVICE_UUID = 0x180F;
 const BATT_LEVEL_UUID   = 0x2A19;
 
 // Command bytes — must match the firmware switch-case exactly
-const CMD_TAP          = new Uint8Array([0x01]);  // mirrors vibrate(50)
-const CMD_RUN_COMPLETE = new Uint8Array([0x02]);  // mirrors vibrate([100,50,200])
-const CMD_HEARTBEAT    = new Uint8Array([0x03]);  // BUG-A fix: must differ from CMD_TAP (0x01)
+const CMD_TAP          = new Uint8Array([0x01]);  // Mirrors vibrate(50)
+const CMD_RUN_COMPLETE = new Uint8Array([0x02]);  // Mirrors vibrate([100,50,200])
+const CMD_HEARTBEAT    = new Uint8Array([0x03]);  // Must differ from CMD_TAP (0x01)
 
 // Module-level connection state
 let _device             = null;
@@ -44,7 +44,7 @@ let _hbChar             = null;
 let _battChar           = null;   // Battery Level characteristic (0x2A19)
 let _hbTimer            = null;
 let _connected          = false;
-let _hbWasActive        = false;  // FW-7 FIX: track if HB was running before disconnect
+let _hbWasActive        = false;  // Track if HB was running before disconnect
 let _onDisconnectCb     = null;
 let _onReconnectCb      = null;  // () => void — fired after a successful auto-reconnect
 let _onBatteryUpdateCb  = null;  // (level: 0-100) => void
@@ -107,10 +107,10 @@ export async function armbandDisconnect() {
   _connected = false;
   if (_battChar) {
     _battChar.removeEventListener("characteristicvaluechanged", _handleBatteryUpdate);
-    try { await _battChar.stopNotifications(); } catch { /* ignore */ }
+    try { await _battChar.stopNotifications(); } catch { /* Ignore */ }
     _battChar = null;
   }
-  try { _device?.gatt?.disconnect(); } catch { /* ignore */ }
+  try { _device?.gatt?.disconnect(); } catch { /* Ignore */ }
   _device = _hapticChar = _hbChar = null;
 }
 
@@ -139,7 +139,7 @@ export function armbandRunComplete() {
  * separate export so call-sites remain semantically distinct.
  */
 export function armbandTest() {
-  _write(_hapticChar, CMD_TAP);
+  return _write(_hapticChar, CMD_TAP);
 }
 
 /**
@@ -147,7 +147,7 @@ export function armbandTest() {
  * Call immediately after timerWorker.postMessage("start").
  */
 export function armbandStartHeartbeat() {
-  _stopHeartbeat(); // guard against double-start on rapid stop→start
+  _stopHeartbeat(); // Guard against double-start on rapid stop→start
   _hbTimer = setInterval(() => {
     if (!_connected) { _stopHeartbeat(); return; }
     _write(_hbChar, CMD_HEARTBEAT);
@@ -166,10 +166,10 @@ export function armbandStopHeartbeat() {
 // ── Private helpers ────────────────────────────────────────────────────────────
 
 function _write(char, data) {
-  if (!_connected || !char) return;
-  char.writeValueWithoutResponse(data).catch(err => {
+  if (!_connected || !char) return Promise.resolve();
+  return char.writeValueWithoutResponse(data).catch(err => {
     // A failed write does not imply a disconnect — BLE can recover from
-    // transient radio congestion without dropping the GATT connection.
+    // Transient radio congestion without dropping the GATT connection.
     console.warn("[HapticArmband] Write failed:", err.message);
   });
 }
@@ -194,7 +194,7 @@ async function _subscribeBattery(server) {
     _battChar.addEventListener("characteristicvaluechanged", _handleBatteryUpdate);
     await _battChar.startNotifications();
     // Do an immediate read so the UI shows the level right after connecting
-    // rather than waiting for the first notification (which may be minutes away).
+    // Rather than waiting for the first notification (which may be minutes away).
     const initial = await _battChar.readValue();
     _onBatteryUpdateCb?.(initial.getUint8(0));
   } catch (err) {
@@ -215,7 +215,7 @@ function _handleBatteryUpdate(e) {
 
 function _handleDisconnect() {
   _connected = false;
-  _hbWasActive = _hbTimer !== null;  // FW-7 FIX: remember if heartbeat was running
+  _hbWasActive = _hbTimer !== null;  // Remember if heartbeat was running
   _stopHeartbeat();
   _battChar = null;  // GATT handles are invalid after disconnect
   _onDisconnectCb?.();
@@ -228,12 +228,12 @@ function _handleDisconnect() {
       const service = await server.getPrimaryService(SERVICE_UUID);
       _hapticChar   = await service.getCharacteristic(HAPTIC_UUID);
       _hbChar       = await service.getCharacteristic(HEARTBEAT_UUID);
-      await _subscribeBattery(server);  // re-subscribe after reconnect
+      await _subscribeBattery(server);  // Re-subscribe after reconnect
       _connected    = true;
-      // FW-7 FIX: Restart heartbeat if it was running before the dropout.
+      // Restart heartbeat if it was running before the dropout.
       // Without this, a brief BLE disconnect during an active run stops
-      // the heartbeat permanently → firmware watchdog fires stutter
-      // warnings every 3 s for the rest of the run.
+      // The heartbeat permanently → firmware watchdog fires stutter
+      // Warnings every 3 s for the rest of the run.
       if (_hbWasActive) {
         _hbWasActive = false;
         armbandStartHeartbeat();

@@ -52,7 +52,7 @@ export const RUN_STATUS_LABELS = {
    XSS Guard
    ========================================================================== */
 
-// escapeHTML is imported from utils.js — single shared implementation (BUG-10 fix).
+// EscapeHTML is imported from utils.js — single shared implementation (BUG-10 fix).
 
 
 /* ==========================================================================
@@ -114,12 +114,12 @@ function calculateStats(values) {
   const n    = values.length;
   const mean = values.reduce((a, b) => a + b, 0) / n;
 
-  // Bug 10: SEM is undefined for a single observation — return blank so the
-  // exported cell shows nothing rather than 0 (which implies zero spread).
+  // SEM is undefined for a single observation — return blank so the
+  // Exported cell shows nothing rather than 0 (which implies zero spread).
   if (n === 1) return { mean, sem: "" };
 
-  // EX-1 fix: use sample variance (Bessel's correction, divide by n-1) instead of
-  // population variance (divide by n). Population variance systematically underestimates
+  // Use sample variance (Bessel's correction, divide by n-1) instead of
+  // Population variance (divide by n). Population variance systematically underestimates
   // SEM for small n, which is the typical case in biological experiments.
   const variance = values.reduce((a, v) => a + (v - mean) ** 2, 0) / (n - 1);
   const sem      = Math.sqrt(variance) / Math.sqrt(n);
@@ -160,8 +160,8 @@ function buildRunCache(runs, binSize) {
  * @param {any[][]} data  - The 2D array that was used to create the sheet.
  */
 export function applySheetLayout(sheet, data) {
-  // Bug 5: data may be empty (e.g. a trial with no runs). Guard before
-  // accessing data[0] to avoid "Cannot read properties of undefined (reading 'map')".
+  // Data may be empty (e.g. a trial with no runs). Guard before
+  // Accessing data[0] to avoid "Cannot read properties of undefined (reading 'map')".
   if (!data || data.length === 0) return;
 
   // Set column widths
@@ -326,7 +326,7 @@ export function buildTrialRaw2D(trial, assay) {
     genotypes.forEach((g, gi) => {
       runsByGenotype[g].forEach(run => {
         // Show blank if this run ended before reaching this stimulus
-        // EX-7 fix: guard against null/undefined values array (e.g. partial DB write)
+        // Guard against null/undefined values array (e.g. partial DB write)
         const vals = run.values ?? [];
         row.push(i < vals.length ? vals[i] : "");
       });
@@ -391,7 +391,7 @@ export function buildTrialBinned2D(trial, assay) {
     genotypes.forEach((g, gi) => {
       runsByGenotype[g].forEach(run => {
         const bins = binnedByRun.get(run);
-        // EX-9 fix: guard bins being undefined; consistent with optional chain in summary row
+        // Guard bins being undefined; consistent with optional chain in summary row
         rawRow.push(bins && binIndex < bins.length ? bins[binIndex] : "");
       });
       if (gi < genotypes.length - 1) rawRow.push("");
@@ -402,8 +402,8 @@ export function buildTrialBinned2D(trial, assay) {
     const sumRow = [binLabel];
     genotypes.forEach(g => {
       const values = runsByGenotype[g]
-        .filter(run => run.eligibleForAnalysis)  // Bug 3: exclude ineligible runs from summary stats
-        .map(run => binnedByRun.get(run)?.[binIndex])  // optional chain: run may not be in map
+        .filter(run => run.eligibleForAnalysis)  // Exclude ineligible runs from summary stats
+        .map(run => binnedByRun.get(run)?.[binIndex])  // Optional chain: run may not be in map
         .filter(v => v !== undefined);
       const { mean, sem } = calculateStats(values);
       sumRow.push(mean, sem, values.length);  // #2
@@ -411,8 +411,8 @@ export function buildTrialBinned2D(trial, assay) {
     summaryRows.push(sumRow);
   }
 
-  // BUG-E fix: separator rows must span the full header width so SheetJS column-width
-  // detection is consistent (same fix was applied to buildPooledBinned2D at line 691).
+  // Separator rows must span the full header width so SheetJS column-width
+  // Detection is consistent (same fix was applied to buildPooledBinned2D at line 691).
   const _sep = Array(headerGenotype.length).fill("");
 
   return [
@@ -457,8 +457,8 @@ export function buildTrialTouchIndexBinned2D(trial, assay) {
     const binned = binRunValues(run.values, binSize);
     const ti     = computeTouchIndexBins(binned);
     // Runs with a null TI (zero baseline) are excluded from the map;
-    // collectTouchIndexExclusions() detects them dynamically without needing
-    // these flags to be written here.
+    // CollectTouchIndexExclusions() detects them dynamically without needing
+    // These flags to be written here.
     if (ti) {
       binnedByRun.set(run, ti);
       maxBinCount = Math.max(maxBinCount, ti.length);
@@ -587,7 +587,7 @@ export function buildPooledRaw2D(assay, options = {}, _runs = null) {
     const row = [`Stimulus ${i + 1}`];
     genotypes.forEach((g, gi) => {
       runsByGenotype[g].forEach(run => {
-        // EX-7 fix: guard against null/undefined values array (e.g. partial DB write)
+        // Guard against null/undefined values array (e.g. partial DB write)
         const vals = run.values ?? [];
         row.push(i < vals.length ? vals[i] : "");
       });
@@ -677,7 +677,7 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
     const sumRow = [binLabel];
     genotypes.forEach(g => {
       const values = runsByGenotype[g]
-        .filter(run => run.eligibleForAnalysis)  // Bug 3: exclude ineligible runs from summary stats
+        .filter(run => run.eligibleForAnalysis)  // Exclude ineligible runs from summary stats
         .map(run => binnedByRun.get(run)?.[binIndex])
         .filter(v => v !== undefined);
       const { mean, sem } = calculateStats(values);
@@ -689,9 +689,9 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
   return [
     hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus,
     ...rawRows,
-    // BUG-5 fix: separator rows must have the same column count as the header rows
+    // Separator rows must have the same column count as the header rows
     // (5 columns) so SheetJS column-width detection is not confused. Previously these
-    // used only 2 cells, causing inconsistent column widths in the Excel preview.
+    // Used only 2 cells, causing inconsistent column widths in the Excel preview.
     ["", "", "", "", ""], ["", "", "", "", ""], ["", "", "", "", ""],
     summaryHeader,
     ...summaryRows
@@ -734,7 +734,7 @@ export function buildPooledTouchIndexBinned2D(assay, options = {}, _runs = null,
 
   if (_cache) {
     _cache.forEach(({ ti }, run) => {
-      if (ti && run.eligibleForAnalysis) {  // Bug 3: exclude ineligible runs from TI analysis
+      if (ti && run.eligibleForAnalysis) {  // Exclude ineligible runs from TI analysis
         tiBinnedByRun.set(run, ti);
         maxBinCount = Math.max(maxBinCount, ti.length);
       }
@@ -948,7 +948,7 @@ export function buildAllSections(assay, exportConfigs) {
  * @returns {{ success: boolean, error?: string }}
  */
 export function performExcelExport(currentAssay, exportConfigs) {
-  // EX-5 fix: guard against XLSX being undefined (CDN failure, CSP block, etc.)
+  // Guard against XLSX being undefined (CDN failure, CSP block, etc.)
   if (typeof XLSX === "undefined") {
     return { success: false, error: "SheetJS library not loaded. Please check your internet connection and reload." };
   }
@@ -1037,9 +1037,9 @@ export function performCSVExport(currentAssay, exportConfigs) {
     a.href     = url;
     a.download = `${currentAssay.assayName || "Assay"}_Export.csv`;
     a.click();
-    // Bug 9: revoking synchronously can race the download initiation on mobile
-    // browsers where a.click() is asynchronous. Delay to give the browser time
-    // to start the download before the object URL is invalidated.
+    // Revoking synchronously can race the download initiation on mobile
+    // Browsers where a.click() is asynchronous. Delay to give the browser time
+    // To start the download before the object URL is invalidated.
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 
     return { success: true };

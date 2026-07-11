@@ -298,6 +298,72 @@ const timerWorker = new Worker("js/timer-worker.js");
 
 document.addEventListener("DOMContentLoaded", async () => {
 
+  // ── Global Error Boundary ────────────────────────────────────────────────
+  // HIGH-U1 fix: unhandledrejection should NOT show the fatal overlay for
+  // transient, recoverable errors (BLE write failures, IDB NotFoundError,
+  // network timeouts, etc.). Only genuine unexpected JS errors escalate.
+  window.addEventListener('error', (e) => handleFatalError(e.error || e.message));
+  window.addEventListener('unhandledrejection', (e) => {
+    const reason = e.reason;
+    const isTransient =
+      !(reason instanceof Error) ||
+      reason.name === "AbortError"    ||
+      reason.name === "NotFoundError" ||
+      reason.name === "NetworkError";
+    if (isTransient) {
+      console.warn("[Unhandled Rejection — non-fatal, skipped overlay]", reason);
+      return;
+    }
+    handleFatalError(reason);
+  });
+
+  function handleFatalError(err) {
+    console.error("Fatal Error Caught:", err);
+    const boundary = document.getElementById('errorBoundary');
+    if (boundary) boundary.style.display = 'flex';
+    const downloadBtn = document.getElementById('downloadRecoveryBtn');
+    if (downloadBtn) {
+      downloadBtn.onclick = () => {
+        // HIGH-U2 fix: include activeRun so in-flight values not yet flushed
+        // to IDB are preserved in the recovery download.
+        const recoveryData = {
+          assay:     currentAssay || {},
+          activeRun: activeRun   || null,
+          timestamp: Date.now(),
+        };
+        const dataStr = "data:text/json;charset=utf-8," +
+          encodeURIComponent(JSON.stringify(recoveryData, null, 2));
+        const a = document.createElement('a');
+        a.setAttribute("href", dataStr);
+        a.setAttribute("download", "touch_assay_recovery_data.json");
+        a.click();
+      };
+    }
+    const reloadBtn = document.getElementById('reloadAppBtn');
+    if (reloadBtn) reloadBtn.onclick = () => window.location.reload();
+  }
+
+  // MED-U3 fix: use a proportional threshold (>90% full) instead of absolute
+  // 50 MB, and only show once per session to avoid toasting mid-assay reloads.
+  async function checkStorageQuota() {
+    if (!(navigator.storage && navigator.storage.estimate)) return;
+    try {
+      const { quota, usage } = await navigator.storage.estimate();
+      if (!quota) return;
+      if (usage / quota > 0.9 && !sessionStorage.getItem('storageWarnShown')) {
+        sessionStorage.setItem('storageWarnShown', '1');
+        showToast(
+          `Storage nearly full (³${Math.round((usage / quota) * 100)}% used). Export old data to avoid data loss.`,
+          "warning", 8000
+        );
+      }
+    } catch (e) {
+      console.warn("Storage estimate failed", e);
+    }
+  }
+  checkStorageQuota();
+
+
   /* -----------------------------------------------------------------------
      DOM Element Cache (UI)
      Centralised here so element lookups happen once at init, not on every event.
@@ -1155,6 +1221,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Show the countdown overlay INSIDE the tap button (button stays visible).
     // The .warming-up class adds the pulsing ring and blocks pointer events.
     UI.Displays.warmup.hidden = false;
+    // LOW-I fix: hide the overlay + normal label from AT while countdown is active.
+    UI.Displays.warmup.setAttribute("aria-hidden", "true");
+    UI.Displays.tapLabel.setAttribute("aria-hidden", "true");
     UI.Buttons.tap.classList.add("warming-up");
 
     // Prime the TTS engine with a silent utterance so the synthesis pipeline
@@ -1165,6 +1234,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     const _cancelWarmupUI = () => {
       isWarmingUp = false;
       UI.Displays.warmup.hidden = true;
+      // LOW-I fix: restore accessibility on cancel path.
+      UI.Displays.warmup.removeAttribute("aria-hidden");
+      UI.Displays.tapLabel.removeAttribute("aria-hidden");
       UI.Buttons.tap.classList.remove("warming-up");
       // Restore the tap button label so it doesn't show the stale "Tap again…" text.
       const sel = UI.Inputs.genotypeSelect.value;
@@ -1183,12 +1255,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
 
       UI.Displays.warmupNumber.textContent = i;
-      // Re-trigger the pop-in animation on every digit change (3→2→1).
-      // Removing + re-adding the animation via a class-toggle forces a reflow
-      // that restarts the @keyframe from scratch each second.
-      UI.Displays.warmupNumber.style.animation = "none";
-      void UI.Displays.warmupNumber.offsetWidth;   // trigger reflow
-      UI.Displays.warmupNumber.style.animation = "";
+      // LOW-K fix: cancel running Web Animations instead of triggering a
+      // layout reflow via offsetWidth to restart the digit pop-in each second.
+      UI.Displays.warmupNumber.getAnimations().forEach(a => a.cancel());
+      UI.Displays.warmupNumber.style.animation = "";   // re-enable CSS animation
       playWarmupTone(1200);  // High beep each countdown second
 
       await new Promise(r => setTimeout(r, 1000));
@@ -1203,6 +1273,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Countdown finished — tear down the overlay and start the run
     isWarmingUp = false;
     UI.Displays.warmup.hidden = true;
+    // LOW-I fix: restore accessibility on the success completion path too.
+    UI.Displays.warmup.removeAttribute("aria-hidden");
+    UI.Displays.tapLabel.removeAttribute("aria-hidden");
     UI.Buttons.tap.classList.remove("warming-up");
 
     // Bug 2: wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
@@ -1375,9 +1448,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!container) return;
     // Default: show the table ("true" or no stored pref = visible)
     const shouldShow = pref !== "false";
-    container.hidden               = !shouldShow;
-    // Bug 2 fix: also keep aria-hidden in sync so assistive tech respects the toggle
-    container.setAttribute("aria-hidden", String(!shouldShow));
+    container.hidden = !shouldShow;
+    // MED-C fix: the `hidden` attribute already removes the element from the
+    // accessibility tree — setting aria-hidden on top is redundant and can cause
+    // screen readers to announce a hidden element when aria-hidden="false" is present.
+    container.removeAttribute("aria-hidden");
     // #7/#15: Update text, icon, and aria-pressed together
     const label = UI.Buttons.progress.querySelector(".toggle-progress-label");
     const eyeOn  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
@@ -1891,7 +1966,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         `</div>`;
       document.body.appendChild(overlay);
 
+      // HIGH-A fix: removeEventListener moved into cleanup() so it fires on
+      // every close path (OK, Cancel, backdrop, Escape) — not just Escape.
       const cleanup = result => {
+        document.removeEventListener("keydown", onKey);
         document.body.removeChild(overlay);
         resolve(result);
       };
@@ -1899,7 +1977,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       overlay.querySelector("#_confirmCancel").addEventListener("click", () => cleanup(false));
       overlay.addEventListener("click", e => { if (e.target === overlay) cleanup(false); });
       const onKey = e => {
-        if (e.key === "Escape") { document.removeEventListener("keydown", onKey); cleanup(false); }
+        if (e.key === "Escape") cleanup(false);
       };
       document.addEventListener("keydown", onKey);
     });
@@ -2110,11 +2188,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     // sees instant feedback instead of waiting up to 1 s for the setTimeout.
     if (event.key === "Escape" && isWarmingUp) {
       isWarmingUp = false;
+      // MED-F fix: also cancel the pendingStart reset timer — if the warmup
+      // started while startTimeout was still running, the timer would fire
+      // after Escape and write a stale label into tapLabel.
+      clearTimeout(startTimeout);
       // Hide the in-button overlay and remove the pulsing ring class
       UI.Displays.warmup.hidden = true;
+      // LOW-I fix: restore AT visibility on Escape path.
+      UI.Displays.warmup.removeAttribute("aria-hidden");
+      UI.Displays.tapLabel.removeAttribute("aria-hidden");
       UI.Buttons.tap.classList.remove("warming-up");
-      // BUG-I fix: also restore the tap button label — the Escape path was the
-      // only cancel branch that left the stale "Tap again to start…" text showing.
       const _sel = UI.Inputs.genotypeSelect.value;
       if (_sel && (currentState === STATES.CONFIGURED || currentState === STATES.POISED)) {
         const _at = getActiveTrial(currentAssay);
@@ -2374,13 +2457,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     // Settings: Test Vibration button — sends a single tap to confirm the armband is alive.
-    UI.Buttons.testArmband.addEventListener("click", () => {
-      armbandTest();
-      // Brief visual confirmation so the user knows the command was dispatched.
+    UI.Buttons.testArmband.addEventListener("click", async () => {
       const btn = UI.Buttons.testArmband;
+      btn.disabled = true;  // HIGH-B fix: prevent BLE spam by disabling during operation
+      const t0 = performance.now();
+      await armbandTest();
+      const latency = Math.round(performance.now() - t0);
+      // Brief visual confirmation so the user knows the command was dispatched.
       btn.classList.add("armband-test-active");
-      showToast("Test vibration sent ⚡", "info", 1800);
-      setTimeout(() => btn.classList.remove("armband-test-active"), 200);
+      showToast(`Test vibration sent ⚡ (${latency} ms)`, "info", 1800);
+      // HIGH-B fix: re-enable after 1500ms (not 200ms). 1500 > toast duration
+      // (1800ms) so the button stays disabled until feedback has fully run.
+      setTimeout(() => {
+        btn.classList.remove("armband-test-active");
+        btn.disabled = false;
+      }, 1500);
     });
   }
 
@@ -2434,8 +2525,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     const progressContainer = document.getElementById("assayProgress");
     progressContainer.hidden = !progressContainer.hidden;
     const nowVisible = !progressContainer.hidden;
-    // Bug 2 fix: keep aria-hidden in sync with the visual state
-    progressContainer.setAttribute("aria-hidden", String(!nowVisible));
+    // MED-C fix: `hidden` already removes the element from the AT — do NOT
+    // also set aria-hidden. Setting aria-hidden="false" on a hidden element
+    // can cause some screen readers to announce it erroneously.
+    progressContainer.removeAttribute("aria-hidden");
     // #7/#15: Update text, icon, and aria-pressed
     const label  = UI.Buttons.progress.querySelector(".toggle-progress-label");
     const eyeOn  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
@@ -2467,6 +2560,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  // ── New assay ────────────────────────────────────────────────────
+  // MED-D fix: replace blocking confirm() with async showConfirmModal.
+  UI.Buttons.newAssay.addEventListener("click", async () => {
+    if (currentAssay) {
+      const completedTrials = (currentAssay.trials || []).filter(t => t.status === "completed");
+      if (completedTrials.length > 0) {
+        const go = await showConfirmModal(
+          "Start a new assay?",
+          "You have unsaved data. Export your results before starting a new assay, or they may be difficult to find later.",
+          "Start New Assay"
+        );
+        if (!go) return;
+      }
+    }
+    resetToSetup();
+  });
+
   // ── Start new trial (from export screen) ───────────────────────────────
   UI.Buttons.backToAssay.addEventListener("click", async () => {
     // H3 fix: guard against currentAssay being null — rapid navigation or state
@@ -2486,22 +2596,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     setState(STATES.POISED);
   });
 
-  // ── New assay ───────────────────────────────────────────────────────────
-  UI.Buttons.newAssay.addEventListener("click", () => {
-    // Warn if there is completed trial data that has not yet been exported,
-    // so the experimenter does not lose track of results saved in IndexedDB.
-    if (currentAssay) {
-      const completedTrials = (currentAssay.trials || []).filter(t => t.status === "completed");
-      if (completedTrials.length > 0) {
-        if (!confirm(
-          "You have unsaved data. Export your results before starting a new assay, " +
-          "or they may be difficult to find later.\n\nStart a new assay anyway?"
-        )) return;
-      }
-    }
-
-    resetToSetup();
-  });
 
   // ── Header home (logo / title) → back to setup ─────────────────────────
   UI.Buttons.headerHome.addEventListener("click", () => {
@@ -2609,7 +2703,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     } else if (action === "delete") {
       const name = btn.dataset.assayName || "this assay";
-      if (confirm(`Delete ${name}?`)) {
+      // MED-D fix: replace blocking confirm() with styled async modal.
+      const confirmed = await showConfirmModal(
+        `Delete "${name}"?`,
+        "This cannot be undone. The assay and all its trial data will be permanently removed.",
+        "Delete"
+      );
+      if (confirmed) {
         try {
           await deleteAssay(assayId);
           await populateSavedAssaysList();
@@ -2774,8 +2874,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   function _popBadge(el) {
     if (!el) return;
     el.classList.remove("pop");
-    // Force reflow so removing then re-adding the class restarts the animation
-    void el.offsetWidth;
+    // LOW-K fix: cancel running Web Animations instead of forcing a layout
+    // reflow via offsetWidth — avoids forced style recalculation on every
+    // slider tick during rapid dragging.
+    el.getAnimations().forEach(a => a.cancel());
     el.classList.add("pop");
   }
 

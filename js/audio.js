@@ -133,7 +133,7 @@ export function loadVoices() {
 
 // M5 fix: speechSynthesis is not available in all browser environments
 // (some WebViews, embedded browsers). Accessing it at module load time without
-// a guard crashes the entire module, taking down the whole application.
+// A guard crashes the entire module, taking down the whole application.
 if (typeof speechSynthesis !== "undefined") {
   // Browsers load voices asynchronously; listen for when the list is populated
   speechSynthesis.onvoiceschanged = loadVoices;
@@ -158,13 +158,13 @@ function getAudioContext() {
 
     // Route all oscillators through a single master gain node.
     // Note: Volume control is not needed in this app because device hardware volume
-    // buttons provide sufficient control for users. Default gain is 1.0 (full volume).
+    // Buttons provide sufficient control for users. Default gain is 1.0 (full volume).
     masterGain = audioCtx.createGain();
     masterGain.connect(audioCtx.destination);
   }
   // H4 fix: enforce the invariant that audioCtx non-null ⇒ masterGain non-null.
   // If masterGain was somehow lost (e.g. context recycled by a future refactor),
-  // re-create it so tone functions don't crash on gain.connect(masterGain).
+  // Re-create it so tone functions don't crash on gain.connect(masterGain).
   if (!masterGain) {
     masterGain = audioCtx.createGain();
     masterGain.connect(audioCtx.destination);
@@ -187,7 +187,7 @@ export function warmUpAudio() {
     .catch(err => {
       // Log the cause but re-throw so callers can surface a user-facing error.
       // Swallowing here would let execution continue with a suspended context,
-      // causing getAudioTime() to return 0 and all scheduled ticks to misfire.
+      // Causing getAudioTime() to return 0 and all scheduled ticks to misfire.
       console.warn("Audio context resume blocked by browser policy.", err);
       throw err;
     });
@@ -255,11 +255,11 @@ export function speak(text) {
   speechSynthesis.cancel();  // Flush any queued utterances to prevent lag drift
 
   // Safari (and some Chromium builds) silently drop a speak() call issued in
-  // the same task as cancel(). Deferring via queueMicrotask ensures the cancel
-  // completes before the new utterance is enqueued, while avoiding the 1–16 ms
-  // latency penalty of setTimeout(fn, 0) which is subject to browser clamping.
+  // The same task as cancel(). Deferring via queueMicrotask ensures the cancel
+  // Completes before the new utterance is enqueued, while avoiding the 1–16 ms
+  // Latency penalty of setTimeout(fn, 0) which is subject to browser clamping.
   // Microtasks run at the end of the current task — effectively ~0 ms delay —
-  // and are more than offset by the SPEECH_LEAD_TIME advance in main.js.
+  // And are more than offset by the SPEECH_LEAD_TIME advance in main.js.
   queueMicrotask(() => {
     const utterance = new SpeechSynthesisUtterance(text);
     if (selectedVoice)         utterance.voice = selectedVoice;
@@ -331,7 +331,7 @@ export function playTick(exactTime = null) {
   osc.start(time);
   osc.stop(time + 0.05);  // Node auto-disconnects after stopping
   // L3 fix: disconnect the GainNode after the oscillator ends so it is released
-  // from the audio graph and eligible for GC on long-running sessions.
+  // From the audio graph and eligible for GC on long-running sessions.
   osc.onended = () => gain.disconnect();
 }
 
@@ -472,14 +472,14 @@ export function triggerImmediateSpeech(stimulusIndex, assayIsi) {
         // Speak on multiples of 10
         speak(String(stimulusIndex));
       } else if (typeof speechSynthesis !== "undefined" && (speechSynthesis.speaking || speechSynthesis.pending)) {
-        // BUG-7 fix: guard typeof before accessing .speaking/.pending —
-        // some browsers/WebViews expose no speechSynthesis at all.
+        // Guard typeof before accessing .speaking/.pending —
+        // Some browsers/WebViews expose no speechSynthesis at all.
         // Flush any overrunning speech from the previous multiple-of-10.
         // Without this, a spoken "10" or "20" can still be playing when the
-        // next tick fires on short ISIs (≈ 1 s), causing audible overlap.
+        // Next tick fires on short ISIs (≈ 1 s), causing audible overlap.
         // Guarded behind speaking/pending check to avoid no-op cancel() churn
-        // which can cause the speech engine to needlessly re-initialise on
-        // some platforms.
+        // Which can cause the speech engine to needlessly re-initialise on
+        // Some platforms.
         speechSynthesis.cancel();
       }
       break;
@@ -487,13 +487,13 @@ export function triggerImmediateSpeech(stimulusIndex, assayIsi) {
     case "bins":
       // Speak the stimulus number only when it lands exactly on a bin boundary
       // (i.e. is a multiple of binSpeakSize). All other stimuli just get the
-      // hardware tick scheduled by scheduleWebAudioTick — no speech needed.
+      // Hardware tick scheduled by scheduleWebAudioTick — no speech needed.
       if (stimulusIndex % binSpeakSize === 0) {
         speak(String(stimulusIndex));
       } else if (typeof speechSynthesis !== "undefined" && (speechSynthesis.speaking || speechSynthesis.pending)) {
-        // BUG-7 fix: guard typeof before accessing .speaking/.pending.
+        // Guard typeof before accessing .speaking/.pending.
         // Flush any overrun from the previous bin-boundary utterance so it
-        // doesn't bleed into the following tick interval.
+        // Doesn't bleed into the following tick interval.
         // Guarded to avoid needless cancel() calls on every non-boundary tick.
         speechSynthesis.cancel();
       }

@@ -159,17 +159,6 @@ void initMotor() {
 }
 #endif
 
-// ── Drive motor for onMs, silent for offMs, repeated reps times ─
-void pulseVibrate(int onMs, int offMs, int reps) {
-  for (int i = 0; i < reps; i++) {
-    drv.setMode(DRV2605_MODE_REALTIME);
-    drv.setRealtimeValue(127); // max amplitude (RTP signed 8-bit: 127 = full scale)
-    delay(onMs);
-    drv.setRealtimeValue(0);
-    drv.setMode(DRV2605_MODE_INTTRIG);
-    if (offMs > 0) delay(offMs);
-  }
-}
 
 // ── Register dump helper ────────────────────────────────────
 void dumpRegisters(const char* label) {

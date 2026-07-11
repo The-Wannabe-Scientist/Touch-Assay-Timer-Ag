@@ -83,7 +83,7 @@ export function openDB() {
 
     // Schema setup — runs only on first launch or version upgrade.
     // Each `if (event.oldVersion < N)` block is idempotent and only runs
-    // when migrating from an older version, ensuring safe incremental upgrades.
+    // When migrating from an older version, ensuring safe incremental upgrades.
     req.onupgradeneeded = event => {
       const db  = event.target.result;
       const oldV = event.oldVersion;  // 0 = fresh install
@@ -166,7 +166,7 @@ export async function loadAllAssays() {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result || []);
     // Without these handlers the Promise would leak forever on an IDB error,
-    // causing the Saved Assays panel to hang with no feedback.
+    // Causing the Saved Assays panel to hang with no feedback.
     req.onerror   = () => reject(req.error);
     tx.onerror    = () => reject(tx.error);
   });
@@ -227,7 +227,7 @@ export async function hydrateAssay(assayId) {
       req.onerror   = () => reject(req.error);
     });
     // Sort chronologically — IDB getAll() returns records in insertion order, which
-    // may not match startedAt after aborted/retried transactions on some browsers.
+    // May not match startedAt after aborted/retried transactions on some browsers.
     trial.runs = runs.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   }
 
@@ -260,13 +260,13 @@ export async function deleteAssay(assayId) {
   // ── Phase 0: Resolve true ID type (string vs number) ───────────────────────────
   // Older versions may have used purely numeric IDs (like Date.now()).
   // DOM dataset attributes always cast these to strings, so we must
-  // check if a numeric version exists in the DB if the string fails.
+  // Check if a numeric version exists in the DB if the string fails.
   //
   // Note: this fallback block is intentionally duplicated from hydrateAssay()
-  // rather than extracted into a shared helper because both functions open their
-  // own transactions at different points. A shared async helper would require an
-  // extra round-trip to IDB and could open a transaction in a context where
-  // auto-commit has already fired in the caller.
+  // Rather than extracted into a shared helper because both functions open their
+  // Own transactions at different points. A shared async helper would require an
+  // Extra round-trip to IDB and could open a transaction in a context where
+  // Auto-commit has already fired in the caller.
   let trueAssayId = assayId;
   const assayExists = await new Promise((resolve, reject) => {
     const tx = db.transaction(STORES.ASSAYS, "readonly");
@@ -317,7 +317,7 @@ export async function deleteAssay(assayId) {
 
   // ── Phase 2: Delete everything in one atomic transaction ─────────────────
   // All requests are queued synchronously — no await inside this Promise so
-  // the transaction cannot auto-commit before every delete is registered.
+  // The transaction cannot auto-commit before every delete is registered.
   await new Promise((resolve, reject) => {
     const tx = db.transaction(
       [STORES.RUNS, STORES.TRIALS, STORES.ASSAYS],
@@ -359,7 +359,7 @@ export async function saveTrial(assayId, trial) {
   const tx = db.transaction(STORES.TRIALS, "readwrite");
   // Exclude the in-memory runs array — runs live in their own store (saveRun).
   // Spreading trial directly would write duplicate run data into the trials record,
-  // bloating IDB storage and potentially overwriting in-progress run state.
+  // Bloating IDB storage and potentially overwriting in-progress run state.
   const { runs: _runs, ...trialData } = trial;
   tx.objectStore(STORES.TRIALS).put({ ...trialData, assayId });
   return new Promise((resolve, reject) => {
@@ -387,9 +387,9 @@ export async function markTrialCompleted(_assayId, trialId) {
 
   req.onsuccess = () => {
     const trial = req.result;
-    // DB-1 fix: if the trial doesn't exist, abort the transaction so the caller
-    // receives a rejection instead of a silent no-op (tx.oncomplete would resolve
-    // even with no actual write, giving a false sense of success).
+    // If the trial doesn't exist, abort the transaction so the caller
+    // Receives a rejection instead of a silent no-op (tx.oncomplete would resolve
+    // Even with no actual write, giving a false sense of success).
     if (!trial) { tx.abort(); return; }
     trial.status  = "completed";
     trial.endedAt = Date.now();
@@ -423,7 +423,7 @@ export async function markTrialAbandoned(_assayId, trialId, reason = "App closed
 
   req.onsuccess = () => {
     const trial = req.result;
-    // DB-1 fix: abort if trial not found (same rationale as markTrialCompleted)
+    // Abort if trial not found (same rationale as markTrialCompleted)
     if (!trial) { tx.abort(); return; }
     trial.status          = "abandoned";
     trial.abandonedReason = reason;
@@ -631,11 +631,11 @@ export async function recoverCrashGuard() {
 
     const db = await openDB();
 
-    // BUG-G fix: the IDB spec auto-commits a readwrite transaction once there are no
-    // pending requests. Awaiting a Promise between .get() and .put() can flush the
-    // microtask queue, trigger auto-commit, and silently drop the write — especially
-    // on Safari. The safe pattern is to queue the .put() synchronously inside
-    // onsuccess, ensuring both requests share the same transaction lifetime.
+    // The IDB spec auto-commits a readwrite transaction once there are no
+    // Pending requests. Awaiting a Promise between .get() and .put() can flush the
+    // Microtask queue, trigger auto-commit, and silently drop the write — especially
+    // On Safari. The safe pattern is to queue the .put() synchronously inside
+    // Onsuccess, ensuring both requests share the same transaction lifetime.
     await new Promise((resolve, reject) => {
       const tx    = db.transaction(STORES.RUNS, "readwrite");
       const store = tx.objectStore(STORES.RUNS);
@@ -654,12 +654,12 @@ export async function recoverCrashGuard() {
         ) {
           const recovered = guard.values.length - (existing.values?.length ?? 0);
           existing.values = guard.values;
-          store.put(existing);  // queued synchronously — transaction cannot auto-commit before this
+          store.put(existing);  // Queued synchronously — transaction cannot auto-commit before this
           console.log(`[CrashGuard] Recovered ${recovered} value(s) for run ${guard.runId}`);
         }
       };
     });
   } catch {
-    // sessionStorage or IDB unavailable (e.g. Private Browsing) — silent no-op
+    // SessionStorage or IDB unavailable (e.g. Private Browsing) — silent no-op
   }
 }

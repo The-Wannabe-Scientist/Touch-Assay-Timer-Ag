@@ -22,6 +22,13 @@
 </head>
     
 <body>
+  <!-- Error Boundary Overlay -->
+  <div id="errorBoundary" class="error-boundary hidden" style="position: fixed; inset: 0; background: var(--bg-card); z-index: 9999; display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 2rem;">
+    <h2 style="color: var(--color-danger); margin-bottom: 1rem;">Fatal Error</h2>
+    <p style="margin-bottom: 2rem; color: var(--text-main);">An unexpected error occurred during the assay. Please download your recovery data below to avoid data loss.</p>
+    <button id="downloadRecoveryBtn" class="primary" style="padding: 1rem 2rem; font-size: 1.2rem;">Download Recovery Data (JSON)</button>
+    <button id="reloadAppBtn" class="secondary" style="margin-top: 1rem; padding: 0.5rem 1rem;">Reload App</button>
+  </div>
   <noscript>
     <div class="noscript-warning">
       <strong>JavaScript is required.</strong> Please enable JavaScript to use the Touch Assay Timer.
@@ -176,7 +183,9 @@
           <legend>Stimulation</legend>
           <div class="input-row">
             <div class="input-group">
-              <label for="ISI">Inter-stimulus Interval (s)</label>
+              <label for="ISI">
+                Inter-stimulus Interval (s)
+              </label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="ISI" data-delta="-0.1" aria-label="Decrease ISI">−</button>
                 <input type="number" id="ISI" min="0.1" step="0.1" value="1" required inputmode="decimal">
@@ -197,7 +206,9 @@
         
         <fieldset>
           <legend>Analysis</legend>
-          <label for="binSize">Stimulations per bin (Bin Size)</label>
+          <label for="binSize">
+            Stimulations per bin (Bin Size)
+          </label>
           <div class="stepper-wrapper">
             <button type="button" class="stepper-btn" data-target="binSize" data-delta="-1" aria-label="Decrease bin size">−</button>
             <input type="number" id="binSize" min="1" step="1" value="10" required inputmode="numeric">
@@ -243,7 +254,7 @@
         
         <button id="tapButton" type="button">
           <span id="tapButtonLabel">Start Timer</span>
-          <!-- warmup countdown lives here; shown only during warmup via JS -->
+          <!-- Warmup countdown lives here; shown only during warmup via JS -->
           <span id="warmupDisplay" class="tap-warmup-overlay" hidden aria-live="assertive" aria-atomic="true">
             <span class="warmup-label">Get Ready</span>
             <span class="warmup-number" id="warmupNumber"></span>
@@ -450,7 +461,7 @@
             <span class="settings-toggle-title">Enable Warmup</span>
             <span class="settings-toggle-sub">Plays a countdown before each run starts</span>
           </span>
-          <!-- iOS-style switch built purely in CSS — the real checkbox is hidden but keyboard-accessible -->
+          <!-- IOS-style switch built purely in CSS — the real checkbox is hidden but keyboard-accessible -->
           <span class="settings-switch" aria-hidden="true">
             <input type="checkbox" id="warmupToggle" checked class="settings-switch-input">
             <span class="settings-switch-track"><span class="settings-switch-thumb"></span></span>
@@ -495,7 +506,10 @@
             </svg>
             Test Vibration
           </button>
-          <span class="armband-test-hint">Sends a single tap to verify the armband is responding.</span>
+          <div class="armband-test-hint">
+            Sends a single tap to verify the armband is responding.
+            <div id="armbandLatencyResult" style="color: var(--color-primary); font-weight: 600; margin-top: 0.25rem;"></div>
+          </div>
         </div>
       </fieldset>
 
@@ -645,9 +659,9 @@
   <script>
   // Chip / tag input for the Genotypes field.
   // Wraps the visible text input and hidden comma-list input so users can type
-  // genotype labels one at a time. Each label becomes a removable chip tag.
+  // Genotype labels one at a time. Each label becomes a removable chip tag.
   // The hidden `#genotypes` input always holds the canonical comma-separated list
-  // that main.js reads on form submit.
+  // That main.js reads on form submit.
   (function () {
     const wrapper    = document.getElementById('chipInputWrapper');
     const chipList   = document.getElementById('chipList');
@@ -666,11 +680,24 @@
     function addChip(raw) {
       const val = raw.replace(/,/g, '').trim();
       if (!val) return;
-      if (getValues().includes(val)) return; // no duplicates
+      if (getValues().includes(val)) return; // No duplicates
 
       const chip = document.createElement('span');
       chip.className = 'chip';
       chip.dataset.value = val;
+      chip.draggable = true;
+
+      // Handle drag and drop reordering
+      chip.addEventListener('dragstart', function(e) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', val);
+        setTimeout(() => chip.classList.add('dragging'), 0);
+      });
+      chip.addEventListener('dragend', function() {
+        chip.classList.remove('dragging');
+        syncHidden();
+        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+      });
 
       const label = document.createElement('span');
       label.className = 'chip-label';
@@ -685,9 +712,9 @@
         chip.remove();
         syncHidden();
         // Notify main.js's scheduleDraftSave listener so the updated genotype list
-        // is persisted to localStorage. Without this dispatch, removing a chip here
-        // only updates the hidden input value in memory — the draft is never written,
-        // so the removed chip reappears on the next page load.
+        // Is persisted to localStorage. Without this dispatch, removing a chip here
+        // Only updates the hidden input value in memory — the draft is never written,
+        // So the removed chip reappears on the next page load.
         hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
       });
 
@@ -728,14 +755,63 @@
       if (textInput.value.trim()) { addChip(textInput.value); textInput.value = ''; }
     });
 
-    wrapper.addEventListener('click', function () { textInput.focus(); });
+    wrapper.addEventListener('click', function (e) { 
+      if (e.target === wrapper || e.target === chipList) {
+        textInput.focus(); 
+      }
+    });
+
+    // Setup chipList for drop
+    chipList.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const draggingChip = chipList.querySelector('.dragging');
+      if (!draggingChip) return;
+      const afterElement = getDragAfterElement(chipList, e.clientX, e.clientY);
+      if (afterElement == null) {
+        chipList.appendChild(draggingChip);
+      } else {
+        chipList.insertBefore(draggingChip, afterElement);
+      }
+    });
+
+    function getDragAfterElement(container, x, y) {
+      const draggableElements = [...container.querySelectorAll('.chip:not(.dragging)')];
+      return draggableElements.reduce((closest, child) => {
+        const box = child.getBoundingClientRect();
+        // Since chips wrap, calculate distance based on both x and y
+        const distanceX = x - (box.left + box.width / 2);
+        const distanceY = y - (box.top + box.height / 2);
+        const distance = Math.sqrt(distanceX * distanceX + distanceY * distanceY);
+        
+        // Return child if we are to the left/above its center
+        if (distanceX < 0 && Math.abs(distanceY) < box.height) {
+          if (distance < closest.distance) {
+            return { offset: distance, element: child, distance: distance };
+          }
+        }
+        return closest;
+      // BUG-U5 fix: explicitly define element: null so we return null instead of undefined
+      // when dragging past the very last chip in the flex container.
+      }, { distance: Number.POSITIVE_INFINITY, element: null }).element;
+    }
+
+    // BUG-J fix: Expose chip manipulation functions to main.js so restoreSetupDraft()
+    // does not need to duplicate DOM creation and hidden input synchronization logic.
+    window.ChipInput = {
+      addChip,
+      clearChips: () => {
+        chipList.innerHTML = "";
+        syncHidden();
+      }
+    };
   })();
 
   // Stepper buttons (− / +) for numeric inputs.
   // Each button carries `data-target` (the ID of the linked <input>) and
   // `data-delta` (the signed amount to add on each click, e.g. +1 or -0.1).
   // After updating the value the handler fires both `input` and `change`
-  // events so downstream listeners (e.g. bin-warning recalculation) respond.
+  // Events so downstream listeners (e.g. bin-warning recalculation) respond.
   document.querySelectorAll('.stepper-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var target = document.getElementById(btn.dataset.target);
@@ -753,7 +829,7 @@
 
   // Theme toggle button in the header (quick-access light/dark switch).
   // Syncs with both the Settings-screen radio group and the OS prefers-color-scheme
-  // media query on first load. Persists the choice to localStorage under the key
+  // Media query on first load. Persists the choice to localStorage under the key
   // 'touchAssayTheme' — the same key main.js reads in initializeSettings().
   (function () {
     var btn      = document.getElementById('themeToggleBtn');
@@ -783,10 +859,10 @@
       applyTheme(next);
       // Use the same localStorage key as main.js
       try { localStorage.setItem('touchAssayTheme', next); } catch(e) {}
-      // Bug 2: Do NOT dispatch a synthetic 'change' event on the radio here.
-      // applyTheme() already sets data-theme, meta theme-color, and radio.checked.
+      // Do NOT dispatch a synthetic 'change' event on the radio here.
+      // ApplyTheme() already sets data-theme, meta theme-color, and radio.checked.
       // Dispatching 'change' would additionally trigger the main.js Settings radio
-      // listener, causing duplicate localStorage writes and DOM mutations.
+      // Listener, causing duplicate localStorage writes and DOM mutations.
     });
 
     // Keep icon in sync when Settings radios are changed by the user
@@ -809,7 +885,40 @@
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("service-worker.js")
-          .then(() => console.log("Service Worker registered"))
+          .then(registration => {
+            console.log("Service Worker registered");
+            registration.addEventListener('updatefound', () => {
+              const newWorker = registration.installing;
+              if (!newWorker) return;
+              newWorker.addEventListener('statechange', () => {
+                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                  // BUG-U4 fix: guard the reload action so it cannot fire mid-run.
+                  // document.body carries the CSS state class (e.g. "state-running")
+                  // set by setState() in main.js — no import needed here.
+                  const reloadAction = () => {
+                    if (document.body.classList.contains("state-running")) {
+                      // Can't use window.showToast here safely (separate call stack),
+                      // so fall back to a non-blocking console warning. The user's
+                      // active run is protected; they will see the update toast again
+                      // after the run ends and the page is naturally reloaded.
+                      console.info("[SW] Update ready but run is active — reload deferred.");
+                      return;
+                    }
+                    window.location.reload();
+                  };
+
+                  if (window.showToast) {
+                    window.showToast("Update available. Reload to apply.", "info", 10000, "Reload", reloadAction);
+                  } else {
+                    // showToast not ready yet (module still loading) — retry once it is.
+                    window.addEventListener("toastReady", () => {
+                      window.showToast("Update available. Reload to apply.", "info", 10000, "Reload", reloadAction);
+                    }, { once: true });
+                  }
+                }
+              });
+            });
+          })
           .catch(err => console.error("SW registration failed:", err));
       });
     }

@@ -224,7 +224,10 @@ body {
 #overflowMenu {
   position: absolute;
   top: calc(100% + 4px);
-  right: 0; /* Aligned exactly with the right edge of .header-actions */
+  right: 0; /* Aligned with right edge of .header-actions */
+  /* BUG-H fix: prevent clipping on sub-320px viewports. max() keeps the menu
+     at least 8px from the left edge of the screen when the header is narrow. */
+  max-width: calc(100vw - 16px);
   background: var(--bg-card);
   border: 1px solid var(--border-base);
   border-radius: 10px;
@@ -498,7 +501,7 @@ select option:disabled {
 }
 
 .chip-list {
-  display: contents; /* chips flow inline with the text input */
+  display: contents; /* Chips flow inline with the text input */
 }
 
 .chip {
@@ -593,7 +596,7 @@ select option:disabled {
 .stepper-btn:hover { background: var(--stepper-btn-hover); color: var(--text-main); }
 .stepper-btn:active { background: var(--border-input); }
 
-/* number input inside stepper: hide native spin arrows, fill remaining width */
+/* Number input inside stepper: hide native spin arrows, fill remaining width */
 .stepper-wrapper input[type="number"] {
   flex: 1;
   border: none;
@@ -759,7 +762,13 @@ button.danger:active {
 
 #visualMetronomeBar {
   height: 100%;
-  width: 0%;
+  width: 100%;
+  transform-origin: left;
+  transform: scaleX(0);
+  /* BUG-U6 fix: promote to its own compositor layer so the first rAF frame
+     is already GPU-composited — prevents a visible stutter on mid-tier devices
+     when a new stimulus interval starts. */
+  will-change: transform;
   background: var(--color-primary);
   transition: box-shadow 0.1s ease;
 }
@@ -813,6 +822,10 @@ button.danger:active {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+
+  /* BUG-G fix: merged here from the duplicate #tapButton block below (line ~894).
+     Needed to anchor the .tap-warmup-overlay which is position:absolute. */
+  position: relative;
 }
 
 /* Desktop: tap button grows larger since there is more vertical real-estate */
@@ -865,7 +878,7 @@ button.danger:active {
 
 /* The tap button is non-interactive but fully visible during warmup */
 #tapButton.warming-up {
-  pointer-events: none;   /* block taps while counting down */
+  pointer-events: none;   /* Block taps while counting down */
   cursor: default;
   /* Pulsing indigo ring to signal "get ready" */
   animation: warmup-ring 1s ease-in-out infinite;
@@ -886,17 +899,14 @@ button.danger:active {
   100% { box-shadow: 0 8px 20px rgba(0,0,0,0.15), 0 0 0 0   rgba(99, 102, 241, 0); }
 }
 
-/* The overlay span covers the whole button and shows the countdown number.
-   Because #tapButton uses display:flex + position:relative (added below),
-   the overlay is absolutely positioned to fill it entirely. */
-#tapButton {
-  position: relative;   /* anchor for the absolute overlay */
-}
+/* BUG-G fix: position:relative was a separate #tapButton block here. It has
+   been merged into the primary #tapButton rule above. Block removed. */
+
 
 .tap-warmup-overlay {
   position: absolute;
   inset: 0;
-  z-index: 1;            /* must be above the button's own text node */
+  z-index: 1;            /* Must be above the button's own text node */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -943,11 +953,11 @@ button.danger:active {
   font-weight: 600;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
-  /* Bug 7 fix: removed margin-bottom; #tapZone gap handles spacing uniformly */
+  /* Removed margin-bottom; #tapZone gap handles spacing uniformly */
 }
 
 #assayProgress {
-  min-height: 80px;          /* Bug 4 fix: never collapses to 0 on short screens */
+  min-height: 80px;          /* Never collapses to 0 on short screens */
   max-height: 30vh;
   overflow: auto;
   border-radius: 10px;
@@ -1061,7 +1071,7 @@ th {
   gap: 0.75rem;
 }
 .assay-select-checkbox {
-  margin-top: 0.2rem !important; /* aligns with text visually */
+  margin-top: 0.2rem !important; /* Aligns with text visually */
   flex-shrink: 0;
 }
 .assay-info {
@@ -1365,13 +1375,13 @@ body.state-running #visualMetronomeContainer {
   flex-direction: column;
   gap: 0.6rem;
   z-index: 9999;
-  pointer-events: none;  /* container transparent to pointer events */
+  pointer-events: none;  /* Container transparent to pointer events */
 }
 
 /* Individual toast */
 .toast {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr max-content auto;
   align-items: start;
   gap: 0 0.65rem;
   padding: 0.85rem 0.9rem 0.65rem;
@@ -1446,6 +1456,22 @@ body.state-running #visualMetronomeContainer {
   color: var(--text-main);
   padding-top: 0.05rem;
   word-break: break-word;
+}
+
+.toast__action-btn {
+  margin-left: 0.2rem;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  transition: opacity 0.2s;
+}
+.toast__action-btn:hover {
+  opacity: 0.7;
 }
 
 /* Close button */
@@ -1881,7 +1907,7 @@ body.state-running #visualMetronomeContainer {
   color: var(--text-muted);
 }
 
-/* iOS-style switch */
+/* IOS-style switch */
 .settings-switch {
   flex-shrink: 0;
   display: inline-flex;
@@ -2011,7 +2037,7 @@ body.state-running #visualMetronomeContainer {
 /* Shared banner base */
 #runBanner,
 #idbWarningBanner {
-  display: none;  /* shown via JS / body class */
+  display: none;  /* Shown via JS / body class */
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
@@ -2611,7 +2637,7 @@ body.state-running {
 }
 
 /* ── Toggle progress: now inside assay header flex row ───────────────── */
-/* Bug 1 fix: align-self removed — #assayScreen>header's align-items:center
+/* Align-self removed — #assayScreen>header's align-items:center
    handles vertical alignment now that the button lives in the header. */
 #toggleProgress {
   font-size: 0.88rem;
@@ -2766,7 +2792,7 @@ body.state-running {
   color: var(--text-muted);
 }
 
-/* FW-5 FIX: Disconnect button (shown only when connected) */
+/* Disconnect button (shown only when connected) */
 .armband-disconnect-btn {
   flex-shrink: 0;
   padding: 0.45rem 1.1rem;
@@ -2838,7 +2864,7 @@ body.state-running {
 
 /* ── Header icon — connected state ──────────────────────────────────── */
 .header-icon-btn.armband-connected {
-  color: #4ade80;   /* green tint that reads well on the dark header */
+  color: #4ade80;   /* Green tint that reads well on the dark header */
   border-color: rgba(74, 222, 128, 0.35);
   background: rgba(74, 222, 128, 0.08);
 }
@@ -2853,7 +2879,7 @@ body.state-running {
 /* Applied while the BLE picker is open / GATT handshake is in flight.    */
 /* Uses opacity pulse only — does NOT touch textContent so the SVG survives. */
 .header-icon-btn.armband-connecting {
-  color: #60a5fa;          /* blue tint for "pending" */
+  color: #60a5fa;          /* Blue tint for "pending" */
   border-color: rgba(96, 165, 250, 0.35);
   background: rgba(96, 165, 250, 0.08);
   animation: bt-connecting-pulse 1.2s ease-in-out infinite;
@@ -2885,11 +2911,11 @@ body.state-running {
 }
 
 .armband-battery-level.armband-batt-low {
-  color: #fbbf24;   /* amber — overrides parent green */
+  color: #fbbf24;   /* Amber — overrides parent green */
 }
 
 .armband-battery-level.armband-batt-critical {
-  color: #f87171;   /* red — overrides parent green */
+  color: #f87171;   /* Red — overrides parent green */
   animation: batt-pulse 1.4s ease-in-out infinite;
 }
 
@@ -2911,7 +2937,7 @@ body.state-running {
   flex: 1;
   background: var(--color-primary);
   color: white;
-  border: none;   /* Bug 5 fix: override the base button border that shows on dark mode */
+  border: none;   /* Override the base button border that shows on dark mode */
 }
 #assayScreen > footer #finishTrial:not(:disabled):hover {
   background: var(--color-primary-hover);
@@ -2983,7 +3009,7 @@ p.instruction {
 }
 
 /* #7: Toggle progress pill button with eye icon */
-/* Bug 1 fix: removed align-self:flex-start — button now lives inside the
+/* Removed align-self:flex-start — button now lives inside the
    assay header flex row and inherits align-items:center from the parent. */
 #toggleProgress {
   display: inline-flex;
@@ -3064,4 +3090,21 @@ p.instruction {
 .guidelines-warning-title svg {
   flex-shrink: 0;
   color: var(--text-warning);
+}
+
+/* =====================================================================
+   8. DRAGGABLE CHIPS
+   ===================================================================== */
+
+/* Draggable Chips */
+.chip[draggable="true"] {
+  cursor: grab;
+}
+.chip[draggable="true"]:active {
+  cursor: grabbing;
+}
+.chip.dragging {
+  opacity: 0.5;
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
 }

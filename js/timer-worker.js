@@ -47,7 +47,7 @@ let generation = 0;
 const channel = new MessageChannel();
 
 // Explicitly start port1 so it receives messages even if a future refactor
-// switches from .onmessage assignment to .addEventListener (W-1 note).
+// Switches from .onmessage assignment to .addEventListener (W-1 note).
 channel.port1.start();
 
 /**
@@ -67,7 +67,7 @@ channel.port1.onmessage = () => {
   if (!running) return;
   postMessage("tick");
   // Capture current generation so the callback can self-invalidate if a
-  // stop→start pair occurs before this setTimeout fires (W-2 fix).
+  // Stop→start pair occurs before this setTimeout fires (W-2 fix).
   const gen = generation;
   setTimeout(() => {
     if (gen === generation) channel.port2.postMessage(null);
@@ -84,6 +84,6 @@ self.onmessage = function (e) {
   } else if (e.data === "stop") {
     running = false;
     generation++;                         // Invalidate the pending setTimeout so the loop
-                                          // truly stops rather than firing one last time
+                                          // Truly stops rather than firing one last time
   }
 };

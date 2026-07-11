@@ -69,7 +69,7 @@ export function createAssay({ assayName, isi, stimCount, binSize, temperature, h
     temperature,
     humidity,
     genotypes,
-    trials: []           // populated progressively as trials are created
+    trials: []           // Populated progressively as trials are created
   };
 }
 
@@ -89,7 +89,7 @@ export function createTrial(trialIndex) {
     abandonedReason: null,
     startedAt:       Date.now(),
     endedAt:         null,
-    runs:            []         // populated as runs are started within this trial
+    runs:            []         // Populated as runs are started within this trial
   };
 }
 
@@ -109,11 +109,11 @@ export function createRun({ genotype, animalIndex, expectedStimCount }) {
     genotype,
     animalIndex,
     expectedStimCount,
-    values:                    [],    // filled during the run: 1 = responded, 0 = did not respond
+    values:                    [],    // Filled during the run: 1 = responded, 0 = did not respond
     status:                    "active",  // "active" | "completed" | "stoppedEarly" | "abandoned"
-    eligibleForAnalysis:       null,  // set to true/false on run completion
-    ineligibleReason:          null,  // human-readable reason when eligibleForAnalysis is false
-    partialBinWarning:         null,  // set if stimulus count is not an exact multiple of binSize
+    eligibleForAnalysis:       null,  // Set to true/false on run completion
+    ineligibleReason:          null,  // Human-readable reason when eligibleForAnalysis is false
+    partialBinWarning:         null,  // Set if stimulus count is not an exact multiple of binSize
     touchIndexExcluded:        false,
     touchIndexExclusionReason: null,
     startedAt:                 Date.now(),

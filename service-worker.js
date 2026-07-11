@@ -1,13 +1,13 @@
-// Bug 12: bump this version string on EVERY deployment so existing PWA installs
-// pick up updated JS/CSS on the next page load instead of serving stale cached files.
+// Bump this version string on EVERY deployment so existing PWA installs
+// Pick up updated JS/CSS on the next page load instead of serving stale cached files.
 // The activate handler below automatically deletes all caches whose name does not
-// match CACHE_NAME, which forces clients to re-fetch all assets after an update.
-const CACHE_NAME = "touch-assay-cache-v2.0.0.3.5";
+// Match CACHE_NAME, which forces clients to re-fetch all assets after an update.
+const CACHE_NAME = "touch-assay-cache-v2.0.0.3.7";
 
 // Ensure paths match your actual directory structure!
-// Bug 12: removed "./js/logger.js" — that file was deleted in a prior refactor
-// but remained here, causing SW install failures (network error for a 404 response)
-// on browsers that enforce addAll() atomicity (Chrome, Firefox).
+// Removed "./js/logger.js" — that file was deleted in a prior refactor
+// But remained here, causing SW install failures (network error for a 404 response)
+// On browsers that enforce addAll() atomicity (Chrome, Firefox).
 const ASSETS_TO_CACHE = [
   "./",
   "./index.html",
@@ -26,24 +26,24 @@ const ASSETS_TO_CACHE = [
   "./icon-512.png"
 ];
 
-// Bug 1: Cross-origin CDN URL separated from local assets.
-// cache.addAll() uses no-cors for cross-origin URLs, producing opaque responses
+// Cross-origin CDN URL separated from local assets.
+// Cache.addAll() uses no-cors for cross-origin URLs, producing opaque responses
 // (status 0) that Chrome rejects. Instead we fetch with mode: 'cors' and
-// cache.put() explicitly, wrapped in try/catch so SW install still succeeds
-// if the CORS fetch fails (the lib will just be fetched at runtime).
+// Cache.put() explicitly, wrapped in try/catch so SW install still succeeds
+// If the CORS fetch fails (the lib will just be fetched at runtime).
 const CDN_URLS = [
   "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"
 ];
 
 // 1. INSTALL
 self.addEventListener("install", (event) => {
-  // Bug 25: skipWaiting() is now chained into waitUntil() so the SW
-  // does not activate before caching completes.
+  // SkipWaiting() is now chained into waitUntil() so the SW
+  // Does not activate before caching completes.
   const cachePromise = caches.open(CACHE_NAME).then(async (cache) => {
     // Cache local assets atomically
     await cache.addAll(ASSETS_TO_CACHE);
 
-    // Bug 1: Cache CDN URLs individually with CORS; failures are non-fatal
+    // Cache CDN URLs individually with CORS; failures are non-fatal
     await Promise.all(
       CDN_URLS.map(async (url) => {
         try {
@@ -84,17 +84,17 @@ self.addEventListener("fetch", (event) => {
       // The network fetch that will update the cache in the background
       const fetchPromise = fetch(event.request).then((networkResponse) => {
         // Cache only successful same-origin responses; skip opaque (cross-origin)
-        // responses to avoid inflated storage costs (~7 MB padding per entry)
+        // Responses to avoid inflated storage costs (~7 MB padding per entry)
         // NOTE: Cross-origin resources (e.g. Google Fonts) are cached during install
-        // but never revalidated here — this is intentional. Fonts are immutable CDN
-        // assets and permanent caching is the accepted trade-off. (C5)
+        // But never revalidated here — this is intentional. Fonts are immutable CDN
+        // Assets and permanent caching is the accepted trade-off. (C5)
         if (networkResponse && networkResponse.status === 200) {
           caches.open(CACHE_NAME).then((cache) => {
             cache.put(event.request, networkResponse.clone());
           });
         }
         return networkResponse;
-      }).catch(() => cachedResponse || new Response('Offline', { status: 503, statusText: 'Service Unavailable' }));  // Bug 13: return 503 when both cache miss and network fail
+      }).catch(() => cachedResponse || new Response('Offline', { status: 503, statusText: 'Service Unavailable' }));  // Return 503 when both cache miss and network fail
 
       // Return cached response if available, otherwise hit the network
       return cachedResponse || fetchPromise;

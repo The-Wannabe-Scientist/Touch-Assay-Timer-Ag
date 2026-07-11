@@ -50,7 +50,7 @@ export function validateInputs(values) {
       errors.push("Genotype labels must not be empty.");
     }
     // U-2 fix: reject duplicate genotype labels — duplicates corrupt export column headers
-    // and cause summary statistics to be computed from a merged pool of two genotypes.
+    // And cause summary statistics to be computed from a merged pool of two genotypes.
     if (new Set(values.genotypes.map(g => g.trim())).size !== values.genotypes.length) {
       errors.push("Genotype labels must be unique.");
     }
@@ -60,7 +60,7 @@ export function validateInputs(values) {
     errors.push("Inter-stimulus interval (ISI) must be greater than zero.");
   } else if (values.isi < 0.5) {
     // Non-blocking advisory — very short ISIs may be below reliable scheduling
-    // resolution on slow or throttled devices, risking silent data inaccuracy.
+    // Resolution on slow or throttled devices, risking silent data inaccuracy.
     warnings.push(
       `ISI of ${values.isi}s is very short — timing accuracy may be reduced on this device. ` +
       `Consider using ≥0.5s for reliable results.`
@@ -75,16 +75,16 @@ export function validateInputs(values) {
     errors.push("Bin size must be greater than zero.");
   }
 
-  // BUG-8 fix: if binSize > stimCount, binRunValues() produces an empty array
+  // If binSize > stimCount, binRunValues() produces an empty array
   // (all values are dropped as a trailing partial bin) causing completely blank
-  // columns in the export with no user-facing explanation.
+  // Columns in the export with no user-facing explanation.
   if (values.binSize > 0 && values.stimCount > 0 && values.binSize > values.stimCount) {
     errors.push(`Bin size (${values.binSize}) cannot be larger than the total stimulus count (${values.stimCount}).`);
   }
 
-  // BUG-B fix: temperature and humidity are optional — main.js maps an empty field
-  // to null, which is a valid "not recorded" state. Only validate when a value is
-  // actually provided (non-null), and reject only genuinely bad values (NaN, etc.).
+  // Temperature and humidity are optional — main.js maps an empty field
+  // To null, which is a valid "not recorded" state. Only validate when a value is
+  // Actually provided (non-null), and reject only genuinely bad values (NaN, etc.).
   if (values.temperature != null && isNaN(Number(values.temperature))) {
     errors.push("Temperature must be a valid number.");
   }
@@ -196,7 +196,7 @@ export function binRunValues(values, binSize, options = {}) {
 export function computeTouchIndexBins(binnedPercentages) {
   // U-5 fix: explicitly guard the empty-array case before reading index 0.
   // Previously this relied on binnedPercentages[0] === undefined being == null,
-  // which is correct but fragile — a future strict-equality change would break it.
+  // Which is correct but fragile — a future strict-equality change would break it.
   if (!binnedPercentages || binnedPercentages.length === 0) return null;
 
   const baseline = binnedPercentages[0];
@@ -277,19 +277,19 @@ export function collectPooledRuns(assay, options = {}) {
  */
 export function collectTouchIndexExclusions(assay) {
   // Only scan completed trials — abandoned or still-active trials must not
-  // produce spurious exclusion rows in the export output.
+  // Produce spurious exclusion rows in the export output.
   return assay.trials
     .filter(t => t.status === "completed")
     .flatMap(trial =>
       trial.runs
         // Only eligible runs can be TI-excluded. Ineligible runs (stopped early,
-        // abandoned) have empty or partial values[] — their binned result is []
-        // which causes computeTouchIndexBins to return null, producing spurious
-        // exclusion rows in the export sheet.
+        // Abandoned) have empty or partial values[] — their binned result is []
+        // Which causes computeTouchIndexBins to return null, producing spurious
+        // Exclusion rows in the export sheet.
         .filter(run => run.eligibleForAnalysis)
         .filter(run => {
           // A run is excluded if its Touch Index cannot be computed —
-          // i.e. computeTouchIndexBins returns null (baseline bin = 0).
+          // I.e. computeTouchIndexBins returns null (baseline bin = 0).
           const binned = binRunValues(run.values, assay.binSize);
           return computeTouchIndexBins(binned) === null;
         })

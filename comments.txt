@@ -1,0 +1,3032 @@
+--- service-worker.js ---
+1: // Bug 12: bump this version string on EVERY deployment so existing PWA installs
+2: // pick up updated JS/CSS on the next page load instead of serving stale cached files.
+3: // The activate handler below automatically deletes all caches whose name does not
+4: // match CACHE_NAME, which forces clients to re-fetch all assets after an update.
+7: // Ensure paths match your actual directory structure!
+8: // Bug 12: removed "./js/logger.js" — that file was deleted in a prior refactor
+9: // but remained here, causing SW install failures (network error for a 404 response)
+10: // on browsers that enforce addAll() atomicity (Chrome, Firefox).
+29: // Bug 1: Cross-origin CDN URL separated from local assets.
+30: // cache.addAll() uses no-cors for cross-origin URLs, producing opaque responses
+31: // (status 0) that Chrome rejects. Instead we fetch with mode: 'cors' and
+32: // cache.put() explicitly, wrapped in try/catch so SW install still succeeds
+33: // if the CORS fetch fails (the lib will just be fetched at runtime).
+38: // 1. INSTALL
+40: // Bug 25: skipWaiting() is now chained into waitUntil() so the SW
+41: // does not activate before caching completes.
+43: // Cache local assets atomically
+46: // Bug 1: Cache CDN URLs individually with CORS; failures are non-fatal
+55: // CORS fetch failed — the lib will be fetched at runtime instead
+65: // 2. ACTIVATE
+74: }).then(() => self.clients.claim())  // H6: chain into waitUntil so claim() fires after old caches are purged
+78: // 3. FETCH: Stale-While-Revalidate Strategy
+84: // The network fetch that will update the cache in the background
+86: // Cache only successful same-origin responses; skip opaque (cross-origin)
+87: // responses to avoid inflated storage costs (~7 MB padding per entry)
+88: // NOTE: Cross-origin resources (e.g. Google Fonts) are cached during install
+89: // but never revalidated here — this is intentional. Fonts are immutable CDN
+90: // assets and permanent caching is the accepted trade-off. (C5)
+97: }).catch(() => cachedResponse || new Response('Offline', { status: 503, statusText: 'Service Unavailable' }));  // Bug 13: return 503 when both cache miss and network fail
+99: // Return cached response if available, otherwise hit the network
+--- js/export.js ---
+1: /**
+2: * @file export.js
+3: * @module Export
+4: * @description Formats nested assay data into 2D arrays for Excel export and
+5: * HTML preview, plus a zero-dependency CSV fallback.
+6: *
+7: * Each "2D array" is an array of rows, where each row is an array of cell values.
+8: * These are passed to SheetJS (XLSX) for Excel, rendered to <table> HTML for
+9: * the preview modal, or serialised to comma-separated text for CSV.
+10: *
+11: * Sheet layout for every trial/pooled section:
+12: *   1. Raw stimulus values    (one column per run, one row per stimulus)
+13: *                              — includes Partial Bin Warning (#4) and Ineligible Reason (#5)
+14: *   2. Binned percentages     (% response per bin) + mean / SEM / N summary (#2)
+15: *   3. Touch Index (binned)   (normalised against bin 1 baseline)
+16: *   4. Touch Index (analysed) (mean / SEM / N across animals per genotype) (#2)
+17: *
+18: * All three master export functions (Excel, CSV, HTML preview) share a single
+19: * data-building pass via buildAllSections() (#12).  For pooled configs a shared
+20: * run-binning cache avoids redundant computation (#11).
+21: *
+22: * Depends on SheetJS (XLSX) being loaded globally for Excel export.
+23: * The CSV fallback has no external dependencies.
+24: */
+35: /* ==========================================================================
+36: Constants
+37: ========================================================================== */
+39: /**
+40: * Human-readable labels for run status values.
+41: * Used in the "Run Status" header row of every raw data table.
+42: * @type {Object.<string, string>}
+43: */
+51: /* ==========================================================================
+52: XSS Guard
+53: ========================================================================== */
+55: // escapeHTML is imported from utils.js — single shared implementation (BUG-10 fix).
+58: /* ==========================================================================
+59: Internal Helpers
+60: ========================================================================== */
+62: /**
+63: * Groups a flat list of run objects by genotype and sorts them for consistent
+64: * column ordering across all exported tables.
+65: *
+66: * For pooled (cross-trial) views, runs are sorted by trial index first, then
+67: * animal index, and each run is assigned a `globalAnimalIndex` for labelling.
+68: *
+69: * For per-trial views, runs are sorted by animal index only.
+70: *
+71: * @param {Object[]} runs      - Flat array of run objects.
+72: * @param {string[]} genotypes - Ordered list of genotype labels (defines column order).
+73: * @param {boolean}  isPooled  - Whether this is a pooled cross-trial view.
+74: * @returns {Object.<string, Object[]>} Map of genotype → sorted run array.
+75: */
+77: // Initialise empty arrays for every declared genotype
+81: // Assign each run to its genotype bucket
+86: // Sort and (for pooled views) assign a sequential global animal index
+101: /**
+102: * Calculates the arithmetic mean and Standard Error of the Mean (SEM)
+103: * for an array of numbers.
+104: *
+105: * Returns empty strings when the input is empty or undefined, so that
+106: * spreadsheet cells show blank rather than NaN.
+107: *
+108: * @param {number[]} values - Numeric values (e.g. binned percentages for one genotype).
+109: * @returns {{ mean: number|string, sem: number|string }}
+110: */
+117: // Bug 10: SEM is undefined for a single observation — return blank so the
+118: // exported cell shows nothing rather than 0 (which implies zero spread).
+121: // EX-1 fix: use sample variance (Bessel's correction, divide by n-1) instead of
+122: // population variance (divide by n). Population variance systematically underestimates
+123: // SEM for small n, which is the typical case in biological experiments.
+130: /**
+131: * Pre-computes binned percentages and Touch Index arrays for a flat list of
+132: * runs, storing results in a Map keyed by run object.
+133: *
+134: * Used by buildAllSections() to share a single binning pass across all pooled
+135: * sub-tables for the same config, avoiding redundant computation (#11).
+136: *
+137: * @param {Object[]} runs    - Flat array of run objects.
+138: * @param {number}   binSize - Number of stimuli per bin.
+139: * @returns {Map<Object, { binned: number[], ti: number[]|null }>}
+140: */
+151: /* ==========================================================================
+152: Layout & Formatting Helpers
+153: ========================================================================== */
+155: /**
+156: * Applies column widths and text-wrap cell styles to a SheetJS worksheet.
+157: * The first column (labels) gets extra width; all others get equal narrower width.
+158: *
+159: * @param {Object}  sheet - A SheetJS worksheet object (mutated in place).
+160: * @param {any[][]} data  - The 2D array that was used to create the sheet.
+161: */
+163: // Bug 5: data may be empty (e.g. a trial with no runs). Guard before
+164: // accessing data[0] to avoid "Cannot read properties of undefined (reading 'map')".
+167: // Set column widths
+172: // Enable word-wrap on every cell
+174: if (addr[0] === "!") return;  // Skip SheetJS metadata keys
+181: /**
+182: * Builds the assay-level metadata 2D array (shown on the first Excel sheet
+183: * and at the top of the HTML preview).
+184: *
+185: * Includes both createdAt and lastModifiedAt (#6).
+186: *
+187: * @param {Object} assay - The assay configuration object.
+188: * @returns {any[][]} Two-column table: [parameter, value].
+189: */
+205: /**
+206: * Renders a 2D data array as an HTML table for the preview modal.
+207: * The first row and any row whose first cell is "Bin" or "Genotype" are
+208: * rendered as <th> header cells.
+209: *
+210: * @param {string}  title  - Section heading displayed above the table.
+211: * @param {any[][]} data2D - The 2D array to render.
+212: * @returns {string} HTML string for this section. Empty string if data is empty.
+213: */
+217: // Escape the title to prevent XSS when it contains user-supplied text
+226: // Render empty rows as spacer rows
+237: : escapeHTML(content);  // Escape user-supplied strings to prevent XSS
+239: // Header cells: first row, or rows that start with "Bin" / "Genotype"
+252: /**
+253: * Combines the three "analysed" sub-tables (percent binned, TI binned,
+254: * TI summary) into a single contiguous 2D array for one Excel sheet.
+255: * Tables are separated by two blank rows for readability.
+256: *
+257: * @param {{ percentAnalysed2D: any[][], tiBinned2D: any[][], tiAnalysed2D: any[][] }} tables
+258: * @returns {any[][]} Combined 2D array.
+259: */
+265: if (out.length > 0) out.push([], []);  // Two blank separator rows
+277: /* ==========================================================================
+278: Trial-Level 2D Builders
+279: ========================================================================== */
+281: /**
+282: * Builds the raw stimulus-by-stimulus table for a single trial.
+283: * Each column is one run; each row is one stimulus interval.
+284: *
+285: * Values: 1 = animal responded, 0 = did not respond (tap recorded).
+286: * Runs that did not complete the full protocol show empty cells for
+287: * stimulus indices beyond their recorded values.
+288: *
+289: * Now includes Partial Bin Warning (#4) and Ineligible Reason (#5) header rows
+290: * so QC information is preserved in every raw export.
+291: *
+292: * @param {Object} trial - A single trial object with a `runs` array.
+293: * @param {Object} assay - The parent assay (provides stimCount and genotypes).
+294: * @returns {any[][]} 2D array: [genotypeRow, animalRow, statusRow, partialBinRow, ineligibleRow, ...stimulusRows]
+295: */
+300: // Build the five header rows
+304: const headerPartialBin = ["Partial Bin Warning"];  // #4
+305: const headerIneligible = ["Ineligible Reason"];    // #5
+315: // Blank spacer column between genotypes (not after the last one)
+322: // Build one row per stimulus
+328: // Show blank if this run ended before reaching this stimulus
+329: // EX-7 fix: guard against null/undefined values array (e.g. partial DB write)
+341: /**
+342: * Builds the binned percentage table for a single trial, with a summary
+343: * section showing mean ± SEM ± N per genotype per bin (#2).
+344: *
+345: * @param {Object} trial - A single trial object with a `runs` array.
+346: * @param {Object} assay - The parent assay (provides genotypes and binSize).
+347: * @returns {any[][]} 2D array with raw bins then mean/SEM/N summary rows.
+348: */
+353: // Header rows
+369: // Pre-compute binned values for every run
+378: // Build one raw row and one summary row per bin
+382: genotypes.forEach(g => summaryHeader.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
+389: // Raw values row
+394: // EX-9 fix: guard bins being undefined; consistent with optional chain in summary row
+401: // Summary (mean ± SEM ± N) row
+405: .filter(run => run.eligibleForAnalysis)  // Bug 3: exclude ineligible runs from summary stats
+406: .map(run => binnedByRun.get(run)?.[binIndex])  // optional chain: run may not be in map
+409: sumRow.push(mean, sem, values.length);  // #2
+414: // BUG-E fix: separator rows must span the full header width so SheetJS column-width
+415: // detection is consistent (same fix was applied to buildPooledBinned2D at line 691).
+427: /**
+428: * Builds the Touch Index (binned, raw per-run values) table for a single trial.
+429: * Runs whose first bin is zero are excluded from TI analysis and flagged.
+430: *
+431: * @param {Object} trial - A single trial object with a `runs` array.
+432: * @param {Object} assay - The parent assay (provides genotypes and binSize).
+433: * @returns {any[][]} 2D array: [genotypeRow, animalRow, ...binRows]
+434: */
+452: // Compute Touch Index for each run; exclude those with a zero baseline
+459: // Runs with a null TI (zero baseline) are excluded from the map;
+460: // collectTouchIndexExclusions() detects them dynamically without needing
+461: // these flags to be written here.
+487: /**
+488: * Builds the Touch Index summary (mean ± SEM ± N per genotype per bin) for a single trial (#2).
+489: *
+490: * @param {Object} trial - A single trial object with a `runs` array.
+491: * @param {Object} assay - The parent assay (provides genotypes and binSize).
+492: * @returns {any[][]} 2D array: [header, ...summaryRows]
+493: */
+497: // Group Touch Index arrays by genotype (only non-excluded runs)
+504: // Excluded runs (null TI) are silently omitted; collectTouchIndexExclusions handles them.
+516: genotypes.forEach(g => header.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
+525: // Filter out undefined entries (from runs with fewer bins)
+528: row.push(mean, sem, values.length);  // #2
+537: /* ==========================================================================
+538: Pooled (Cross-Trial) 2D Builders
+539: ========================================================================== */
+541: /**
+542: * Builds the raw stimulus-by-stimulus table across all selected trials (pooled).
+543: * Identical structure to buildTrialRaw2D but spans multiple trials, adding
+544: * Trial and Trial Animal header rows.
+545: *
+546: * Now includes Partial Bin Warning (#4) and Ineligible Reason (#5) header rows.
+547: * Accepts pre-collected runs via optional _runs parameter to avoid re-querying
+548: * when called from buildAllSections (#11).
+549: *
+550: * @param {Object}   assay    - The full assay object.
+551: * @param {Object}   [options]- Filter options passed to collectPooledRuns.
+552: * @param {Object[]} [_runs]  - Pre-collected runs (optional, avoids re-querying).
+553: * @returns {any[][]} 2D array with seven header rows then stimulus rows.
+554: */
+560: // Seven header rows for pooled view
+566: const hPartialBin  = ["Partial Bin Warning"];  // #4
+567: const hIneligible  = ["Ineligible Reason"];    // #5
+590: // EX-7 fix: guard against null/undefined values array (e.g. partial DB write)
+602: /**
+603: * Builds the pooled binned percentage table with mean ± SEM ± N summary rows (#2).
+604: *
+605: * Accepts pre-collected runs and a pre-built binning cache to avoid redundant
+606: * computation when called from buildAllSections (#11).
+607: *
+608: * @param {Object}   assay    - The full assay object.
+609: * @param {Object}   [options]- Filter options.
+610: * @param {Object[]} [_runs]  - Pre-collected runs (optional).
+611: * @param {Map}      [_cache] - Pre-built run cache from buildRunCache (optional).
+612: * @returns {any[][]} 2D array with header rows, raw bin rows, and summary rows.
+613: */
+638: // Use provided cache or build one locally
+658: genotypes.forEach(g => summaryHeader.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
+665: // Raw row
+676: // Summary row
+680: .filter(run => run.eligibleForAnalysis)  // Bug 3: exclude ineligible runs from summary stats
+684: sumRow.push(mean, sem, values.length);  // #2
+692: // BUG-5 fix: separator rows must have the same column count as the header rows
+693: // (5 columns) so SheetJS column-width detection is not confused. Previously these
+694: // used only 2 cells, causing inconsistent column widths in the Excel preview.
+701: /**
+702: * Builds the pooled Touch Index (raw per-run) table across all selected trials.
+703: *
+704: * Accepts pre-collected runs and a pre-built cache to avoid redundant
+705: * computation when called from buildAllSections (#11).
+706: *
+707: * @param {Object}   assay    - The full assay object.
+708: * @param {Object}   [options]- Filter options passed to collectPooledRuns.
+709: * @param {Object[]} [_runs]  - Pre-collected runs (optional).
+710: * @param {Map}      [_cache] - Pre-built run cache (optional).
+711: * @returns {any[][]} 2D array: [genotypeRow, animalRow, ...binRows]
+712: */
+731: // Use provided cache or compute locally
+737: if (ti && run.eligibleForAnalysis) {  // Bug 3: exclude ineligible runs from TI analysis
+746: // Runs with a null TI (zero baseline) are excluded from the map.
+773: /**
+774: * Builds the pooled Touch Index summary (mean ± SEM ± N per genotype per bin) (#2).
+775: *
+776: * Accepts pre-collected runs and a pre-built cache to avoid redundant
+777: * computation when called from buildAllSections (#11).
+778: *
+779: * @param {Object}   assay    - The full assay object.
+780: * @param {Object}   [options]- Filter options passed to collectPooledRuns.
+781: * @param {Object[]} [_runs]  - Pre-collected runs (optional).
+782: * @param {Map}      [_cache] - Pre-built run cache (optional).
+783: * @returns {any[][]} 2D array: [header, ...summaryRows]
+784: */
+789: // Group TI arrays by genotype (only non-excluded runs contribute)
+804: // Excluded runs (null TI) are silently omitted.
+817: genotypes.forEach(g => header.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
+828: row.push(mean, sem, values.length);  // #2
+837: /* ==========================================================================
+838: Master Section Builder (#12)
+839: ========================================================================== */
+841: /**
+842: * Builds a flat, ordered array of export sections for every selected dataset.
+843: * Always produces: Assay Metadata first, then trial/pooled sections in config
+844: * order, then Touch Index Exclusions (if any excluded runs exist).
+845: *
+846: * This is the single source of truth consumed by performExcelExport,
+847: * performCSVExport, and generatePreviewHTML, eliminating ~100 lines of
+848: * duplicated looping logic (#12).
+849: *
+850: * For pooled configs, collectPooledRuns is called once per config and a shared
+851: * binning cache is passed to all three pooled sub-table builders, avoiding
+852: * redundant binRunValues calls (#11).
+853: *
+854: * @param {Object}   assay         - The full assay object.
+855: * @param {Object[]} exportConfigs - Array of dataset selection configs from getExportConfigs().
+856: * @returns {Array<{ name: string, excelSheetName: string, data2D: any[][] }>}
+857: */
+861: // ── Metadata (always first) ──────────────────────────────────────────────
+870: // ── Per-trial sections ─────────────────────────────────────────────────
+891: // ── Pooled (cross-trial) sections ──────────────────────────────────────
+897: // Collect runs once and build a shared binning cache for this config (#11)
+918: // ── Touch Index exclusions (appended only if any runs were excluded) ──────
+932: /* ==========================================================================
+933: Master Export Functions
+934: ========================================================================== */
+936: /**
+937: * Orchestrates the creation of a multi-sheet Excel workbook and triggers
+938: * a browser file download.
+939: *
+940: * All sections are built via buildAllSections() (#12), which also applies
+941: * the shared run-binning cache for pooled configs (#11).
+942: *
+943: * Requires SheetJS (XLSX) to be loaded globally. If XLSX is unavailable,
+944: * the caller should use performCSVExport() instead.
+945: *
+946: * @param {Object}   currentAssay  - The full assay object.
+947: * @param {Object[]} exportConfigs - Array of dataset selection configs from getExportConfigs().
+948: * @returns {{ success: boolean, error?: string }}
+949: */
+951: // EX-5 fix: guard against XLSX being undefined (CDN failure, CSP block, etc.)
+981: /* ==========================================================================
+982: CSV Fallback Export (No External Dependencies)
+983: ========================================================================== */
+985: /**
+986: * Converts a single 2D row into a valid CSV line.
+987: * Cells containing commas, newlines, or quotes are wrapped in double-quotes,
+988: * and any existing double-quotes within those cells are escaped as "".
+989: *
+990: * @param {any[]} row - Array of cell values.
+991: * @returns {string} A properly escaped CSV line (no trailing newline).
+992: */
+1003: /**
+1004: * Exports assay data as a UTF-8 CSV file.
+1005: * Used automatically when SheetJS is unavailable (offline / CDN failure)
+1006: * or when the Excel export fails.
+1007: *
+1008: * All sections are built via buildAllSections() (#12).
+1009: * The download anchor is clicked directly without appending it to the DOM,
+1010: * which is sufficient in all modern browsers (#13).
+1011: *
+1012: * Each dataset section is preceded by a "=== Section Name ===" heading line
+1013: * and separated by a blank line, making the file human-readable in a text
+1014: * editor as well as importable into spreadsheet applications.
+1015: *
+1016: * @param {Object}   currentAssay  - The full assay object.
+1017: * @param {Object[]} exportConfigs - Array of dataset selection configs.
+1018: * @returns {{ success: boolean, error?: string }}
+1019: */
+1033: // Trigger file download — no DOM append/remove needed in modern browsers (#13)
+1040: // Bug 9: revoking synchronously can race the download initiation on mobile
+1041: // browsers where a.click() is asynchronous. Delay to give the browser time
+1042: // to start the download before the object URL is invalidated.
+1053: /**
+1054: * Generates the full HTML content for the data preview modal.
+1055: * All sections are built via buildAllSections() (#12).
+1056: *
+1057: * @param {Object}   currentAssay  - The full assay object.
+1058: * @param {Object[]} exportConfigs - Array of dataset selection configs.
+1059: * @returns {string} Complete HTML string ready to inject into the modal container.
+1060: */
+--- js/db.js ---
+1: /**
+2: * @file db.js
+3: * @module Database
+4: * @description IndexedDB persistence layer for the Touch Assay Timer.
+5: *
+6: * Object store layout:
+7: * ┌──────────────────────────────────────────────────────────────────┐
+8: * │ Store     │ Key        │ Indexes              │ Contains         │
+9: * ├──────────────────────────────────────────────────────────────────┤
+10: * │ assays    │ assayId    │ —                    │ Assay config     │
+11: * │ trials    │ trialId    │ assayId, status       │ Trial metadata   │
+12: * │ runs      │ runId      │ trialId, genotype    │ Run data+values  │
+13: * └──────────────────────────────────────────────────────────────────┘
+14: *
+15: * Connection caching:
+16: *   A single IDBDatabase connection is cached in `cachedDB` and reused
+17: *   across all operations. This eliminates per-operation connection overhead
+18: *   (important during the high-frequency scheduler loop).
+19: *   The cache is cleared automatically if the browser closes the connection.
+20: *
+21: * Transaction strategy:
+22: *   Each exported function opens its own transaction(s) and awaits completion.
+23: *   Multi-step operations (e.g. deleteAssay) use sequential independent
+24: *   transactions rather than one combined multi-store transaction to avoid
+25: *   IDB auto-commit races when awaiting between operations.
+26: */
+29: /* ==========================================================================
+30: Configuration
+31: ========================================================================== */
+34: const DB_VERSION = 4;  // Increment this when changing the schema
+36: /** @enum {string} Object store name constants — used everywhere to avoid typos. */
+44: /* ==========================================================================
+45: Connection Management
+46: ========================================================================== */
+48: /**
+49: * Whether IndexedDB is available in this browser context.
+50: * Set to false when openDB() fails (e.g. private browsing, storage quota exceeded).
+51: * @type {boolean}
+52: */
+55: /**
+56: * Returns whether IndexedDB was successfully opened on startup.
+57: * @returns {boolean}
+58: */
+61: /**
+62: * Cached IDBDatabase connection.
+63: * Null when no connection exists yet, or after the browser closes it.
+64: * @type {IDBDatabase|null}
+65: */
+68: /**
+69: * Opens (or returns the cached) IndexedDB connection.
+70: *
+71: * The onupgradeneeded handler runs only when the DB does not exist yet or
+72: * when DB_VERSION is incremented. It is responsible for creating all stores
+73: * and indexes.
+74: *
+75: * @returns {Promise<IDBDatabase>} Resolves with the open database connection.
+76: */
+78: // Return the cached connection immediately if available
+84: // Schema setup — runs only on first launch or version upgrade.
+85: // Each `if (event.oldVersion < N)` block is idempotent and only runs
+86: // when migrating from an older version, ensuring safe incremental upgrades.
+89: const oldV = event.oldVersion;  // 0 = fresh install
+91: // ── Version 1–3 stores (create on fresh install or old upgrade) ────
+109: // ── Version 4: add "status" index to runs store ──────────────────
+110: // Enables efficient orphan-run scanning on startup without a full table scan.
+121: // Invalidate the cache when the browser closes the connection
+122: // (e.g. on storage pressure) so the next call re-opens it
+135: /* ==========================================================================
+136: Assay Operations
+137: ========================================================================== */
+139: /**
+140: * Persists (creates or updates) an assay record.
+141: * Uses put() so it is safe to call for both initial saves and updates.
+142: *
+143: * @param {Object} assay - A fully formed assay object (must have assayId).
+144: * @returns {Promise<void>} Resolves when the transaction commits.
+145: */
+156: /**
+157: * Fetches all assay records from the store (shallow — no trials or runs).
+158: * Used to populate the Saved Assays list view.
+159: *
+160: * @returns {Promise<Object[]>} Array of assay objects (may be empty).
+161: */
+168: // Without these handlers the Promise would leak forever on an IDB error,
+169: // causing the Saved Assays panel to hang with no feedback.
+175: /**
+176: * Fully re-hydrates an assay from the database, including all its trials
+177: * and each trial's runs. The returned object mirrors the in-memory structure
+178: * used by the application.
+179: *
+180: * This is the canonical way to reload an assay after DB writes that were
+181: * performed without a full object reference (e.g. markTrialCompleted).
+182: *
+183: * @param {string} assayId - The ID of the assay to load.
+184: * @returns {Promise<Object>} The fully populated assay object.
+185: * @throws {Error} If the assay ID is not found in the database.
+186: */
+190: // Step 1: Load the top-level assay record
+199: // Older numeric IDs from DB get cast to strings via DOM dataset properties
+213: // Step 2: Load all trials belonging to this assay
+221: // Step 3: Load all runs for each trial
+229: // Sort chronologically — IDB getAll() returns records in insertion order, which
+230: // may not match startedAt after aborted/retried transactions on some browsers.
+238: /**
+239: * Permanently deletes an assay and all its associated trials and runs.
+240: *
+241: * Uses a two-phase strategy to avoid IDB transaction conflicts:
+242: *
+243: * Phase 1 (Read): Two sequential readonly transactions collect the IDs of
+244: *   every trial and run that belongs to this assay. Readonly transactions
+245: *   can never conflict with each other or with writes on other connections.
+246: *
+247: * Phase 2 (Write): One single atomic readwrite transaction issues ALL delete
+248: *   requests synchronously (no await points inside). This means the
+249: *   transaction can never auto-commit before all requests are queued, and
+250: *   concurrent calls can never interleave their write phases.
+251: *
+252: * Deletion order within Phase 2: runs → trials → assay (children first).
+253: *
+254: * @param {string} assayId - The ID of the assay to delete.
+255: * @returns {Promise<void>} Resolves when all records have been deleted.
+256: */
+260: // ── Phase 0: Resolve true ID type (string vs number) ───────────────────────────
+261: // Older versions may have used purely numeric IDs (like Date.now()).
+262: // DOM dataset attributes always cast these to strings, so we must
+263: // check if a numeric version exists in the DB if the string fails.
+264: //
+265: // Note: this fallback block is intentionally duplicated from hydrateAssay()
+266: // rather than extracted into a shared helper because both functions open their
+267: // own transactions at different points. A shared async helper would require an
+268: // extra round-trip to IDB and could open a transaction in a context where
+269: // auto-commit has already fired in the caller.
+289: // If neither exists, there's nothing to delete.
+293: // Doesn't exist, nothing to do
+297: // ── Phase 1a: Collect all trial records for this assay ──────────────────
+305: // ── Phase 1b: Collect all run IDs for every trial ───────────────────────
+306: // Each trial gets its own readonly transaction (safe — reads never conflict).
+318: // ── Phase 2: Delete everything in one atomic transaction ─────────────────
+319: // All requests are queued synchronously — no await inside this Promise so
+320: // the transaction cannot auto-commit before every delete is registered.
+334: // Queue all deletes synchronously (children before parent)
+342: /* ==========================================================================
+343: Trial Operations
+344: ========================================================================== */
+346: /**
+347: * Persists (creates or updates) a trial record.
+348: * Spreads the assayId into the stored object so the "assayId" index works.
+349: *
+350: * Note: The in-memory trial object's `runs` array is NOT stored here —
+351: * runs have their own store and are written via saveRun().
+352: *
+353: * @param {string} assayId - Parent assay ID (stored as a field for indexing).
+354: * @param {Object} trial   - The trial object to persist.
+355: * @returns {Promise<void>} Resolves when the transaction commits.
+356: */
+360: // Exclude the in-memory runs array — runs live in their own store (saveRun).
+361: // Spreading trial directly would write duplicate run data into the trials record,
+362: // bloating IDB storage and potentially overwriting in-progress run state.
+371: /**
+372: * Marks a trial as completed and records the end timestamp.
+373: * Performs a read-modify-write within a single transaction for atomicity.
+374: *
+375: * @param {string} _assayId - Not used internally; kept for API consistency with
+376: *   saveTrial(). Can be removed in a future breaking change once all callers
+377: *   are updated.
+378: * @deprecated The `_assayId` parameter is unused. Future callers should omit it.
+379: * @param {string} trialId  - The ID of the trial to complete.
+380: * @returns {Promise<void>} Resolves when the transaction commits.
+381: */
+390: // DB-1 fix: if the trial doesn't exist, abort the transaction so the caller
+391: // receives a rejection instead of a silent no-op (tx.oncomplete would resolve
+392: // even with no actual write, giving a false sense of success).
+406: /**
+407: * Marks a trial as abandoned with an explanatory reason and records the end timestamp.
+408: * Performs a read-modify-write within a single transaction for atomicity.
+409: *
+410: * @param {string} _assayId - Not used internally; kept for API consistency with
+411: *   saveTrial(). Can be removed in a future breaking change once all callers
+412: *   are updated.
+413: * @deprecated The `_assayId` parameter is unused. Future callers should omit it.
+414: * @param {string} trialId  - The ID of the trial to abandon.
+415: * @param {string} [reason="App closed or reloaded"] - Human-readable explanation.
+416: * @returns {Promise<void>} Resolves when the transaction commits.
+417: */
+426: // DB-1 fix: abort if trial not found (same rationale as markTrialCompleted)
+442: /* ==========================================================================
+443: Run Operations
+444: ========================================================================== */
+446: /**
+447: * Persists (creates or updates) a run record.
+448: * Spreads the trialId into the stored object so the "trialId" index works.
+449: *
+450: * Called both during a run (batch saves) and at completion/abandonment.
+451: *
+452: * @param {string} _assayId - Not used internally; the run is keyed by trialId
+453: *   alone. Kept for API consistency — can be removed in a future breaking change.
+454: * @deprecated The `_assayId` parameter is unused. Future callers should omit it.
+455: * @param {string} trialId  - Parent trial ID (stored as a field for indexing).
+456: * @param {Object} run      - The run object to persist (including its values array).
+457: * @returns {Promise<void>} Resolves when the transaction commits.
+458: */
+462: // Spread trialId in so the index can look up runs by parent trial
+471: /* ==========================================================================
+472: Startup Cleanup
+473: ========================================================================== */
+475: /**
+476: * On app restart, finds any trials and runs left in "active" state from
+477: * a previous session (crash, force-close, etc.) and marks them as abandoned.
+478: *
+479: * Uses a three-phase read → read → write pattern:
+480: *   Phase 1: Fetch all active trials via the "status" index.
+481: *   Phase 2: For each trial, fetch all runs and find those still active.
+482: *   Phase 3: Write all updates in a single atomic transaction.
+483: *
+484: * Called once during DOMContentLoaded initialisation.
+485: *
+486: * @returns {Promise<void>} Resolves when cleanup is complete (or a no-op if nothing active).
+487: */
+491: // Phase 1: Find all active trials
+499: // Nothing to clean up — exit early
+502: // Phase 2: Collect any active runs across all orphaned trials
+512: // Mutate the in-memory objects that will be written in Phase 3
+524: // Phase 3: Commit all trial and run updates atomically
+544: /* ==========================================================================
+545: Orphan Run Cleanup
+546: ========================================================================== */
+548: /**
+549: * Scans ALL runs (regardless of their parent trial's status) for any that
+550: * were left in "active" state from a previous session — e.g. if a run was
+551: * in-progress inside a trial that was already marked abandoned by
+552: * abandonAllActiveTrialsInDB(), or if the DB write raced with an app crash.
+553: *
+554: * Uses the "status" index on the runs store (added in DB_VERSION 4) for
+555: * efficiency; falls back to a full table scan on older schema versions.
+556: *
+557: * Called once at startup alongside abandonAllActiveTrialsInDB().
+558: *
+559: * @returns {Promise<void>}
+560: */
+566: return;  // IDB unavailable — nothing we can do
+569: // Fetch all runs with status "active"
+575: // Use status index if available (DB_VERSION 4+); fall back to getAll filter
+593: // Mark each orphan as stoppedEarly in one atomic transaction
+610: /**
+611: * C4: Crash-guard recovery — called at startup to merge any sessionStorage
+612: * snapshot written by the beforeunload handler into the IDB run record.
+613: *
+614: * When the tab is killed while hidden on mobile, neither `unload` nor a
+615: * resumed `visibilitychange` fires. The only surviving data is the
+616: * synchronous sessionStorage write from `beforeunload`. This function reads
+617: * that snapshot and updates the IDB record if the snapshot has more values
+618: * than what was last committed (i.e. data recorded after the last flush).
+619: *
+620: * Safe to call unconditionally on every startup — exits immediately if no
+621: * guard exists or if the IDB record already has equal or more data.
+622: */
+634: // BUG-G fix: the IDB spec auto-commits a readwrite transaction once there are no
+635: // pending requests. Awaiting a Promise between .get() and .put() can flush the
+636: // microtask queue, trigger auto-commit, and silently drop the write — especially
+637: // on Safari. The safe pattern is to queue the .put() synchronously inside
+638: // onsuccess, ensuring both requests share the same transaction lifetime.
+657: store.put(existing);  // queued synchronously — transaction cannot auto-commit before this
+663: // sessionStorage or IDB unavailable (e.g. Private Browsing) — silent no-op
+--- js/haptic-armband.js ---
+1: /**
+2: * @file haptic-armband.js
+3: * @description Manages the Web Bluetooth GATT connection to the researcher's
+4: * haptic armband (Seeed XIAO nRF52840 + DRV2605L haptic driver + LRA motor).
+5: *
+6: * The armband mirrors navigator.vibrate() patterns from the host device exactly:
+7: *
+8: *   armbandTap()         → 0x01 → armband plays vibrate(50)          [50 ms pulse]
+9: *   armbandRunComplete() → 0x02 → armband plays vibrate([100,50,200]) [ascending]
+10: *
+11: * All exports are silent no-ops when:
+12: *   - The browser does not support Web Bluetooth (Firefox, Safari)
+13: *   - The armband is not connected
+14: * This means zero impact on the timing-critical code path even when the armband
+15: * is absent or disconnected mid-session.
+16: *
+17: * Heartbeat watchdog: the PWA writes a keepalive to the armband every 2 s
+18: * during a run. If the armband receives no heartbeat for >3 s, it fires a
+19: * stutter warning autonomously (PWA crashed / backgrounded / BLE dropped).
+20: *
+21: * GATT layout:
+22: *   Service UUID:    12345678-1234-1234-1234-123456789012
+23: *   Haptic char:     12345678-1234-1234-1234-000000000001  (Write Without Response)
+24: *   Heartbeat char:  12345678-1234-1234-1234-000000000002  (Write Without Response)
+25: */
+31: // Standard Bluetooth SIG Battery Service / Battery Level Characteristic
+35: // Command bytes — must match the firmware switch-case exactly
+36: const CMD_TAP          = new Uint8Array([0x01]);  // mirrors vibrate(50)
+37: const CMD_RUN_COMPLETE = new Uint8Array([0x02]);  // mirrors vibrate([100,50,200])
+38: const CMD_HEARTBEAT    = new Uint8Array([0x03]);  // BUG-A fix: must differ from CMD_TAP (0x01)
+40: // Module-level connection state
+44: let _battChar           = null;   // Battery Level characteristic (0x2A19)
+47: let _hbWasActive        = false;  // FW-7 FIX: track if HB was running before disconnect
+49: let _onReconnectCb      = null;  // () => void — fired after a successful auto-reconnect
+50: let _onBatteryUpdateCb  = null;  // (level: 0-100) => void
+52: // ── Public API ─────────────────────────────────────────────────────────────────
+54: /** Returns true if this browser supports Web Bluetooth. */
+57: /** Returns true if the armband is currently connected. */
+60: /**
+61: * Opens the browser Bluetooth device picker and connects to the armband.
+62: * Resolves when GATT characteristics are ready.
+63: * @param {Function} onDisconnect   Called when the BLE connection drops unexpectedly.
+64: * @param {Function} [onBatteryUpdate]  Called with the battery level (0-100) on updates.
+65: * @param {Function} [onReconnect]  Called when a background auto-reconnect succeeds.
+66: * @throws {Error}  If the user cancels the picker (err.name === "NotFoundError"),
+67: *                  or if GATT negotiation fails.
+68: *
+69: * Filter strategy: we filter by SERVICE_UUID rather than device name.
+70: * "TouchAssayArmband" (18 chars) + the 128-bit service UUID together exceed
+71: * the 31-byte BLE advertising packet limit, so ArduinoBLE pushes the name
+72: * into the scan-response packet. Chrome's name filter only inspects the main
+73: * advertising packet, causing intermittent discovery failures.
+74: * The service UUID is always in the main advert and is 100% reliable.
+75: */
+85: filters:          [{ services: [SERVICE_UUID] }],  // UUID is in main advert → reliable
+86: optionalServices: [BATT_SERVICE_UUID],             // SERVICE_UUID now in filter, not here
+96: // Subscribe to battery notifications (gracefully skipped if firmware lacks the service)
+102: /**
+103: * Disconnects from the armband cleanly and stops the heartbeat timer.
+104: */
+110: try { await _battChar.stopNotifications(); } catch { /* ignore */ }
+113: try { _device?.gatt?.disconnect(); } catch { /* ignore */ }
+117: /**
+118: * Fires the "tap registered" haptic — mirror of navigator.vibrate(50).
+119: * Call immediately after tapTimestamps.push(getAudioTime()) in RUNNING branch.
+120: * Non-blocking fire-and-forget; zero impact on AudioContext timing.
+121: */
+126: /**
+127: * Fires the "run complete" haptic — mirror of navigator.vibrate([100, 50, 200]).
+128: * Call in completeRunNormally() alongside playCompletionTone().
+129: * Non-blocking fire-and-forget.
+130: */
+135: /**
+136: * Fires a single test tap to verify the armband is alive and responding.
+137: * Intended for the Settings screen "Test Vibration" button only.
+138: * Sends CMD_TAP (0x01) — identical payload to armbandTap() but kept as a
+139: * separate export so call-sites remain semantically distinct.
+140: */
+145: /**
+146: * Starts the 2-second heartbeat writer.
+147: * Call immediately after timerWorker.postMessage("start").
+148: */
+150: _stopHeartbeat(); // guard against double-start on rapid stop→start
+157: /**
+158: * Stops the heartbeat writer.
+159: * Call inside stopCueLoop() so the armband watchdog is not left running
+160: * between runs when the worker is idle.
+161: */
+166: // ── Private helpers ────────────────────────────────────────────────────────────
+171: // A failed write does not imply a disconnect — BLE can recover from
+172: // transient radio congestion without dropping the GATT connection.
+184: /**
+185: * Attempts to get the BLE Battery Service and subscribe to level notifications.
+186: * Wrapped in try/catch — if the firmware doesn't expose 0x180F the rest of
+187: * the connection still succeeds; battery monitoring is simply unavailable.
+188: * @param {BluetoothRemoteGATTServer} server
+189: */
+196: // Do an immediate read so the UI shows the level right after connecting
+197: // rather than waiting for the first notification (which may be minutes away).
+206: /**
+207: * Handler for BLE Battery Level notifications.
+208: * Fires whenever the armband ADC reading drops by ≥1%.
+209: * @param {Event} e  BluetoothCharacteristicValueChangedEvent
+210: */
+212: const level = e.target.value.getUint8(0); // 0–100
+218: _hbWasActive = _hbTimer !== null;  // FW-7 FIX: remember if heartbeat was running
+220: _battChar = null;  // GATT handles are invalid after disconnect
+223: // Attempt a single automatic reconnect after 1 s.
+231: await _subscribeBattery(server);  // re-subscribe after reconnect
+233: // FW-7 FIX: Restart heartbeat if it was running before the dropout.
+234: // Without this, a brief BLE disconnect during an active run stops
+235: // the heartbeat permanently → firmware watchdog fires stutter
+236: // warnings every 3 s for the rest of the run.
+242: // Notify the UI so it can restore the "connected" appearance.
+--- js/models.js ---
+1: /**
+2: * @file models.js
+3: * @module Models
+4: * @description Factory functions and immutable state-transition helpers for core domain objects.
+5: *
+6: * Object hierarchy:
+7: *   Assay
+8: *   └── Trial (one per recording session)
+9: *       └── Run  (one per animal / genotype)
+10: *           └── values[] (one entry per stimulus)
+11: *
+12: * All factory functions return plain objects — no classes — so they
+13: * serialise cleanly to IndexedDB without any prototype information.
+14: *
+15: * State-transition helpers mutate the passed object in place and are
+16: * guarded against operating on already-transitioned objects.
+17: */
+19: /* ==========================================================================
+20: Internal Helpers
+21: ========================================================================== */
+23: /**
+24: * Generates a pseudo-random unique ID combining the current Unix timestamp
+25: * with a random five-digit suffix to prevent collisions within the same
+26: * millisecond (e.g. rapid back-to-back run creation in a loop).
+27: *
+28: * Format: "<timestamp>_<suffix>"  e.g. "1686731847000_42853"
+29: *
+30: * @returns {string} A unique string ID.
+31: */
+36: // Fallback for older browsers without crypto.randomUUID
+42: /* ==========================================================================
+43: Model Factories
+44: ========================================================================== */
+46: /**
+47: * Creates a new top-level Assay configuration object.
+48: * The assay captures the experimental parameters and holds all trials.
+49: *
+50: * @param {Object} setupValues - Validated parameters from the setup form.
+51: * @param {string}   setupValues.assayName  - Human-readable experiment identifier.
+52: * @param {number}   setupValues.isi        - Inter-stimulus interval in seconds.
+53: * @param {number}   setupValues.stimCount  - Total number of stimuli per run.
+54: * @param {number}   setupValues.binSize    - Number of stimuli grouped into each bin.
+55: * @param {number}   setupValues.temperature - Ambient temperature in °C.
+56: * @param {number}   setupValues.humidity   - Relative humidity as a percentage.
+57: * @param {string[]} setupValues.genotypes  - Ordered list of genotype labels.
+58: * @returns {Object} A freshly initialised assay instance.
+59: */
+72: trials: []           // populated progressively as trials are created
+76: /**
+77: * Creates a new Trial instance.
+78: * A trial is a single recording session that can contain multiple runs
+79: * (one per animal / genotype combination).
+80: *
+81: * @param {number} trialIndex - Sequential 1-based index within the parent assay.
+82: * @returns {Object} A freshly initialised trial instance.
+83: */
+88: status:          "active",  // "active" | "completed" | "abandoned"
+92: runs:            []         // populated as runs are started within this trial
+96: /**
+97: * Creates a new Run instance representing a single subject's test.
+98: * Each run records one boolean value per stimulus interval.
+99: *
+100: * @param {Object}        params                  - Run configuration.
+101: * @param {string}        params.genotype          - Genotype label for this animal.
+102: * @param {number|string} params.animalIndex       - 1-based sequential ID within this genotype+trial.
+103: * @param {number}        params.expectedStimCount - Target number of stimuli to record.
+104: * @returns {Object} A freshly initialised run instance.
+105: */
+112: values:                    [],    // filled during the run: 1 = responded, 0 = did not respond
+113: status:                    "active",  // "active" | "completed" | "stoppedEarly" | "abandoned"
+114: eligibleForAnalysis:       null,  // set to true/false on run completion
+115: ineligibleReason:          null,  // human-readable reason when eligibleForAnalysis is false
+116: partialBinWarning:         null,  // set if stimulus count is not an exact multiple of binSize
+125: /* ==========================================================================
+126: State Transition Helpers
+127: ========================================================================== */
+129: /**
+130: * Marks a trial as successfully completed and records the end timestamp.
+131: * No-ops if the trial is not currently active (idempotent guard).
+132: *
+133: * @param {Object} trial - The trial object to mutate.
+134: */
+141: /**
+142: * Marks a trial as abandoned, records the reason, and logs the end time.
+143: * No-ops if the trial is not currently active (idempotent guard).
+144: *
+145: * @param {Object} trial  - The trial object to mutate.
+146: * @param {string} reason - Human-readable explanation of why the trial was abandoned.
+147: */
+155: /**
+156: * Marks a run as successfully completed and records the end timestamp.
+157: * No-ops if the run is not currently active (idempotent guard).
+158: *
+159: * @param {Object} run - The run object to mutate.
+160: */
+168: /* ==========================================================================
+169: Query Helpers
+170: ========================================================================== */
+172: /**
+173: * Retrieves the currently active trial from an assay.
+174: * There should only ever be one active trial at a time.
+175: *
+176: * @param {Object} assay - The assay object with a `trials` array.
+177: * @returns {Object|null} The active trial, or null if none exists.
+178: */
+--- js/main.js ---
+1: /**
+2: * @file main.js
+3: * @module MainController
+4: * @description Orchestrates the Touch Assay Timer application.
+5: *
+6: * Responsibilities:
+7: *   - Initialises all modules on DOMContentLoaded.
+8: *   - Owns the global application state machine (STATES / setState).
+9: *   - Drives the three-layer scheduling pipeline:
+10: *       Layer 1: Web Worker heartbeat → scheduler() → Web Audio hardware ticks
+11: *       Layer 2: UI display + optional speech, triggered at stimulus onset
+12: *       Layer 3: Data recording at stimulus close, batch-saved to IndexedDB
+13: *   - Manages run lifecycle: start → warmup → record → complete/stop.
+14: *   - Handles crash guards (visibilitychange, beforeunload).
+15: *   - Wires all DOM event listeners.
+16: *
+17: * Application State Machine:
+18: *
+19: *   SETUP ──submit──→ CONFIGURED ──tap──→ POISED ──tap──→ RUNNING
+20: *                         ↑                  ↑                 │
+21: *                         └──backToAssay─────┘←──stopRun/done──┘
+22: *                                            │
+23: *                                    finishTrial
+24: *                                            │
+25: *                                          EXPORT
+26: *
+27: * Scheduling pipeline (fires ~125×/sec via timer-worker.js):
+28: *
+29: *   Worker "tick" → scheduler() {
+30: *     Step 0: Gap check — auto-stop if timing gap > 2×ISI (backgrounding detected)
+31: *     Step 1: Speech/UI layer  — update counter, trigger voice cue at stimulus open
+32: *     Step 2: Data layer       — record 0/1 at stimulus close, batch-save to IDB
+33: *     Step 3: Audio layer      — pre-schedule hardware beep slightly in advance
+34: *   }
+35: */
+38: import { validateInputs, generateAutoID, binRunValues, escapeHTML } from "./utils.js";  // BUG-10: escapeHTML is now shared from utils.js
+68: /* ==========================================================================
+69: Global Application State
+70: ========================================================================== */
+72: /**
+73: * All valid application states.
+74: * The body class is set to `state-<value>` so CSS can show/hide sections.
+75: * @enum {string}
+76: */
+85: /** @type {string} The current application state (one of STATES). */
+88: /** @type {Object|null} The currently active assay, fully hydrated from DB. */
+91: /**
+92: * Double-tap confirmation guard.
+93: * The first tap sets pendingStart = true and shows a confirmation prompt.
+94: * The second tap within 2 seconds proceeds to start the run.
+95: * @type {boolean}
+96: */
+99: /** @type {number|null} setTimeout handle for the pendingStart reset timer. */
+103: /* ==========================================================================
+104: Timing & Scheduling State
+105: ========================================================================== */
+107: /**
+108: * Tracks how many stimulus intervals have been closed (data recorded).
+109: * This is the authoritative "how many stimuli done" counter.
+110: * @type {number}
+111: */
+114: /**
+115: * Tracks how many stimulus windows have been opened for speech/UI updates.
+116: * Advances one step ahead of currentStimulusIndex.
+117: * @type {number}
+118: */
+121: /**
+122: * Tracks how many hardware audio ticks have been pre-scheduled.
+123: * Advances further ahead (by scheduleAheadTime) than speech/data.
+124: * @type {number}
+125: */
+128: /**
+129: * Array of AudioContext timestamps for every tap recorded in the current run.
+130: * Consumed via tapReadIndex — no per-interval array reallocation needed.
+131: * @type {number[]}
+132: */
+135: /**
+136: * Read pointer into tapTimestamps[].
+137: * All entries at indices < tapReadIndex have already been consumed by a
+138: * closed stimulus window and will not be checked again. This replaces
+139: * the previous `.some()` + `.filter()` pattern, avoiding closure and
+140: * array allocation on every ISI tick.
+141: * @type {number}
+142: */
+145: /**
+146: * Cached reference to the currently active run object.
+147: * Set once at the start of a run (startCueLoop) and cleared when the run ends.
+148: * Eliminates the `.find()` scan inside scheduler() which otherwise runs ~125×/sec.
+149: * @type {Object|null}
+150: */
+153: /**
+154: * Cached ISI (inter-stimulus interval) for the current run, in seconds.
+155: * Copied from currentAssay.isi at the start of each run so the hot path
+156: * in scheduler() never needs to dereference the assay object.
+157: * @type {number}
+158: */
+161: /**
+162: * Cached stimulus count for the current run.
+163: * Copied from currentAssay.stimCount at the start of each run.
+164: * @type {number}
+165: */
+168: /**
+169: * Cached bin size for the current run.
+170: * Copied from currentAssay.binSize at the start of each run and forwarded
+171: * to audio.js via setBinSpeak() so "bins" voice mode speaks on the correct
+172: * stimulus boundaries without dereferencing the assay object in the hot path.
+173: * @type {number}
+174: */
+177: /** @type {number} AudioContext time when the next speech/UI update should fire. */
+180: /** @type {number} AudioContext time when the next data recording window closes. */
+183: /** @type {number} AudioContext time when the next hardware tick should be scheduled. */
+186: /**
+187: * How far ahead (in seconds) the audio scheduler pre-books hardware ticks.
+188: * 200ms gives enough headroom for budget Android devices where main-thread
+189: * pauses of 100–150ms are common (background GC, compositing, etc.).
+190: * Still well below any ISI used in practice (≥ 500ms) so ticks won't
+191: * sound early.
+192: * @type {number}
+193: */
+196: /**
+197: * AudioContext timestamp of the last scheduler() invocation.
+198: * Used to detect timing gaps caused by backgrounding / throttling.
+199: * @type {number}
+200: */
+203: /**
+204: * How many milliseconds before the stimulus opens to fire the TTS command,
+205: * to compensate for browser speech-engine cold-path latency (typically 50–120 ms).
+206: * Loaded from localStorage so users can tune it per-device in Settings.
+207: * @type {number}
+208: */
+209: // M6 fix: wrap top-level localStorage reads in try/catch — accessing localStorage
+210: // before DOMContentLoaded in restricted/Private-Browsing contexts can throw SecurityError.
+211: let speechLeadMs = 80;  // 80 ms default
+214: // Clamp to [0, 490] ms: values ≥ 500 ms would push nextSpeechTime before
+215: // AudioContext t0, causing the first cue to fire immediately on start.
+217: } catch { /* Private browsing or sandboxed iframe — use default */ }
+219: /**
+220: * How many stimuli were recorded at the time of the last IDB batch save.
+221: * Used to decide when to flush: save when (currentIndex - lastSave) >= BATCH_SIZE.
+222: * @type {number}
+223: */
+226: /**
+227: * Number of stimuli between periodic IDB saves during a run.
+228: * Reduces write frequency from every tick to every N stimuli (~90% fewer writes).
+229: * @type {number}
+230: */
+233: /** @type {number|null} requestAnimationFrame handle for the visual metronome bar. */
+236: /** @type {number|null} Timestamp (Date.now()) of the last processed tap. */
+239: /**
+240: * Minimum milliseconds between accepted taps (hardware debounce).
+241: * Prevents a single physical press from registering as two taps on slow devices.
+242: * @type {number}
+243: */
+246: // runStartTime removed — was set but never read; startup time is not needed by any consumer.
+249: /* ==========================================================================
+250: Hardware & Settings State
+251: ========================================================================== */
+253: /** @type {WakeLockSentinel|null} Active screen Wake Lock, or null if not held. */
+256: /**
+257: * Tracks whether a Wake Lock is currently desired.
+258: * Using a separate boolean (instead of checking `wakeLock !== null`) ensures the
+259: * visibilitychange re-acquire logic works correctly even after releaseWakeLock()
+260: * synchronously nulls `wakeLock` before `.release()` resolves.
+261: * @type {boolean}
+262: */
+265: /**
+266: * Whether the countdown warmup is enabled before each run.
+267: * Persisted in localStorage so the setting survives page refreshes.
+268: * @type {boolean}
+269: */
+270: // L1 fix: wrap in try/catch (same reason as speechLeadMs above).
+272: try { isWarmupEnabled = localStorage.getItem("touchAssayWarmupEnabled") !== "false"; } catch { /* use default */ }
+274: /**
+275: * Duration of the warmup countdown in seconds.
+276: * @type {number}
+277: */
+279: try { warmupDuration = Math.min(60, Math.max(1, parseInt(localStorage.getItem("touchAssayWarmupDuration"), 10) || 3)); } catch { /* use default */ }
+281: /**
+282: * True while the warmup countdown is actively ticking.
+283: * Prevents re-entry if the tap button is pressed twice during warmup.
+284: * @type {boolean}
+285: */
+288: /**
+289: * The Web Worker instance that drives the scheduling heartbeat.
+290: * Isolated off the main thread so browser timer throttling doesn't affect timing.
+291: */
+295: /* ==========================================================================
+296: DOMContentLoaded — Main Entry Point
+297: ========================================================================== */
+300: // Global Error Boundary
+326: // Proactive Storage Management
+342: /* -----------------------------------------------------------------------
+343: DOM Element Cache (UI)
+344: Centralised here so element lookups happen once at init, not on every event.
+345: ----------------------------------------------------------------------- */
+406: // Cached once to avoid repeated getElementById calls inside the hot scheduler loop
+426: /* -----------------------------------------------------------------------
+427: Initialisation Sequence
+428: ----------------------------------------------------------------------- */
+430: formatRequiredLabels();                    // Add * to required form fields
+431: UI.Inputs.assayName.value = generateAutoID(); // Pre-fill with timestamp-based ID
+432: restoreSetupDraft();                       // #1: Restore any unsaved form draft
+433: initializeSettings();                      // Restore saved preferences from localStorage
+434: setState(STATES.SETUP);                    // Render the initial state
+436: // Clean up orphan sessions from previous crashes, then check IDB availability.
+437: // Merged into one Promise.allSettled so the two cleanup functions are not called
+438: // twice (previously a fire-and-forget pair ran alongside this block, causing
+439: // parallel IDB transactions that could silently abort each other).
+443: recoverCrashGuard()      // C4: merge sessionStorage snapshot into IDB on startup
+451: 0  // persistent
+457: /* -----------------------------------------------------------------------
+458: State Machine
+459: ----------------------------------------------------------------------- */
+461: /**
+462: * Transitions the application to a new state.
+463: *
+464: * Sets body.className to "state-<nextState>" so CSS rules can show or hide
+465: * the correct sections without manual display toggling in JS.
+466: *
+467: * Each case also configures button availability for that state to prevent
+468: * invalid actions (e.g. tapping Stop when no run is active).
+469: *
+470: * @param {string} nextState - Target state constant from STATES.
+471: */
+500: // Bug 3 fix: always recompute the tap button label based on the
+501: // currently-selected genotype. Without this, completing or stopping a
+502: // run snaps the label back to "Select Genotype to Start" even though
+503: // the dropdown still shows the previously chosen genotype.
+524: // The "do not leave" beforeunload dialog is handled by the event listener
+525: // registered below — no additional setup is needed here.
+529: // All controls remain as-is; export screen CSS handles visibility
+535: /* -----------------------------------------------------------------------
+536: Overlay Screen Management
+537: ----------------------------------------------------------------------- */
+539: /**
+540: * Shows an overlay screen (settings, guidelines, saved assays) while
+541: * adding the 'state-overlay' body class for CSS-driven dimming.
+542: *
+543: * @param {HTMLElement} screenElement - The section element to show.
+544: */
+547: UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");  // M9: reset aria-expanded
+550: // Collapse all overlay screens first to avoid stacking
+558: /**
+559: * Hides an overlay screen and removes the dimming class.
+560: *
+561: * @param {HTMLElement} screenElement - The section element to hide.
+562: */
+569: /* -----------------------------------------------------------------------
+570: Hardware Integration
+571: ----------------------------------------------------------------------- */
+573: /**
+574: * Requests a screen Wake Lock to prevent the device from sleeping during
+575: * an active run. Silently no-ops on browsers that don't support the API.
+576: */
+588: /**
+589: * Releases the active Wake Lock (called on run complete or stop).
+590: * Safe to call when no lock is held.
+591: */
+602: /* -----------------------------------------------------------------------
+603: Run Lifecycle — Start
+604: ----------------------------------------------------------------------- */
+606: /**
+607: * Creates a new run record within the current trial and starts the metronome.
+608: *
+609: * Flow:
+610: *   1. Creates a run object and appends it to the active trial in memory.
+611: *   2. Persists the initial run record to IDB.
+612: *   3. Requests Wake Lock and transitions to RUNNING state.
+613: *   4. Initialises scheduling timestamps and starts the Worker heartbeat.
+614: */
+623: // H2 fix: guard against an empty genotype — createRun with genotype:"" would
+624: // silently persist an un-labelled run and corrupt exports.
+630: // Count only eligible runs for this genotype to determine the next animal index,
+631: // consistent with the tap-button and genotype-dropdown counters
+645: // Transition UI
+655: /**
+656: * Seeds the scheduling timestamps using the AudioContext clock and starts
+657: * the Web Worker metronome heartbeat.
+658: *
+659: * The 0.5s offset gives the audio context time to warm up before the first
+660: * tick fires, preventing the first beep from being clipped or delayed.
+661: *
+662: * Also captures the active run reference and stable assay parameters into
+663: * module-level cache variables so scheduler() never dereferences currentAssay
+664: * or scans the runs array during its hot path.
+665: */
+667: // Capture the active run reference once — scheduler() will use this directly
+671: // Cache stable run parameters to avoid repeated property lookups in scheduler()
+676: // Forward bin size to audio module for "bins" voice mode
+679: // Reset all scheduling counters
+689: const startTime = t0 + 0.5;  // 500ms warm-up delay
+692: // Fire the TTS command slightly before the stimulus opens to compensate
+693: // for browser speech-engine latency (speechLeadMs, default 80 ms).
+695: nextDataIntervalTime   = startTime + runISI;  // First window closes after one ISI
+698: armbandStartHeartbeat();  // keep armband watchdog alive during the run
+700: // Cancel any stale animation frame before starting a fresh one
+701: // (guards against rapid stop→start sequences stacking rAF callbacks)
+709: /* -----------------------------------------------------------------------
+710: Scheduling Pipeline (Core)
+711: ----------------------------------------------------------------------- */
+713: /**
+714: * The main scheduler function — called on every Worker "tick" (~125×/sec).
+715: *
+716: * Runs three sequential layers:
+717: *
+718: *   Step 0: TIMING INTEGRITY CHECK
+719: *     Detects if the gap since the last tick is suspiciously large
+720: *     (indicates backgrounding or browser throttling). If so, stops the
+721: *     run and marks it ineligible to prevent recording garbage data.
+722: *
+723: *   Step 1: SPEECH / UI SYNC
+724: *     Fires at the opening of each stimulus window.
+725: *     Updates the stimulus counter and triggers optional voice cues.
+726: *
+727: *   Step 2: DATA RECORDING
+728: *     Fires at the closing of each stimulus window.
+729: *     Checks whether a tap occurred during that interval and records 0 or 1.
+730: *     Batch-saves to IDB every BATCH_SAVE_INTERVAL stimuli.
+731: *     Triggers run completion when all stimuli are recorded.
+732: *
+733: *   Step 3: AUDIO PRE-SCHEDULING
+734: *     Schedules hardware beeps slightly ahead of time using the AudioContext
+735: *     clock to guarantee timing accuracy independent of JS thread load.
+736: */
+738: // Use cached run reference — avoids a linear .find() scan (~125×/sec)
+741: // Safety: if there's no active run, halt the loop
+749: // ── Step 0: Timing gap detection ───────────────────────────────────────
+750: // Note: lastSchedulerTime is set *after* this check so that on the very
+751: // first tick (lastSchedulerTime === 0) the guard is intentionally skipped.
+752: // On a recovered return from background, the first tick post-resume will
+753: // correctly fire the gap guard and abort the run before any data is lost.
+769: // ── Step 1: Speech & UI sync (fires at stimulus open) ──────────────────
+770: // Optimisation: when the scheduler misses several ticks (e.g. a brief JS
+771: // pause), the while-loop would catch up by firing triggerImmediateSpeech()
+772: // for every missed beat. Each call does cancel() + speak(), so only the
+773: // last utterance survives — the intermediate ones are pure churn (~5-10ms
+774: // each). Instead, we advance through all missed beats, update the UI to
+775: // the latest, and fire speech exactly once for the most recent stimulus.
+779: const displayIndex = nextSpeechIndex + 1;  // 1-based for display
+781: // Always update the counter — it must reflect the latest stimulus
+784: // Only fire speech on the last iteration of this catch-up loop.
+785: // Peek ahead: if the *next* beat is also due, skip speech for this one.
+796: // If we skipped all speech calls (shouldn't happen, but defensive),
+797: // the counter is still up-to-date from the last iteration above.
+798: void speechFired;  // Suppress unused-variable linters
+801: // ── Step 2: Data recording (fires at stimulus close) ───────────────────
+806: // Check if the experimenter tapped within this stimulus window.
+807: // Uses an index pointer (tapReadIndex) to scan only unconsumed entries,
+808: // avoiding the previous .some() + .filter() pattern that allocated a new
+809: // array and closures on every ISI tick.
+813: if (t >= intervalEnd) break;            // belongs to a future window
+814: if (t >= intervalStart) tapOccurred = true;  // inside this window
+815: tapReadIndex++;                         // consume (past or matched)
+818: // Encoding:
+819: //   1 = animal responded (default — experimenter did NOT tap)
+820: //   0 = animal did not respond (experimenter tapped to record non-response)
+823: // Reset visual "bucket fulfilled" indicators for the next interval
+825: // #4: Remove ISI waiting dim now that a new interval is starting
+833: // Batch save: flush to IDB periodically to reduce transaction overhead.
+834: // Index updated *after* increment so the count reflects stimuli fully recorded.
+836: // C3 fix: guard against trial being null — getActiveTrial() can return null
+837: // if the trial was completed or abandoned via another code path.
+847: // Check if all stimuli for this run are recorded
+849: // Capture the run reference BEFORE stopCueLoop() sets activeRun = null,
+850: // so completeRunNormally() receives it directly without a fragile .find() re-scan.
+854: return;  // Exit scheduler immediately — run is over
+858: // ── Step 3: Audio pre-scheduling (fires slightly ahead of time) ────────
+870: /* -----------------------------------------------------------------------
+871: Run Lifecycle — Stop / Complete
+872: ----------------------------------------------------------------------- */
+874: /**
+875: * Halts the Worker heartbeat and cancels the visual animation frame.
+876: * Also clears the cached activeRun reference so scheduler() cannot fire
+877: * against a stale run object if a tick arrives after stop.
+878: * Does not modify any data — call before any run-ending function.
+879: */
+882: armbandStopHeartbeat();   // cancel heartbeat so watchdog doesn't fire between runs
+883: activeRun = null;  // Defensive: prevent scheduler() processing stale run
+888: // Bug 21 fix: trim consumed tapTimestamps entries to prevent unbounded
+889: // array growth during long runs. Reset the read index to match.
+894: /**
+895: * Called when a run completes naturally (all stimuli recorded).
+896: *
+897: * Marks the run as completed, evaluates eligibility for analysis,
+898: * saves the final state to IDB, plays the completion chime, and
+899: * returns the UI to POISED state so the next run can begin.
+900: */
+903: // run is passed directly from the scheduler — no .find() needed.
+904: // (activeRun is already null at this point because stopCueLoop() was called first.)
+907: // BUG-7 fix: guard against null activeTrial. This can happen in an extreme
+908: // race where the trial was already completed via another path before the
+909: // scheduler fired completeRunNormally. Without this guard, line 830
+910: // (`saveRun(currentAssay.assayId, activeTrial.trialId, run)`) would throw
+911: // TypeError and the final IDB save would never happen.
+926: // A run is eligible for analysis only if it recorded the full expected stimulus count
+932: // Pre-compute and cache binned percentages on the run object
+936: // Warn if the stimulus count is not an exact multiple of binSize —
+937: // trailing values will be silently dropped during analysis
+940: // M4 fix: reworded to remove ambiguous double-negative ("do not fill")
+945: // Final save: ensures all values are in IDB regardless of batch timing
+948: // Update last-modified timestamp so metadata exports reflect the latest activity
+952: // Completion feedback
+955: if (navigator.vibrate) navigator.vibrate([100, 50, 200]);  // Ascending haptic pattern
+956: } catch (e) { /* Haptics not supported — silently ignore */ }
+957: armbandRunComplete();  // mirror navigator.vibrate([100,50,200]) on the armband
+959: // Update the UI and return to POISED state for the next run.
+960: // applyProgressVisibilityPreference() below sets both .hidden and the button
+961: // label correctly — no need to pre-set them here (that would override the pref).
+965: // Respect the user's saved visibility preference for the progress table
+966: // (set via the "Hide/Show Progress" toggle in the assay screen).
+972: /**
+973: * Aborts an in-progress run and marks it as ineligible for analysis.
+974: * Called by: the Stop Run button, the timing gap detector, and crash guards.
+975: *
+976: * @param {string} [reason="Run stopped early by user"] - Explanation for the stop.
+977: */
+980: // BUG-3 fix: if warmup was in progress, clear the overlay and ring class so
+981: // the UI doesn't get stuck in an unresponsive state after an external stop.
+985: // Snapshot activeRun BEFORE stopCueLoop() nulls it. This prevents a double-stop
+986: // race where a final Worker tick arrives after stopCueLoop() clears activeRun,
+987: // causing a second call that would tag and re-save an already-tagged run.
+992: // Bug 5: guard against currentAssay being null (e.g. corrupted state or a
+993: // spurious call after resetToSetup). Without this, saveRun(currentAssay.assayId, ...)
+994: // below would throw TypeError: Cannot read properties of null.
+1001: // Tag the run with ineligibility information
+1007: // C4 fix: activeTrial can be null if the trial was already completed/abandoned
+1008: // by another code path (e.g. crash recovery). Without this guard, .trialId
+1009: // throws TypeError and the run's data is silently lost.
+1018: // Update last-modified timestamp so metadata exports reflect the latest activity
+1022: // Update UI and return to POISED state.
+1023: // applyProgressVisibilityPreference() handles both .hidden and the label.
+1027: // Respect the user's saved visibility preference for the progress table.
+1040: /* -----------------------------------------------------------------------
+1041: Tap Action Handler
+1042: ----------------------------------------------------------------------- */
+1044: /**
+1045: * Central handler for all tap/keypress inputs.
+1046: *
+1047: * Routes differently depending on current state:
+1048: *   CONFIGURED / POISED: double-tap confirmation → start warmup → start run
+1049: *   RUNNING:             record a tap timestamp for the current stimulus window
+1050: *
+1051: * Also handles:
+1052: *   - Hardware debounce (TAP_COOLDOWN_MS)
+1053: *   - Audio context warm-up on first interaction
+1054: *   - Visual and haptic feedback on every tap
+1055: */
+1057: // Block taps on the export screen entirely
+1060: // ── Hardware debounce ─────────────────────────────────────────────────
+1067: // ── Pre-flight checks (only when starting a new run) ──────────────────
+1077: // First tap: show confirmation prompt and set a 2-second reset timer
+1080: // C1 fix: activeTrial can be null if the trial was abandoned/completed by
+1081: // another code path. Use optional chaining consistent with the timeout branch.
+1093: // Bug 10 fix: re-read genotype from the DOM inside the timeout to avoid
+1094: // using a stale closure-captured value if the user changed the dropdown.
+1096: // Recompute freshly — do not use the closure-captured nextIndex which was
+1097: // calculated at first-tap time and may be stale if a run completed in between.
+1108: return;  // Wait for the second tap
+1111: // Second tap: proceed to start
+1116: // ── Audio warm-up (first interaction) ────────────────────────────────────
+1118: // Bug 3: warmUpAudio() now re-throws on failure. Catch here so we can
+1119: // show a user-facing error and abort instead of continuing with a
+1120: // suspended AudioContext where getAudioTime() returns 0.
+1131: // Bug 7 (audio): speak("") with an empty string can break iOS speechSynthesis.
+1132: // primeSpeechEngine() uses a silent space utterance (" ") for the same purpose
+1133: // and is already used during warmup for exactly this reason.
+1137: // ── Visual & haptic feedback ──────────────────────────────────────────
+1147: // ── Route the action ──────────────────────────────────────────────────
+1149: // Record the tap's AudioContext timestamp for the data recording layer
+1151: armbandTap();  // mirror navigator.vibrate(50) on the armband
+1153: // Visual indicator: "bucket fulfilled" shows the tap was registered
+1155: // Use cached reference — avoids getElementById on every tap during a run
+1159: // Start the warmup countdown (which then calls startRun)
+1165: /* -----------------------------------------------------------------------
+1166: Warmup Countdown
+1167: ----------------------------------------------------------------------- */
+1169: /**
+1170: * Plays an optional countdown (warmupDuration seconds) before starting a run.
+1171: * Shows a large number countdown in the UI and plays a beep each second.
+1172: *
+1173: * If warmup is disabled in Settings, calls startRun() immediately.
+1174: * The isWarmingUp flag prevents re-entry if the user taps during the countdown.
+1175: *
+1176: * The countdown checks each iteration whether it should still be running,
+1177: * so it can be cancelled cleanly if the state changes unexpectedly.
+1178: */
+1183: primeSpeechEngine();  // Warm the TTS engine even when skipping the countdown
+1184: // Bug 2: wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
+1196: // Show the countdown overlay INSIDE the tap button (button stays visible).
+1197: // The .warming-up class adds the pulsing ring and blocks pointer events.
+1201: // Prime the TTS engine with a silent utterance so the synthesis pipeline
+1202: // is warm before the first real voiced cue fires during the run.
+1205: /** Cleans up warmup UI without starting a run (cancelled path). */
+1210: // Restore the tap button label so it doesn't show the stale "Tap again…" text.
+1220: // Cancel if the state has changed externally (e.g. stop was clicked)
+1227: // Re-trigger the pop-in animation on every digit change (3→2→1).
+1228: // Removing + re-adding the animation via a class-toggle forces a reflow
+1229: // that restarts the @keyframe from scratch each second.
+1231: void UI.Displays.warmupNumber.offsetWidth;   // trigger reflow
+1233: playWarmupTone(1200);  // High beep each countdown second
+1237: // #7: Re-check after the await — warmup may have been cancelled while suspended
+1244: // Countdown finished — tear down the overlay and start the run
+1249: // Bug 2: wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
+1259: /* -----------------------------------------------------------------------
+1260: Visual Metronome Renderer
+1261: ----------------------------------------------------------------------- */
+1263: /**
+1264: * Draws the visual progress bar that sweeps left-to-right across each
+1265: * stimulus interval, synced to the AudioContext clock.
+1266: *
+1267: * Uses requestAnimationFrame to run at display refresh rate.
+1268: * The bar position is calculated purely from the AudioContext time,
+1269: * so it stays perfectly in sync with audio regardless of frame rate.
+1270: */
+1273: // BUG-11 (clarification): Setting visualAnimationFrame = null here is safe.
+1274: // This callback itself is the current rAF tick — its handle was already
+1275: // consumed by the browser when it invoked us.  We zero the variable so
+1276: // stopCueLoop()'s cancelAnimationFrame(visualAnimationFrame) call has a
+1277: // consistent "no pending frame" sentinel (null) regardless of which path
+1278: // stopped the run, preventing a stale handle from ever being re-cancelled
+1279: // on the next run.
+1284: // Snapshot nextDataIntervalTime once to avoid a race with scheduler(), which can
+1285: // increment it between consecutive rAF callbacks and cause the bar to flash to 100%
+1286: // or reset to 0% mid-interval before the next frame corrects it.
+1289: const intervalStart = intervalEnd - runISI;  // Use cached ISI
+1291: // Progress: 0.0 at interval start → 1.0 at interval end
+1292: let progress = (currentTime - intervalStart) / runISI;  // Use cached ISI
+1293: progress     = Math.max(0, Math.min(1, progress));  // Clamp to [0, 1]
+1295: // #4: Dim the tap button during ISI — only after a tap has already been registered.
+1296: // When bucket-fulfilled (experimenter tapped), there's nothing more to do until
+1297: // the next interval, so a gentle dim signals "wait" without alarming the user.
+1305: // Use cached DOM reference from UI — avoids getElementById on every frame
+1308: // #10: near-full glow at 90%+ to signal upcoming stimulus
+1316: // Schedule the next frame
+1321: /* -----------------------------------------------------------------------
+1322: UI Renderers & Data Helpers
+1323: ----------------------------------------------------------------------- */
+1325: /**
+1326: * Adds a red asterisk (*) next to the label of every required form field.
+1327: * Runs once at startup so CSS doesn't need to carry this concern.
+1328: */
+1349: /**
+1350: * Restores user preferences from localStorage and applies them to the UI.
+1351: * Called once during initialisation.
+1352: */
+1355: // Warmup settings
+1360: // Theme
+1361: // Mirror the inline script's OS-preference fallback: if no theme has ever been saved,
+1362: // use prefers-color-scheme rather than hardcoding "light". Without this,
+1363: // initializeSettings() would overwrite the dark theme the inline script just applied
+1364: // (via the same OS-preference check) back to "light" on first load.
+1374: // Voice mode
+1381: // #15: Tick pitch
+1391: // Speech lead time (ms) — compensates for TTS engine latency
+1398: // #21: Restore progress-table visibility preference
+1400: // We don't apply it here at startup because there's no data yet;
+1401: // it gets applied in completeRunNormally() / stopRunEarly() when
+1402: // the table is first shown (or kept hidden) according to preference.
+1404: // H5: localStorage unavailable (e.g. Private Browsing with strict settings) — use defaults
+1408: /**
+1409: * Applies the user's saved progress-table visibility preference.
+1410: * Called after each run ends so the table respects the user's toggle setting.
+1411: */
+1414: try { pref = localStorage.getItem("touchAssayProgressVisible"); } catch {} // L7: guard for Private Browsing
+1417: // Default: show the table ("true" or no stored pref = visible)
+1420: // Bug 2 fix: also keep aria-hidden in sync so assistive tech respects the toggle
+1422: // #7/#15: Update text, icon, and aria-pressed together
+1432: /**
+1433: * Calculates and displays a warning when the stimulus count is not an
+1434: * exact multiple of the bin size (some trailing stimuli will be dropped).
+1435: * Called whenever either input field changes.
+1436: */
+1453: /**
+1454: * Rebuilds the genotype selection dropdown with current run counts.
+1455: * The count shows how many runs have been completed (non-active) for each genotype
+1456: * in the current trial, giving the experimenter live feedback.
+1457: *
+1458: * Restores the previously selected value after rebuilding.
+1459: *
+1460: * @param {string[]} genotypes - Ordered list of genotype labels.
+1461: */
+1473: // Count only eligible (completed + eligible for analysis) runs for this genotype
+1482: // Restore the selection if the previously selected genotype still exists
+1489: /**
+1490: * Re-populates the genotype dropdown to reflect updated run counts
+1491: * without changing the current selection. Called after each run ends.
+1492: */
+1498: /**
+1499: * Rebuilds the in-assay progress summary table showing total, eligible,
+1500: * and ineligible run counts per genotype for the current trial.
+1501: */
+1504: if (!container) return;  // Bug 8: guard against missing element
+1507: // BUG-F fix: call getActiveTrial once and reuse — avoids a second .find() scan.
+1513: // Initialise counters for every declared genotype
+1518: // Tally runs into the appropriate bucket (skip active/in-progress runs)
+1521: if (r.status === "active") return;  // Don't count in-progress runs
+1547: /**
+1548: * Populates the export dataset list with checkboxes for each trial and
+1549: * the two pooled (completed-only vs all-trials) options.
+1550: * Completed trials are pre-checked; abandoned/active are unchecked.
+1551: * Shows a per-genotype run breakdown alongside the totals (#7).
+1552: * Syncs the Select All checkbox and refreshes button state after building (#8, #9).
+1553: *
+1554: * @param {Object} assay - The full assay object.
+1555: */
+1562: // Bug 9: accumulate into a string and assign once — avoids O(n²) DOM
+1563: // re-parsing that happens when innerHTML += is called inside a loop
+1564: // (each append reads the entire current DOM, re-serialises it, and
+1565: // re-parses the concatenated result).
+1574: // #7: per-genotype run count breakdown
+1603: // Single assignment — all trial rows are parsed in one pass
+1606: // Sync select-all state and button enabled state after rebuilding the list
+1611: /**
+1612: * Enables or disables the Export and Preview buttons based on whether at
+1613: * least one dataset checkbox is currently checked (#8).
+1614: */
+1623: /**
+1624: * Updates the "Select all datasets" master checkbox to reflect the current
+1625: * checked / indeterminate state of all dataset checkboxes (#9).
+1626: */
+1636: // BUG-10 fix: escapeHTML is imported from utils.js (shared with export.js).
+1637: // The local copy that was here has been removed.
+1639: /**
+1640: * Builds and renders the trial summary card on the export screen.
+1641: * Shows eligible run counts and mean overall response rate per genotype
+1642: * for the most recently completed trial.
+1643: *
+1644: * @param {Object} assay - The fully hydrated assay (after hydrateAssay()).
+1645: */
+1647: // Trial summary removed — keep card permanently hidden.
+1652: /**
+1653: * Fetches all saved assays from IndexedDB and renders them as a list
+1654: * in the Saved Assays overlay. Each entry shows the assay name, date,
+1655: * and action buttons (Start New Trial, Export, Delete).
+1656: */
+1662: // #31: Styled empty state with icon instead of plain text
+1676: // Sort newest first
+1700: UI.Inputs.selectAllAssays.indeterminate   = false;  // BUG-H fix: clear indeterminate on every rebuild
+1703: /**
+1704: * Reads the export dataset checkboxes and returns the selected configurations.
+1705: *
+1706: * @returns {Array<{ type: string, trialId?: string, includeAbandoned?: boolean }>}
+1707: */
+1720: /* -----------------------------------------------------------------------
+1721: Crash Guards (Visibility & Unload)
+1722: ----------------------------------------------------------------------- */
+1724: /**
+1725: * Fires when the app is sent to the background (visibilityState = "hidden").
+1726: * Emergency-flushes the current run data to IDB before the browser suspends us.
+1727: *
+1728: * The scheduler's timing gap check will stop the run when the app resumes
+1729: * (because the gap will exceed 2×ISI), so we only need to save here, not stop.
+1730: *
+1731: * Also re-requests the Wake Lock when the app returns to the foreground,
+1732: * because Wake Locks are released automatically when the page is hidden.
+1733: */
+1736: // Emergency flush: persist whatever is recorded so far before the browser suspends us.
+1737: // Do NOT call stopRunEarly() here — the scheduler's gap check (Step 0) will stop the
+1738: // run cleanly when the app resumes once the gap exceeds 2×ISI. Calling stopRunEarly()
+1739: // here AND letting the gap check fire on resume creates a double-stop race where two
+1740: // concurrent IDB writes target the same run record.
+1748: // Wake Locks are released when hidden; re-acquire when visible, but only
+1749: // if a run is still active — there is no point holding the lock otherwise.
+1750: // Bug 4: also check activeRun !== null. On slow devices the timing-gap auto-stop
+1751: // in scheduler() fires on the first tick after resume, which means currentState
+1752: // is still RUNNING when this handler fires. Without the activeRun guard, we
+1753: // re-acquire a lock that will be released again moments later.
+1759: /**
+1760: * Fires synchronously when the user closes or refreshes the tab.
+1761: * Marks the active run as stoppedEarly and attempts a final IDB save.
+1762: *
+1763: * Note: beforeunload handlers are best-effort on mobile — the save may
+1764: * not complete before the page is torn down. The abandonAllActiveTrialsInDB()
+1765: * cleanup on next launch catches any that slip through.
+1766: */
+1770: // #5: Show the browser's native "Leave site?" dialog when a run is active.
+1771: // Setting returnValue triggers the confirmation on all modern browsers.
+1773: e.returnValue = "";  // Required for Chrome/Edge (legacy spec)
+1775: // BUG-1 fix: snapshot the current run values to sessionStorage synchronously
+1776: // before the page is torn down. On mobile browsers (iOS Safari, Chrome Android)
+1777: // the async IDB write inside stopRunEarly() is not guaranteed to commit before
+1778: // the page is unloaded. sessionStorage writes are synchronous and survive a
+1779: // same-origin reload, giving abandonAllActiveTrialsInDB() on next launch a
+1780: // fallback to tag the run as stopped even if the IDB write was dropped.
+1793: } catch { /* sessionStorage may be unavailable in some private-browse modes */ }
+1795: // Bug 11 fix: beforeunload should NOT call stopRunEarly() because the user
+1796: // may click "Stay" on the Leave dialog. stopRunEarly() has irreversible side
+1797: // effects (marks the run stoppedEarly, stops the Worker), so it should only
+1798: // fire on actual page unload. The `unload` event below handles this.
+1799: // NOTE: `unload` is unreliable in modern browsers (especially mobile), but
+1800: // the sessionStorage crash-guard snapshot above provides a safety net.
+1803: // Bug 11 fix: move stopRunEarly() to the `unload` event so it only fires
+1804: // when the user actually leaves, not when they click "Stay" on the dialog.
+1811: /* -----------------------------------------------------------------------
+1812: Web Worker Communication
+1813: ----------------------------------------------------------------------- */
+1815: /**
+1816: * Receives heartbeat ticks from the timer-worker.
+1817: * Only calls scheduler() when the app is actively in RUNNING state
+1818: * to prevent spurious processing during other states.
+1819: */
+1821: // Also guard on activeRun: stopCueLoop() nulls activeRun synchronously, but
+1822: // a tick message already queued in the event loop can still arrive before
+1823: // completeRunNormally() calls setState(POISED). Checking activeRun here means
+1824: // those late ticks exit immediately without re-entering scheduler().
+1831: /* -----------------------------------------------------------------------
+1832: Navigation Helpers (shared between newAssay and headerHome)
+1833: ----------------------------------------------------------------------- */
+1835: /**
+1836: * Zeroes all scheduling and timing counters so a fresh run cannot be
+1837: * corrupted by values left over from a previous session.
+1838: *
+1839: * Also resets the warmup guard — navigating away mid-countdown would
+1840: * otherwise leave `isWarmingUp = true`, blocking the next run from starting.
+1841: */
+1845: // Bug 4: also reset the two speech/audio index counters so a fresh session after
+1846: // resetToSetup() cannot inherit stale values from a previous run.
+1858: /**
+1859: * Tears down the active assay and returns the app to the Setup screen.
+1860: *
+1861: * Resets the form, clears the progress table, and zeroes all
+1862: * timing/scheduling counters. Called by both the "New Assay" button
+1863: * and the header logo/home button.
+1864: */
+1866: // BUG-C fix: clear the double-tap guard so a first-tap on a previous assay
+1867: // cannot carry over and skip the confirmation on the very next assay.
+1875: // Bug 4: form.reset() clears the hidden #genotypes input value but does NOT
+1876: // clear the chip DOM elements — chips from the previous assay would remain
+1877: // visually, while the hidden input is empty, causing a confusing validation
+1878: // error on next submit. Clear the chip list explicitly.
+1882: // Clear progress table from the previous assay
+1884: // Bug 16 fix: guard against null — element may not exist in all DOM states.
+1889: // #7/#15: Sync progress toggle button state
+1905: /* -----------------------------------------------------------------------
+1906: showConfirmModal — Bug 8 fix
+1907: Theme-aware async confirmation dialog. Replaces blocking confirm() that
+1908: cannot be styled and may be suppressed in PWA / Private Browsing mode.
+1909: ----------------------------------------------------------------------- */
+1911: /**
+1912: * Shows a lightweight confirmation modal that respects the app's theme.
+1913: *
+1914: * @param {string} title      Bold heading shown at the top of the dialog.
+1915: * @param {string} body       Descriptive sentence shown below the heading.
+1916: * @param {string} [okLabel]  Label for the confirm button (default "Confirm").
+1917: * @returns {Promise<boolean>} Resolves true on confirm, false on cancel.
+1918: */
+1950: /* -----------------------------------------------------------------------
+1951: Event Bindings
+1952: ----------------------------------------------------------------------- */
+1954: /**
+1955: * Saves all current setup-form field values as a JSON draft in localStorage.
+1956: * Called on every input event (debounced) so partial entries survive a
+1957: * tab close or navigation away.
+1958: *
+1959: * Uses a 400ms debounce so rapid keystrokes only trigger one write per burst.
+1960: */
+1976: } catch { /* storage not available */ }
+1977: }, 400);  // 400ms debounce
+1980: /**
+1981: * Restores a saved setup draft into the form fields and genotype chips.
+1982: * Only runs if there is a non-empty draft in localStorage.
+1983: */
+1996: // Use != null (not truthiness) so that valid values of 0 (e.g. 0 °C, 0% RH) are restored.
+2000: // Restore genotype chips via the hidden input + chip script
+2001: // Trigger the same addChip logic by setting the hidden input value
+2002: // and populating chips through the existing chip-input infrastructure.
+2007: // Clear any existing chips first
+2011: // Manually create chips matching the inline chip script's format
+2025: // Mirror syncHidden() from the inline chip-input script in index.html.
+2026: // That function is private to its IIFE scope so we replicate the logic here.
+2027: // If syncHidden() changes in the inline script, update this block to match.
+2031: scheduleDraftSave();  // Bug 6: persist the updated genotype list after chip removal
+2040: // Trigger bin warning recalculation after restoring values
+2044: /** Clears the setup draft from localStorage. Called after a successful Begin. (#1) */
+2046: try { localStorage.removeItem("touchAssaySetupDraft"); } catch { /* noop */ }
+2051: // ── Draft auto-save: wire all setup form fields (#1) ────────────────────
+2052: // Any change to a setup field is debounced and written to localStorage so
+2053: // the form survives accidental navigation or a page refresh.
+2065: // Also save when the hidden genotypes field changes (updated by chip script)
+2093: // #2: Show non-blocking advisory for very short ISI
+2098: // Create and persist the assay and its first trial
+2106: // #1: Clear the draft now that the assay has been saved
+2113: // ── Bin warning live update ─────────────────────────────────────────────
+2117: // Bug 10 fix: feature-detect PointerEvent so only one event fires per touch.
+2118: // On modern iOS/Android *both* pointerdown and touchstart fire for the same
+2119: // physical touch — using both creates a double-fire risk when the 80ms
+2120: // TAP_COOLDOWN window is straddled by a GC pause.
+2123: e.preventDefault();  // Prevents ghost click / double-fire on touch devices
+2127: // Fallback for legacy Android WebViews that do not implement Pointer Events
+2129: e.preventDefault();  // Suppress the following 300ms-delayed click
+2134: // ── Space bar shortcut ──────────────────────────────────────────────────
+2136: // Prevent Space from scrolling the page while on the trial screen,
+2137: // even during key-repeat (held key). Do this before the repeat-guard
+2138: // so that a held Space never triggers a browser scroll.
+2146: // Ignore held-down keys (auto-repeat) for tap actions
+2149: // Bug 13 fix: allow Escape to cancel a warmup countdown in progress.
+2150: // Setting isWarmingUp = false causes the runWarmup() loop to exit on its
+2151: // next iteration, but we also restore the UI immediately here so the user
+2152: // sees instant feedback instead of waiting up to 1 s for the setTimeout.
+2155: // Hide the in-button overlay and remove the pulsing ring class
+2158: // BUG-I fix: also restore the tap button label — the Escape path was the
+2159: // only cancel branch that left the stale "Tap again to start…" text showing.
+2169: // Bug 15 fix: Escape key closes preview modal, overlay screens, and overflow menu.
+2171: // 1. Close preview modal if open
+2176: // 2. Close any open overlay screen (settings, guidelines, saved assays)
+2189: // 3. Close overflow menu if open
+2202: // On the assay screen, Space and Enter must NEVER activate any focused
+2203: // element — including the genotype <select>, buttons, etc.
+2204: // Block the browser default BEFORE any early-return so the <select>
+2205: // dropdown cannot be opened and no button can be activated.
+2210: // Non-activation keys (Tab, arrow keys, etc.) pass through unaffected.
+2213: // Bug 11: Enter is silently swallowed — no tap, no button activation.
+2214: // (The previous code used `if (event.key !== " ") return` which was
+2215: // unreachable dead code: the guard above already ensures key is " " or
+2216: // "Enter", so the only case that would pass this check is "Enter".)
+2219: // RUNNING: tap unconditionally takes priority over everything
+2225: // If a toast has keyboard focus, let the toast's own keydown handler
+2226: // dismiss it (already wired in toast.js) — don't also trigger a tap
+2229: // Outside a run: Space dismisses the newest visible toast first
+2236: // ── Non-assay screens ─────────────────────────────────────────────────
+2237: // Allow normal keyboard input in form fields (text inputs, selects, etc.)
+2240: // Space only: dismiss toast or trigger tap
+2249: // ── Stop run button ─────────────────────────────────────────────────────
+2252: // -- Haptic Armband connect buttons (header icon + Settings card) ---------
+2253: // Both buttons call the same shared helper so status displays stay in sync.
+2255: // Reveal the header Bluetooth icon and the Settings fieldset
+2259: // Track last-alerted battery threshold so toasts fire only once per crossing.
+2260: // 100 = "haven't warned yet"; reset to 100 on reconnect so warnings re-arm.
+2263: /**
+2264: * Handles battery level updates pushed by the armband BLE notification.
+2265: * Updates the header badge, Settings badge, and fires threshold toasts.
+2266: * This runs asynchronously from a BLE event -- never on the tap/audio path.
+2267: * @param {number} level  Battery percentage 0-100.
+2268: */
+2270: // -- Header badge ----------------------------------------------------
+2275: // Colour: green >20%, amber 10-20%, red <=10%
+2280: // -- Settings badge --------------------------------------------------
+2283: // -- Header button tooltip -------------------------------------------
+2287: // -- Threshold toasts (fire only once per crossing) ------------------
+2292: 0   // persistent until dismissed
+2303: // Battery recovered above 20% (e.g. after hot-swap) -- re-arm both warnings
+2308: /**
+2309: * Restores the UI to the "connected" state.
+2310: * Called from both the normal connect path and the auto-reconnect callback.
+2311: */
+2315: // Restore header icon button — remove the "connecting" pending class and
+2316: // re-enable it (it was disabled during the picker/GATT handshake).
+2325: // FW-5 FIX: Show disconnect button so user can cleanly switch armbands
+2327: // Enable the Test Vibration button now that the armband is ready
+2331: /**
+2332: * Shared connection handler called by both the header icon and Settings button.
+2333: * @param {HTMLButtonElement} btn  The button that was clicked.
+2334: */
+2336: // BUG-D fix: guard against opening the BLE picker while already connected.
+2337: // Without this, a second requestDevice() call on top of an existing GATT
+2338: // connection leaves the old gattserverdisconnected listener dangling.
+2344: // Do NOT set textContent here — it would destroy the SVG icon child node.
+2345: // Use a CSS class to signal the pending state instead.
+2353: // onDisconnect callback
+2363: UI.Buttons.disconnectArmband.setAttribute("hidden", "");  // FW-5: hide disconnect btn
+2364: _lastBattWarnLevel = 100;  // re-arm threshold warnings after reconnect
+2367: // onBatteryUpdate callback
+2369: // onReconnect callback — fired when the background auto-reconnect succeeds
+2376: // -- Connection success ---------------------------------------------
+2381: // NotFoundError = user cancelled the browser picker -- silent
+2395: // Header icon: pass itself as btn so its own disabled/text state is managed.
+2396: // When the armband is disconnected (yellow icon) the click opens the picker
+2397: // to reconnect; when already connected it is a no-op (picker will reject).
+2400: // FW-5 FIX: Disconnect button — cleanly tears down the BLE connection
+2401: // so the user can pair a different armband without reloading the page.
+2413: UI.Buttons.testArmband.disabled = true;  // disable test btn — no armband connected
+2418: // Settings: Test Vibration button — sends a single tap to confirm the armband is alive.
+2431: // Brief visual confirmation so the user knows the command was dispatched.
+2441: // ── Finish trial button ─────────────────────────────────────────────────
+2443: // Bug 8 fix: replace browser-native confirm() (which is blocking, cannot be
+2444: // styled, and may be suppressed in PWA mode on some Android browsers) with a
+2445: // lightweight async modal that respects the app's theme.
+2455: // Bug 3: guard against null (can occur if the trial was already completed via another
+2456: // path, e.g. a rapid double-click or a race with the crash-guard cleanup).
+2462: // BUG-4 fix: markTrialAbandoned/Completed rejects when the trial record is not
+2463: // found in IDB (e.g. a first-launch write was dropped on mobile). Without this
+2464: // try/catch the promise rejection is unhandled, leaving the UI frozen on the
+2465: // assay screen with no error feedback to the experimenter.
+2478: // Hydrate FIRST so the export list reflects the updated trial status
+2480: // #14: Render summary card for the just-completed trial
+2486: // ── Show/hide progress table ────────────────────────────────────────────
+2491: // Bug 2 fix: keep aria-hidden in sync with the visual state
+2493: // #7/#15: Update text, icon, and aria-pressed
+2501: // #21: Persist the user's visibility preference
+2502: // Bug 3 fix: wrap in try/catch for Private Browsing / QuotaExceededError.
+2503: try { localStorage.setItem("touchAssayProgressVisible", String(nowVisible)); } catch { /* storage unavailable */ }
+2506: // ── Genotype selection change — update tap button label ─────────────────
+2510: // C2 fix: activeTrial can be null; use optional chaining to prevent crash.
+2518: // Reset the double-tap guard when the genotype changes
+2524: // ── Start new trial (from export screen) ───────────────────────────────
+2526: // H3 fix: guard against currentAssay being null — rapid navigation or state
+2527: // corruption could leave it null, causing .assayId to throw TypeError.
+2529: // Re-hydrate from IDB so trialIndex is always correct, even if the user has
+2530: // looped through export → backToAssay multiple times, and to pick up any
+2531: // run records written since the last hydrateAssay() call.
+2535: await saveTrial(currentAssay.assayId, trial);  // await: run start must not race DB write
+2538: // POISED (not CONFIGURED): this assay already exists; Finish Trial must be
+2539: // immediately available in case the experimenter only needs one run.
+2543: // ── New assay ───────────────────────────────────────────────────────────
+2545: // Warn if there is completed trial data that has not yet been exported,
+2546: // so the experimenter does not lose track of results saved in IndexedDB.
+2560: // ── Header home (logo / title) → back to setup ─────────────────────────
+2562: // Do not navigate away while a run is actively recording data
+2567: // ── Overlay navigation ──────────────────────────────────────────────────
+2575: // M3 fix: propagate async errors — previously the returned Promise was
+2576: // discarded so IDB failures produced a silent empty list with no user feedback.
+2586: // ── Overflow menu toggle ────────────────────────────────────────────────
+2588: e.stopPropagation();  // Prevent the document click handler from immediately closing it
+2589: const willBeOpen = UI.Displays.overflowMenu.hidden;  // true = it is currently closed → we are opening it
+2591: // BUG-1 fix: keep aria-expanded in sync so screen readers announce the correct
+2592: // open/closed state. Previously the attribute was hard-coded to "false" in HTML
+2593: // and never updated, so assistive technologies always reported the menu as collapsed.
+2597: // Close the overflow menu when clicking anywhere outside it
+2601: // BUG-1 fix: also reset aria-expanded when closed via outside click.
+2606: // ── Saved assays list — event delegation ───────────────────────────────
+2618: // Abandon any previously active trial (shouldn't exist, but guard anyway)
+2622: // Bug 5 fix: update the in-memory trial object to match what was
+2623: // just written to IDB. Without this, getActiveTrial() would still
+2624: // find this trial (status is "active" in memory), causing the new
+2625: // trial created below to be shadowed.
+2635: // Clear progress table from any previously loaded assay
+2636: // BUG-3 fix: guard against null — every other call site does this; the saved-assays
+2637: // start action was the only one missing it.
+2643: // #7/#15: Sync progress toggle
+2657: // Bug 12 fix: render the trial summary card so the export screen shows
+2658: // trial details, matching the pattern used in the complete-trial path (~L2085).
+2676: }  // end action routing
+2679: // ── Saved assays bulk selection ─────────────────────────────────────────
+2699: // #6: Inline confirmation for bulk delete — replaces the browser confirm() dialog
+2704: // If a confirmation bar is already showing, do nothing (user must respond to it)
+2752: // ── Settings ────────────────────────────────────────────────────────────
+2755: // Bug 3 fix: wrap in try/catch for Private Browsing / QuotaExceededError.
+2756: try { localStorage.setItem("touchAssayWarmupEnabled", isWarmupEnabled); } catch { /* storage unavailable */ }
+2760: // Clamp and persist on both "input" (live typing / spinner) and "change" (blur)
+2761: // so the displayed value always matches the JS variable and never shows 0.
+2765: // BUG-6 fix: restore the last valid value instead of leaving the field blank.
+2766: // Without this, clearing the field and then pressing a stepper button fires an
+2767: // "input" event with value="", parseInt returns NaN, and the field stays empty.
+2768: // The warmupDuration variable holds the previous good value; writing it back
+2769: // snaps the field to a valid number immediately.
+2774: UI.Settings.warmupDurationInput.value = warmupDuration;  // Reflect clamped value back
+2775: // Bug 3 fix: wrap in try/catch for Private Browsing / QuotaExceededError.
+2776: try { localStorage.setItem("touchAssayWarmupDuration", warmupDuration); } catch { /* storage unavailable */ }
+2786: // Keep the Android status bar / browser chrome color in sync
+2789: // Bug 3 fix: wrap in try/catch for Private Browsing / QuotaExceededError.
+2790: try { localStorage.setItem("touchAssayTheme", theme); } catch { /* storage unavailable */ }
+2799: // Bug 3 fix: wrap in try/catch for Private Browsing / QuotaExceededError.
+2800: try { localStorage.setItem("touchAssayVoiceMode", input.value); } catch { /* storage unavailable */ }
+2804: // ── Settings: audio controls (#15) ──────────────────────────────────────
+2806: /**
+2807: * Plays a preview tick to help the user audition the current setting.
+2808: * Ensures the AudioContext is warmed up before playing.
+2809: * A debounce timer ID is returned so callers can cancel pending previews.
+2810: * @param {number|undefined} timerId - Previous debounce timer to cancel.
+2811: * @param {number}           delay   - Debounce delay in ms.
+2812: * @returns {number} New debounce timer ID.
+2813: */
+2819: .catch(() => { /* AudioContext blocked — silently skip preview */ });
+2823: /**
+2824: * Triggers the .pop CSS animation on a badge element to give tactile
+2825: * feedback whenever its value changes while the user drags a slider.
+2826: * @param {HTMLElement|null} el - The badge element to animate.
+2827: */
+2831: // Force reflow so removing then re-adding the class restarts the animation
+2836: /**
+2837: * Debounce timer ID for the pitch-preview tick.
+2838: * @type {number|undefined}
+2839: */
+2846: // Bug 3 fix: wrap in try/catch for Private Browsing / QuotaExceededError.
+2847: try { localStorage.setItem("touchAssayTickPitch", hz); } catch { /* storage unavailable */ }
+2852: // Debounce the preview tick so rapid slider drags only fire once the
+2853: // user briefly pauses, preventing a rapid-fire buzz of overlapping tones.
+2858: // ── Settings: speech lead time ─────────────────────────────────────────
+2861: // Apply the same [0, 490] clamp used at startup — values ≥ 500 ms would
+2862: // push nextSpeechTime before AudioContext t0, misfiring the first speech cue.
+2863: // H5 fix: parseInt of a non-numeric string returns NaN; Math.min/max with NaN
+2864: // propagates NaN, which would set speechLeadMs = NaN and silence all speech.
+2866: if (isNaN(parsed)) return;  // ignore invalid input, keep previous value
+2868: // Bug 3 fix: wrap in try/catch for Private Browsing / QuotaExceededError.
+2869: try { localStorage.setItem("touchAssaySpeechLeadMs", speechLeadMs); } catch { /* storage unavailable */ }
+2874: // BUG-10 fix: speechLeadMs seeds nextSpeechTime only at startCueLoop() time,
+2875: // so changing it mid-run has no effect on the current run. Inform the user
+2876: // so they're not confused by the apparent lack of immediate response.
+2884: // ── Export ──────────────────────────────────────────────────────────────
+2885: /**
+2886: * Wraps an export action with a loading spinner state on the button.
+2887: * Yields to the browser paint cycle before running the (potentially slow)
+2888: * synchronous export to ensure the spinner appears before blocking.
+2889: * (#30)
+2890: */
+2896: await new Promise(r => setTimeout(r, 0));  // yield one frame
+2913: // If SheetJS isn't loaded (offline / CDN failure), fall back to CSV silently
+2932: // #13: Dedicated CSV export button
+2963: // Close preview modal via button or backdrop click
+2975: UI.Buttons.exportExcel.click();       // Delegate to the main export handler
+2979: // ── Export dataset list — checkbox delegation (#8, #9) ──────────────────
+2980: // Refresh button state and keep the select-all checkbox in sync whenever
+2981: // any individual dataset checkbox changes.
+2987: // Select-all master toggle: check/uncheck all dataset checkboxes (#9)
+2996: // ── SheetJS availability detection (#10) ────────────────────────────────
+2997: // The SheetJS script loads with `defer`, so we check after the window has
+2998: // fully loaded.  If it failed to load (e.g. offline), update button labels
+2999: // to "Export to CSV" so users are not surprised by the fallback format.
+3011: // Check once SheetJS has loaded (or failed) and again at window load as fallback
+3021: });  // end DOMContentLoaded
+--- js/audio.js ---
+1: /**
+2: * @file audio.js
+3: * @module AudioController
+4: * @description Manages all audio output for the assay timer.
+5: *
+6: * Responsibilities:
+7: *   - Web Audio API: precise hardware-scheduled metronome ticks and tones.
+8: *   - Web Speech API: optional voice countdown per stimulus.
+9: *   - Completion feedback: ascending two-tone chime at run end.
+10: *
+11: * Architecture note — the scheduler uses a two-layer approach:
+12: *   Layer 1 (hardware): scheduleWebAudioTick() pre-schedules beeps slightly
+13: *     in the future using the AudioContext clock, achieving sub-millisecond
+14: *     timing accuracy regardless of the JS thread being busy.
+15: *   Layer 2 (voice/UI): triggerImmediateSpeech() fires at the exact moment
+16: *     the stimulus window opens so speech aligns with the visual display.
+17: */
+20: /* ==========================================================================
+21: Module-level State
+22: ========================================================================== */
+24: // ── Web Audio state ──────────────────────────────────────────────────────────
+26: /** @type {AudioContext|null} Shared audio context — created once on first use. */
+29: /** @type {GainNode|null} Master gain node — all oscillators route through this. */
+32: /** @type {SpeechSynthesisVoice|null} The selected TTS voice, or null if unavailable. */
+34: /** @type {number} Frequency in Hz for the metronome tick tone. */
+37: /**
+38: * Controls which audio cues are emitted per stimulus.
+39: * "tick"  — play a short beep every stimulus.
+40: * "count" — speak the stimulus number aloud every stimulus.
+41: * "tens"  — speak only on multiples of 10; tick otherwise.
+42: * "bins"  — tick every stimulus; speak only at each bin-size boundary.
+43: * @type {"tick"|"count"|"tens"|"bins"}
+44: */
+47: /**
+48: * Bin size used by "bins" voice mode — speaks once every N stimuli.
+49: * Updated at the start of each run via setBinSpeak() so it always
+50: * reflects the active assay's bin size.
+51: * @type {number}
+52: */
+55: /** @type {{ rate: number, pitch: number, lang: string }} TTS configuration. */
+58: /** @type {boolean} True once the AudioContext has been resumed after a user gesture. */
+61: // ── Speech state ─────────────────────────────────────────────────────────────
+64: /* ==========================================================================
+65: Public Getters & Setters
+66: ========================================================================== */
+68: /** @returns {boolean} Whether the audio context is running and ready for scheduling. */
+71: /**
+72: * Changes the active voice/cue mode.
+73: * @param {"tick"|"count"|"tens"|"bins"} mode - The desired cue mode.
+74: */
+79: /**
+80: * Sets the bin-boundary interval used by "bins" voice mode.
+81: * Call this at the start of each run with the active assay's binSize so
+82: * spoken cues land exactly on bin boundaries regardless of the assay config.
+83: * @param {number} n - Number of stimuli per bin (must be >= 1).
+84: */
+89: /**
+90: * Sets the tick tone frequency.
+91: * Clamped to [100, 4000] Hz to stay within useful audible range.
+92: * @param {number} hz - Desired frequency in Hz.
+93: */
+98: /** @returns {number} The current tick frequency in Hz. */
+101: /**
+102: * Merges new speech settings and refreshes the selected voice.
+103: * @param {{ rate?: number, pitch?: number, lang?: string }} config - Partial config to merge.
+104: */
+111: /* ==========================================================================
+112: Voice Initialisation
+113: ========================================================================== */
+115: /**
+116: * Selects the best available TTS voice for the configured language.
+117: * Prefers Google voices for higher quality; falls back to any matching
+118: * language, then to the first available voice on the system.
+119: *
+120: * Called on init and again when the browser's voice list changes
+121: * (which can happen asynchronously on some browsers).
+122: */
+125: if (voices.length === 0) return;  // List not ready yet; will retry via onvoiceschanged
+134: // M5 fix: speechSynthesis is not available in all browser environments
+135: // (some WebViews, embedded browsers). Accessing it at module load time without
+136: // a guard crashes the entire module, taking down the whole application.
+138: // Browsers load voices asynchronously; listen for when the list is populated
+140: // Synchronously attempt to load if the list is already available (common on desktop)
+145: /* ==========================================================================
+146: Web Audio Context
+147: ========================================================================== */
+149: /**
+150: * Lazily creates and returns the shared AudioContext.
+151: * Must be called from a user gesture context on first use (or after warmUpAudio).
+152: *
+153: * @returns {AudioContext} The shared audio context.
+154: */
+159: // Route all oscillators through a single master gain node.
+160: // Note: Volume control is not needed in this app because device hardware volume
+161: // buttons provide sufficient control for users. Default gain is 1.0 (full volume).
+165: // H4 fix: enforce the invariant that audioCtx non-null ⇒ masterGain non-null.
+166: // If masterGain was somehow lost (e.g. context recycled by a future refactor),
+167: // re-create it so tone functions don't crash on gain.connect(masterGain).
+175: /**
+176: * Resumes the AudioContext after a user gesture.
+177: * Browsers suspend the context by default until user interaction.
+178: * Should be called on the first tap/keypress.
+179: *
+180: * @returns {Promise<void>} Resolves when the context is running.
+181: */
+183: if (isReady) return Promise.resolve();  // Already running — no-op
+188: // Log the cause but re-throw so callers can surface a user-facing error.
+189: // Swallowing here would let execution continue with a suspended context,
+190: // causing getAudioTime() to return 0 and all scheduled ticks to misfire.
+196: /**
+197: * Monotonic high-water mark for AudioContext time.
+198: * Some browser implementations can briefly return a stale or regressed
+199: * currentTime after suspend → resume. This variable ensures getAudioTime()
+200: * never returns a value smaller than a previously returned one.
+201: * @type {number}
+202: */
+205: /**
+206: * Returns the current hardware clock time from the AudioContext.
+207: * This is used as the reference for all scheduled audio events and
+208: * for recording tap timestamps in sync with audio.
+209: *
+210: * Includes a monotonic guard: if AudioContext.currentTime briefly regresses
+211: * (e.g. after a suspend → resume cycle on some WebKit builds), the last
+212: * known-good value is returned instead. This prevents the scheduler's gap
+213: * detector from firing a false positive and aborting the run.
+214: *
+215: * @returns {number} Current AudioContext time in seconds (monotonically non-decreasing).
+216: */
+223: // When the app returns to the foreground after backgrounding, the
+224: // AudioContext may have been suspended. Resume it automatically.
+234: /* ==========================================================================
+235: Speech Synthesis
+236: ========================================================================== */
+238: /**
+239: * Speaks the given text immediately, cancelling any in-flight utterance first.
+240: *
+241: * Cancelling before speaking is intentional: if the scheduler fires before
+242: * the previous utterance has finished (e.g. short ISI), the old speech would
+243: * queue and drift out of sync with the visual display. Cancelling forces
+244: * immediate delivery of the new cue.
+245: *
+246: * @param {string} text - The text to speak.
+247: */
+250: // Lazy-init guard: on Chrome, voiceschanged fires asynchronously after page load.
+251: // If speak() is called before the event fires, selectedVoice is still null.
+252: // Attempt to populate it now — this succeeds once the browser's voice list is ready.
+255: speechSynthesis.cancel();  // Flush any queued utterances to prevent lag drift
+257: // Safari (and some Chromium builds) silently drop a speak() call issued in
+258: // the same task as cancel(). Deferring via queueMicrotask ensures the cancel
+259: // completes before the new utterance is enqueued, while avoiding the 1–16 ms
+260: // latency penalty of setTimeout(fn, 0) which is subject to browser clamping.
+261: // Microtasks run at the end of the current task — effectively ~0 ms delay —
+262: // and are more than offset by the SPEECH_LEAD_TIME advance in main.js.
+272: /**
+273: * Primes the TTS engine with a silent, zero-volume utterance so the browser
+274: * initialises its synthesis pipeline before the first real cue fires.
+275: *
+276: * The very first speechSynthesis.speak() call incurs a cold-start penalty of
+277: * 50–300 ms on most platforms (Chrome Android, iOS Safari, etc.). Calling
+278: * primeSpeechEngine() during the warmup countdown absorbs this latency so
+279: * all run-time utterances benefit from a warm engine.
+280: *
+281: * Call this once at the start of the warmup countdown (or immediately before
+282: * startCueLoop() when warmup is disabled).
+283: */
+287: const u = new SpeechSynthesisUtterance(" ");  // Single space — inaudible
+289: u.volume = 0;  // Silent
+293: /**
+294: * Stops any speech that is currently being spoken or queued.
+295: */
+302: /* ==========================================================================
+303: Tone Generators
+304: ========================================================================== */
+306: /**
+307: * Schedules a short, sharp metronome tick at a precise hardware time.
+308: *
+309: * Uses a sine oscillator with a fast exponential decay (attack-less) to
+310: * produce a clean click-like sound. The oscillator node is self-disposing
+311: * once stopped.
+312: *
+313: * @param {number|null} exactTime - AudioContext time to play the tick.
+314: *   If null, plays immediately at ctx.currentTime.
+315: */
+323: osc.frequency.value = tickPitch;  // Configurable via setTickPitch()
+326: gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);  // 50ms decay
+332: osc.stop(time + 0.05);  // Node auto-disconnects after stopping
+333: // L3 fix: disconnect the GainNode after the oscillator ends so it is released
+334: // from the audio graph and eligible for GC on long-running sessions.
+338: /**
+339: * Schedules a warmup countdown tone at a precise hardware time.
+340: * Uses a higher amplitude and longer sustain than the regular tick to
+341: * be clearly distinguishable during the pre-run countdown.
+342: *
+343: * @param {number}      frequency - Tone frequency in Hz.
+344: * @param {number|null} exactTime - AudioContext time to play the tone.
+345: */
+356: gain.gain.exponentialRampToValueAtTime(0.001, time + 0.3);  // 300ms sustain
+363: // L3 fix: release GainNode from audio graph after oscillator stops
+367: /**
+368: * Plays a two-tone ascending chime to signal that a run has completed.
+369: *
+370: * The two notes are staggered by 150ms to create an ascending "ding-dong"
+371: * effect that is easily distinguishable from both the metronome tick and
+372: * the warmup beep, even in a noisy lab environment.
+373: */
+378: // Schedule both notes relative to the current time
+382: const startAt = time + i * 0.15;  // 0ms and 150ms offsets
+395: // L3 fix: release GainNode from audio graph after oscillator stops
+401: /* ==========================================================================
+402: Decoupled Metronome Controllers
+403: ========================================================================== */
+405: /**
+406: * Layer 1 — Hardware Audio Scheduler.
+407: *
+408: * Called slightly ahead of the actual stimulus time (lookahead scheduling).
+409: * Schedules the beep precisely on the AudioContext hardware clock, which is
+410: * immune to main-thread jank and timer throttling.
+411: *
+412: * In "count" mode with a fast ISI (< 1s) the tick is always played because
+413: * speech would not have time to complete before the next stimulus.
+414: *
+415: * @param {number} stimulusIndex - 1-based stimulus number being scheduled.
+416: * @param {number} assayIsi      - ISI of the active assay in seconds.
+417: * @param {number} exactTime     - AudioContext timestamp to schedule the beep.
+418: */
+420: // Fast ISI override: always tick even in count mode (speech can't keep up)
+428: // Tick on every stimulus
+433: // No hardware tick in count mode — speech fires in triggerImmediateSpeech.
+434: // (Fast-ISI override above already plays a tick when speech can't keep up.)
+438: // Tick on all stimuli that are NOT multiples of 10
+439: // (multiples will have speech instead, scheduled in triggerImmediateSpeech)
+444: // Always tick every stimulus — speech fires separately at bin boundaries
+450: /**
+451: * Layer 2 — Immediate Speech / Voice Trigger.
+452: *
+453: * Called at the exact moment a new stimulus window opens (not pre-scheduled).
+454: * Speech is triggered synchronously with the UI update so both the visual
+455: * counter and the spoken number appear at the same instant.
+456: *
+457: * @param {number} stimulusIndex - 1-based stimulus number to announce.
+458: * @param {number} assayIsi      - ISI of the active assay in seconds.
+459: */
+461: // Fast ISI: speech can't complete before the next tick — skip all voice modes
+466: // Speak the stimulus number on every interval
+472: // Speak on multiples of 10
+475: // BUG-7 fix: guard typeof before accessing .speaking/.pending —
+476: // some browsers/WebViews expose no speechSynthesis at all.
+477: // Flush any overrunning speech from the previous multiple-of-10.
+478: // Without this, a spoken "10" or "20" can still be playing when the
+479: // next tick fires on short ISIs (≈ 1 s), causing audible overlap.
+480: // Guarded behind speaking/pending check to avoid no-op cancel() churn
+481: // which can cause the speech engine to needlessly re-initialise on
+482: // some platforms.
+488: // Speak the stimulus number only when it lands exactly on a bin boundary
+489: // (i.e. is a multiple of binSpeakSize). All other stimuli just get the
+490: // hardware tick scheduled by scheduleWebAudioTick — no speech needed.
+494: // BUG-7 fix: guard typeof before accessing .speaking/.pending.
+495: // Flush any overrun from the previous bin-boundary utterance so it
+496: // doesn't bleed into the following tick interval.
+497: // Guarded to avoid needless cancel() calls on every non-boundary tick.
+502: // "tick" mode: no speech — tick only, handled in scheduleWebAudioTick
+--- js/utils.js ---
+1: /**
+2: * @file utils.js
+3: * @module AssayUtilities
+4: * @description Pure utility functions for input validation, data processing,
+5: * and data extraction. All functions are stateless and side-effect free.
+6: *
+7: * Sections:
+8: *   1. Validation & ID Generation
+9: *   2. Data Processing & Statistics
+10: *   3. Data Extraction & Aggregation
+11: */
+14: /* ==========================================================================
+15: 1. Validation & ID Generation
+16: ========================================================================== */
+18: /**
+19: * Validates the input parameters collected from the assay setup form.
+20: * Returns a structured result rather than throwing, so the caller can
+21: * display all errors at once instead of one at a time.
+22: *
+23: * @param {Object}   values             - The raw assay configuration object.
+24: * @param {string}   values.assayName   - Name / ID of the experiment.
+25: * @param {string[]} values.genotypes   - Array of genotype labels.
+26: * @param {number}   values.isi         - Inter-stimulus interval in seconds (> 0).
+27: * @param {number}   values.stimCount   - Total number of stimuli per run (> 0).
+28: * @param {number}   values.binSize     - Stimuli grouped per analysis bin (> 0).
+29: * @param {number}   values.temperature - Room temperature in °C.
+30: * @param {number}   values.humidity    - Relative humidity, 0–100 %.
+31: * @returns {{ isValid: boolean, errors: string[], warnings: string[] }}
+32: *   isValid  — true only when the errors array is empty.
+33: *   errors   — human-readable description of each failed validation check.
+34: *   warnings — non-blocking advisories (e.g. very short ISI) that do not
+35: *              prevent submission but are surfaced to the user as toasts.
+36: */
+48: // U-3 fix: reject blank/whitespace-only genotype labels
+52: // U-2 fix: reject duplicate genotype labels — duplicates corrupt export column headers
+53: // and cause summary statistics to be computed from a merged pool of two genotypes.
+62: // Non-blocking advisory — very short ISIs may be below reliable scheduling
+63: // resolution on slow or throttled devices, risking silent data inaccuracy.
+78: // BUG-8 fix: if binSize > stimCount, binRunValues() produces an empty array
+79: // (all values are dropped as a trailing partial bin) causing completely blank
+80: // columns in the export with no user-facing explanation.
+85: // BUG-B fix: temperature and humidity are optional — main.js maps an empty field
+86: // to null, which is a valid "not recorded" state. Only validate when a value is
+87: // actually provided (non-null), and reject only genuinely bad values (NaN, etc.).
+92: // Same optional treatment as temperature — null means the field was left blank.
+104: /**
+105: * Generates a unique, human-readable experiment ID based on the local clock.
+106: * Intended as a sensible default that avoids blank name fields.
+107: *
+108: * Format: "touch_YYYY-MM-DD_HHMM"
+109: *
+110: * @returns {string} A timestamp-based ID string.
+111: */
+124: /* ==========================================================================
+125: 2. Data Processing & Statistics
+126: ========================================================================== */
+128: /**
+129: * Groups a flat array of binary response values into fixed-size bins and
+130: * converts each bin into a percentage of positive responses (1s).
+131: *
+132: * Encoding convention:
+133: *   1 = animal responded to the stimulus (default / no-tap event)
+134: *   0 = animal did not respond (experimenter tapped to record non-response)
+135: * Therefore, a higher bin percentage means a more responsive animal.
+136: *
+137: * If the total number of values is not an exact multiple of binSize and
+138: * allowPartialBin is false (the default), trailing values that do not fill
+139: * a complete bin are silently dropped and a console warning is emitted.
+140: *
+141: * @param {number[]} values               - Raw stimulus values (0s and 1s).
+142: * @param {number}   binSize              - Number of values per bin.
+143: * @param {Object}   [options]            - Optional behaviour overrides.
+144: * @param {boolean}  [options.allowPartialBin=false] - Keep the last partial bin.
+145: * @param {boolean}  [options.warnOnDrop=true]       - Log a warning when values are dropped.
+146: * @returns {number[]} Percentage per bin (0–100), ordered chronologically.
+147: */
+151: // U-4 fix: guard against null/undefined values (e.g. from a partially-written DB record)
+157: // Determine how many values can be cleanly binned
+175: // Use bin.length (not binSize) so partial bins are handled correctly
+183: /**
+184: * Normalises an array of binned percentages against the first bin (baseline).
+185: * The result is the "Touch Index" — each bin expressed as a fraction of baseline.
+186: *
+187: * A Touch Index of 1.0 means the animal responded at the same rate as baseline.
+188: * Values < 1.0 indicate habituation; values > 1.0 indicate sensitisation.
+189: *
+190: * Returns null when normalisation is impossible (zero or missing baseline),
+191: * which causes the run to be excluded from Touch Index analysis.
+192: *
+193: * @param {number[]} binnedPercentages - Output of binRunValues().
+194: * @returns {number[]|null} Normalised ratios, or null if baseline is invalid.
+195: */
+197: // U-5 fix: explicitly guard the empty-array case before reading index 0.
+198: // Previously this relied on binnedPercentages[0] === undefined being == null,
+199: // which is correct but fragile — a future strict-equality change would break it.
+204: // Prevent division by zero (baseline = 0 means no responses in the first bin)
+213: /* ==========================================================================
+214: 3. Data Extraction & Aggregation
+215: ========================================================================== */
+217: /**
+218: * Escapes HTML special characters to prevent XSS when rendering
+219: * user-supplied strings (e.g. assay names, genotype labels) into innerHTML.
+220: *
+221: * Extracted here from main.js and export.js to serve as a single source of
+222: * truth — previously both modules had an identical private copy (BUG-10).
+223: *
+224: * @param {string} str - Raw user input string.
+225: * @returns {string} Safely escaped HTML string.
+226: */
+239: /**
+240: * Flattens all runs from all trials in an assay into a single array,
+241: * enriching each run with its parent trial's index for downstream labelling.
+242: *
+243: * By default only runs from completed trials are included; pass
+244: * { includeAbandoned: true } to also include abandoned trials.
+245: *
+246: * @param {Object}  assay                        - The full assay object.
+247: * @param {Object}  [options]                    - Filter options.
+248: * @param {boolean} [options.includeAbandoned=false] - Include abandoned trials.
+249: * @returns {Object[]} Flat array of run objects, each with a `trialIndex` field.
+250: */
+264: /**
+265: * Extracts a tabular list of runs that were excluded from Touch Index
+266: * calculations (e.g. because their baseline bin was zero).
+267: * Used to populate the "Exclusions" sheet in the Excel export.
+268: *
+269: * Exclusions are computed fresh by re-running the TI derivation — they are
+270: * NOT read from `run.touchIndexExcluded` flags on the run object.
+271: * This guarantees that the exclusion list is always consistent regardless of
+272: * whether preview, export, or CSV functions have been called beforehand.
+273: *
+274: * @param {Object} assay - The full assay object (needs assay.binSize).
+275: * @returns {Array<[number, string, number, string]>}
+276: *   Each row: [trialIndex, genotype, animalIndex, exclusionReason]
+277: */
+279: // Only scan completed trials — abandoned or still-active trials must not
+280: // produce spurious exclusion rows in the export output.
+285: // Only eligible runs can be TI-excluded. Ineligible runs (stopped early,
+286: // abandoned) have empty or partial values[] — their binned result is []
+287: // which causes computeTouchIndexBins to return null, producing spurious
+288: // exclusion rows in the export sheet.
+291: // A run is excluded if its Touch Index cannot be computed —
+292: // i.e. computeTouchIndexBins returns null (baseline bin = 0).
+--- js/timer-worker.js ---
+1: /**
+2: * @file timer-worker.js
+3: * @description Web Worker that acts as an isolated metronome heartbeat.
+4: *
+5: * Runs off the main thread to avoid UI jank and browser timer throttling.
+6: * Posts a "tick" message on every iteration, which the main thread uses to
+7: * drive the Web Audio scheduler and data recording loop.
+8: *
+9: * Architecture — MessageChannel self-post loop:
+10: *   Instead of setInterval (which is subject to browser clamping/throttling
+11: *   even inside a Worker), we use a MessageChannel whose port1.onmessage
+12: *   handler immediately re-posts to port2. MessageChannel callbacks are
+13: *   processed as microtask-adjacent tasks and run as fast as the Worker
+14: *   scheduler allows (typically < 1 ms jitter vs. ±5–20 ms for setInterval).
+15: *
+16: *   The scheduler() in main.js uses while-loop time guards so it is safe to
+17: *   be called far more frequently than once per ISI.
+18: *
+19: * Communication protocol:
+20: *   Incoming: "start" → begins the loop
+21: *             "stop"  → halts the loop
+22: *   Outgoing: "tick"  → emitted on every loop iteration
+23: */
+25: /** @type {boolean} Whether the tick loop is currently running. */
+28: /**
+29: * W-2 fix: generation counter to invalidate stale setTimeout callbacks.
+30: *
+31: * Problem: on a rapid stop→start sequence within the 8 ms setTimeout window,
+32: * a pending setTimeout from the old loop fires after the new loop has already
+33: * started, posting to port2 a second time and spawning two simultaneous loops.
+34: *
+35: * Fix: each loop iteration captures the current generation at the time the
+36: * setTimeout is scheduled. The callback only re-posts if the generation hasn't
+37: * changed (i.e. no stop/start occurred in the meantime).
+38: *
+39: * @type {number}
+40: */
+43: /**
+44: * MessageChannel used for the self-post timing loop.
+45: * port1 is the receiver; posting to port2 queues the next iteration.
+46: */
+49: // Explicitly start port1 so it receives messages even if a future refactor
+50: // switches from .onmessage assignment to .addEventListener (W-1 note).
+53: /**
+54: * Each iteration: emit a tick to the main thread, then schedule the next
+55: * iteration via an 8 ms setTimeout (~125 Hz ceiling).
+56: *
+57: * The setTimeout floor prevents the MessageChannel self-post loop from
+58: * spinning at thousands of iterations per second, which floods the main
+59: * thread with postMessage traffic on low-end devices. 8 ms is still 60×
+60: * faster than the shortest ISI used in practice (≥ 500 ms) so timing
+61: * accuracy is unaffected — scheduler() uses while-loop time guards and
+62: * fires on the AudioContext clock regardless of how often it is called.
+63: *
+64: * Exits cleanly when `running` is set to false by a "stop" message.
+65: */
+69: // Capture current generation so the callback can self-invalidate if a
+70: // stop→start pair occurs before this setTimeout fires (W-2 fix).
+74: }, 8);  // ~125 Hz ceiling
+79: if (running) return;  // Guard against duplicate starts
+81: generation++;                         // Invalidate any pending setTimeout from before
+82: channel.port2.postMessage(null);      // Kick off the loop
+86: generation++;                         // Invalidate the pending setTimeout so the loop
+87: // truly stops rather than firing one last time
+--- js/toast.js ---
+1: /**
+2: * @file toast.js
+3: * @module Toast
+4: * @description Lightweight, accessible toast notification system.
+5: *
+6: * Usage:
+7: *   import { showToast } from "./toast.js";
+8: *   showToast("Run complete!", "success");
+9: *   showToast("Invalid input", "error", 5000);
+10: *
+11: * Types: "success" | "error" | "warning" | "info"
+12: * Duration: milliseconds (default 3500). Pass 0 for persistent toast.
+13: *
+14: * Keyboard behaviour:
+15: *   Escape  — dismisses the most-recently-added visible toast.
+16: *             Repeated presses clear the stack one by one.
+17: *   Enter / Space — dismisses a toast that currently has focus.
+18: */
+20: /**
+21: * Inline SVG icon strings for each toast type.
+22: * Keyed by type name so showToast() can look them up in O(1).
+23: * @type {Object.<string, string>}
+24: */
+45: /** @type {HTMLElement|null} Lazily-created container element */
+48: /** @type {boolean} Whether the module-level Escape listener is active */
+51: /**
+52: * Returns (or creates) the fixed toast container at the bottom of the screen.
+53: * @returns {HTMLElement}
+54: */
+68: /**
+69: * Module-level keydown handler.
+70: * Escape → dismiss the newest non-exiting toast.
+71: * Self-removes when no toasts remain so it never leaks.
+72: *
+73: * @param {KeyboardEvent} e
+74: */
+79: // Collect all toasts that are not already animating out
+82: // Nothing left — remove the listener
+88: // Dismiss the last (newest) toast in the stack
+92: /**
+93: * Dismisses the newest visible toast, if any.
+94: * Returns true if a toast was dismissed, false if there were none.
+95: * Exported so external keydown handlers can call this before routing
+96: * their own key action (e.g. Space-bar tap) when a toast is on screen.
+97: *
+98: * @returns {boolean}
+99: */
+108: /**
+109: * Ensures the module-level Escape listener is registered (once).
+110: */
+117: /**
+118: * Shows a toast notification.
+119: *
+120: * @param {string} message   - The notification text.
+121: * @param {"success"|"error"|"warning"|"info"} [type="info"] - Visual style.
+122: * @param {number} [duration=3500] - Auto-dismiss delay in ms. 0 = persistent.
+123: * @returns {HTMLElement} The toast element (so callers can dismiss it manually).
+124: */
+132: // Make the toast focusable so keyboard users can tab to it
+135: // Inject only static, trusted HTML (icons + button skeleton); user-supplied `message`
+136: // is set via textContent below to prevent XSS from assay names or reason strings (Bug 1).
+149: // Set the user-supplied text safely — never via innerHTML
+160: // Dismiss on close button click
+163: // Enter / Space dismisses a focused toast
+166: e.preventDefault(); // prevent Space from scrolling the page
+171: // Ensure the module-level Escape handler is active
+174: // Swipe-to-dismiss (touch)
+178: // T-4 fix: changedTouches can be empty in rare multi-touch cancel scenarios;
+179: // accessing [0] would throw TypeError.
+187: // Force reflow so the animation triggers correctly after insertion
+196: // Pause auto-dismiss while the user hovers over the toast.
+197: // Note: the timer variable is also held by the close-button and Escape handlers
+198: // via closure, but those paths call dismiss() which guards against double-dismiss
+199: // using the `toast--exiting` class check. The stale timer firing after an early
+200: // dismiss is therefore harmless — dismiss() becomes a no-op on the second call.
+209: /**
+210: * Removes a toast from the DOM with an exit animation.
+211: * If it was the last toast, also cleans up the global key listener.
+212: * @param {HTMLElement} toast
+213: */
+220: // If the container is now empty, remove the global listener
+228: // Fallback timeout in case the CSS exit animation is missing or instant
+229: // (e.g. prefers-reduced-motion: reduce without a duration override)
+237: // Expose to window for index.html PWA update logic
+--- index.html ---
+13: <!-- Inter font for premium typography -->
+25: <!-- Error Boundary Overlay -->
+45: <!-- Haptic armband quick-connect (hidden on non-BLE browsers via JS class) -->
+47: <!-- Bluetooth icon -->
+52: <!-- Battery percentage — hidden until a level is received from the armband -->
+56: <!-- Quick dark/light mode toggle -->
+58: <!-- Sun icon (shown in dark mode to switch to light); hidden initially since default theme is light -->
+66: <!-- Moon icon (shown in light mode to switch to dark) -->
+72: <!-- Overflow menu -->
+96: <!-- #5: "Recording in progress" banner — shown only during active runs via CSS -->
+107: <!-- #9: Persistent storage-unavailable warning -->
+136: <!-- Hidden input keeps comma-list value; main.js reads this via .value.split(',') -->
+137: <!-- `required` here is picked up by formatRequiredLabels() to show the * asterisk;
+138: type="hidden" inputs are exempt from browser constraint validation so this
+139: does NOT block form submission (HTML spec §4.10.18.5). (BUG-9 fix) -->
+265: <!-- warmup countdown lives here; shown only during warmup via JS -->
+286: <!-- #14: Per-trial summary card, populated by JS after finishTrial -->
+318: <!-- Settings page header -->
+329: <!-- ── Display Theme ──────────────────────────────────────────────── -->
+369: <!-- ── Audio ─────────────────────────────────────────────────────── -->
+423: <!-- ── Timer Voiceover Options ────────────────────────────────────── -->
+461: <!-- ── Warmup Timer ──────────────────────────────────────────────── -->
+476: <!-- iOS-style switch built purely in CSS — the real checkbox is hidden but keyboard-accessible -->
+494: <!-- ── Haptic Armband ──────────────────────────────────────────────── -->
+--- styles.css ---
+1: /* =====================================================================
+2: 1. DESIGN TOKENS (CSS VARIABLES)
+3: ===================================================================== */
+47: /* Chip colours */
+53: /* Stepper */
+82: /* #13: Restore subtle gradient in dark mode */
+100: /* Dark-mode button overrides */
+107: /* =====================================================================
+108: 2. GLOBAL RESET & BASE
+109: ===================================================================== */
+136: /* =====================================================================
+137: 3. APP HEADER & NAVIGATION MENUS
+138: ===================================================================== */
+148: /* Glassmorphism — subtle depth on dark header */
+152: /* ── Logo + title home button ─────────────────────────────────────────── */
+185: /* ── Header action buttons group (theme toggle + overflow) ────────────── */
+219: /* Legacy fallback removed — #overflowMenuButton now uses .header-icon-btn */
+227: right: 0; /* Aligned exactly with the right edge of .header-actions */
+248: /* #9: icon + text inline */
+270: /* =====================================================================
+271: 4. LAYOUT & SECTIONS (RESPONSIVE CONTAINERS)
+272: ===================================================================== */
+275: /* Fill all available vertical space so assay tap zone is maximized */
+280: /* Desktop: lock into a clean central column */
+284: /* Prevent content overflow on very small screens */
+307: /* =====================================================================
+308: 5. FORM ELEMENTS & DARK MODE OVERRIDES
+309: ===================================================================== */
+327: gap: 1rem; /* This provides perfect line-spacing between setting options */
+337: /* #14: Setup fieldset legends styled to match settings-legend treatment */
+361: /* #3: Setup + settings form labels get stronger text colour */
+378: /* Strip Apple/Google native styling curves */
+394: /* Re-inject custom arrow because we stripped native appearance */
+406: /* Natively restore radio/checkboxes */
+430: /* ------------------------------------------------------------------
+431: CRITICAL DARK MODE READABILITY FIXES
+432: Brute-forces dark backgrounds over browser autofill/iOS defaults
+433: ------------------------------------------------------------------- */
+450: /* WebKit Autofill Dark Mode Override */
+460: /* Form Layout Responsiveness */
+477: /* =====================================================================
+478: 5b. CHIP / TAG INPUT  (Genotypes)
+479: ===================================================================== */
+501: display: contents; /* chips flow inline with the text input */
+562: /* ── Stepper (custom ± number controls) ────────────────────────────── */
+596: /* number input inside stepper: hide native spin arrows, fill remaining width */
+615: /* Hide spinner arrows */
+626: /* =====================================================================
+627: 6. STANDARD BUTTONS
+628: ===================================================================== */
+705: /* =====================================================================
+706: 7. ASSAY SCREEN & INTERACTIVE TAP ZONE
+707: ===================================================================== */
+713: /* Ensures assay screen always fills the available height */
+734: /* Stick footer to bottom on all screen sizes */
+745: /* Ensure tap zone fills remaining height */
+749: /* VISUAL METRONOME ANIMATION BAR */
+752: height: 16px; /* #10: slightly taller for better visibility */
+771: /* #10: Near-full glow signals upcoming stimulus */
+779: /* MASSIVE TAP BUTTON */
+784: /* Dynamic minimum height — generous on mobile, grows on desktop via flex:1 */
+802: /* Allow long text labels to wrap gracefully */
+810: /* Safeguards against layout breakage with excessively long text */
+820: /* Desktop: tap button grows larger since there is more vertical real-estate */
+834: /* Persistent Fulfilled State (Light Green) */
+844: /* Transient Flash State (Blue) */
+851: /* Transient Flash State when already green (Deeper Green) */
+856: /* #4: Tap button dimmed during ISI (between taps) — signals system is timing */
+861: /* Don't dim when already in a fulfilled state — that green matters more */
+866: /* ── Warmup-countdown state: button stays visible, countdown renders inside it */
+868: /* The tap button is non-interactive but fully visible during warmup */
+870: pointer-events: none;   /* block taps while counting down */
+872: /* Pulsing indigo ring to signal "get ready" */
+891: /* The overlay span covers the whole button and shows the countdown number.
+892: Because #tapButton uses display:flex + position:relative (added below),
+893: the overlay is absolutely positioned to fill it entirely. */
+895: position: relative;   /* anchor for the absolute overlay */
+901: z-index: 1;            /* must be above the button's own text node */
+908: /* Solid background matching the button's own colours — color-mix() cannot
+909: accept CSS gradients, so we use the same card bg that the gradient sits on */
+911: /* Large countdown number */
+919: /* Pop-in animation — replays on every display:none→flex toggle (or via JS class toggle/reflow) */
+929: /* "GET READY" label above the number */
+938: /* =====================================================================
+939: 8. PROGRESS PANEL & DATA TABLES
+940: ===================================================================== */
+948: /* Bug 7 fix: removed margin-bottom; #tapZone gap handles spacing uniformly */
+952: min-height: 80px;          /* Bug 4 fix: never collapses to 0 on short screens */
+979: /* =====================================================================
+980: 9. MODALS & EXPORT PREVIEWS
+981: ===================================================================== */
+1044: /* =====================================================================
+1045: 10. UTILITIES, LISTS & WARNINGS
+1046: ===================================================================== */
+1052: /* Desktop-safe formatting for the Saved Assays items */
+1066: margin-top: 0.2rem !important; /* aligns with text visually */
+1083: /* Checkbox fixes for the Export screen */
+1117: /* .warmup-display removed — countdown now rendered via .tap-warmup-overlay inside #tapButton */
+1118: /* #5: Export action layout — primary full-width, secondaries in a row below */
+1157: color: var(--text-main); /* NEW: Forces high-contrast readable text */
+1158: cursor: pointer; /* NEW: Makes the text feel interactive */
+1163: /* =====================================================================
+1164: 11. BROWSER SPECIFIC FIXES (DISABLED STATES)
+1165: ===================================================================== */
+1181: /* Disabled buttons keep a readable surface distinct from the card background */
+1190: /* =====================================================================
+1191: 12. CSS STATE MACHINE (VISIBILITY ARCHITECTURE)
+1192: ===================================================================== */
+1210: /* #1: Active recording — subtle primary border/glow so the state is unmistakable */
+1234: /* Footer styling */
+1253: /* =====================================================================
+1254: 13. SCREEN TRANSITIONS
+1255: ===================================================================== */
+1257: /*
+1258: * Strategy: every section that becomes visible via the CSS state machine
+1259: * gets a short slide-up + fade-in.  Because the state machine controls
+1260: * visibility via `display`, we can't animate `display` itself; instead
+1261: * we attach the animation to the section and let it play whenever the
+1262: * section enters the visual tree.
+1263: *
+1264: * The `animation-fill-mode: both` keeps the element invisible
+1265: * (opacity:0 / translateY offset) before the animation begins, which
+1266: * prevents the "flash of visible content" on slow devices.
+1267: */
+1285: /* Primary screens — slide up */
+1291: /* Assay screen — used across configured/poised/running, slides up once */
+1298: /* Overlay screens (settings, guidelines, saved assays) — gentle fade */
+1305: /* Live progress counter fades in when the run starts */
+1310: /* Metronome container fades in */
+1316: /* =====================================================================
+1317: 14. TOAST NOTIFICATIONS
+1318: ===================================================================== */
+1320: /* Per-type colour tokens */
+1357: /* Container: fixed bottom-right stack */
+1364: /* Right-align on wide screens */
+1370: pointer-events: none;  /* container transparent to pointer events */
+1373: /* Individual toast */
+1388: /* Enter animation */
+1394: /* Keyboard focus ring — only shown for keyboard navigation, not mouse clicks */
+1404: /* Visible state (JS adds this class after a reflow) */
+1415: /* Exit state */
+1431: /* Icon */
+1443: /* Message text */
+1469: /* Close button */
+1495: /* Auto-dismiss progress bar (spans the full width at the bottom) */
+1515: /* =====================================================================
+1516: SETTINGS PAGE — Premium Redesign
+1517: ===================================================================== */
+1519: /* ── Settings screen: transparent card so fieldsets stand out ──────── */
+1528: /* ── Page header (Settings h2 with icon) ──────────────────────────── */
+1549: /* ── Each settings section (fieldset) as an elevated card ─────────── */
+1567: /* ── Section legend with inline icon ──────────────────────────────── */
+1579: float: none !important; /* Override browser fieldset legend float */
+1587: /* ── Theme: segmented pill control ────────────────────────────────── */
+1643: /* ── Audio sliders ─────────────────────────────────────────────────── */
+1688: /* Pulse animation when badge value changes */
+1713: /* ── Custom range slider styling ───────────────────────────────────── */
+1715: /* Reset */
+1736: /* WebKit thumb */
+1759: /* Firefox thumb */
+1777: /* ── Hint text below sliders ───────────────────────────────────────── */
+1786: /* ── Voice option 2×2 card grid ───────────────────────────────────── */
+1830: /* Selected state */
+1842: /* Selected checkmark overlay */
+1872: /* ── Warmup toggle row ─────────────────────────────────────────────── */
+1902: /* iOS-style switch */
+1957: /* Warmup duration input below toggle */
+1979: /* ── Back button with icon ─────────────────────────────────────────── */
+1987: /* ── Dark-mode adjustments ─────────────────────────────────────────── */
+2008: /* Mobile: stack voice option grid to single column on narrow screens */
+2015: /* Mobile: full-width toasts at the bottom */
+2025: /* =====================================================================
+2026: 15. PERSISTENT NOTIFICATION BANNERS
+2027: ===================================================================== */
+2029: /* Shared banner base */
+2032: display: none;  /* shown via JS / body class */
+2043: /* #5 — Recording banner (shown only while RUNNING) */
+2054: /* CSS-driven visibility: show only when state-running */
+2059: /* #9 — IDB unavailability banner */
+2070: /* When JS removes [hidden], display:flex takes effect */
+2075: /* Banner icons */
+2082: /* =====================================================================
+2083: 17. RANGE SLIDERS  (#15)
+2084: ===================================================================== */
+2144: /* =====================================================================
+2145: 18. EXPORT BUTTON LOADING STATE  (#30)
+2146: ===================================================================== */
+2173: /* Secondary buttons have dark spinner */
+2180: /* =====================================================================
+2181: 19. SAVED ASSAYS EMPTY STATE  (#31)
+2182: ===================================================================== */
+2215: /* =====================================================================
+2216: 21. MOBILE RESPONSIVENESS
+2217: ===================================================================== */
+2219: /* ── Global touch-friendly sizing ─────────────────────────────────────── */
+2221: /* All interactive elements get minimum 44px touch targets on touch devices */
+2226: /* Larger stepper buttons for fat fingers */
+2232: /* Bigger slider thumbs on touch */
+2242: /* Slightly bigger chip remove buttons */
+2249: /* Assay footer buttons always tall enough to tap easily */
+2255: /* ── Small screens (phones, ≤ 480px) ──────────────────────────────────── */
+2257: /* Tighter main padding */
+2262: /* Section cards: slightly tighter */
+2269: /* Header: compact padding */
+2276: /* Slightly smaller header title on phones */
+2286: /* Overflow menu full-width on small screens */
+2293: /* Form layout: stack input rows vertically */
+2303: /* Fieldsets: slightly tighter padding */
+2310: /* Assay header: ensure select fills the available width nicely */
+2319: /* Toggle progress: compact pill style on phones */
+2328: /* Tap zone: tighten padding */
+2334: /* Tap button: maximise touch area on phones */
+2341: /* Progress panel: less height on small screens */
+2346: /* Export / nav buttons: stack vertically on tiny screens */
+2364: /* Assay screen footer: stack buttons */
+2375: /* Modal: bottom-sheet style on mobile */
+2397: /* Setup header */
+2402: /* Smaller table text on phones */
+2410: /* Saved assays: tighter layout */
+2424: /* Bulk actions in Saved Assays */
+2434: /* Settings: voice option grid stays 2-col except very small */
+2446: /* Live progress text: slightly smaller */
+2453: /* ── Extra-small screens (≤ 360px) ────────────────────────────────────── */
+2456: /* Hide title text on very narrow phones, keep logo */
+2470: /* ── Medium screens (tablets, 481px–768px) ─────────────────────────────── */
+2476: /* Keep form inputs side-by-side but allow wrapping */
+2481: /* Tap button still needs a generous touch area */
+2487: /* ── Desktop (≥ 769px): single-column grid foundation ─────────────────── */
+2498: /* Wide desktop (≥ 1024px): single-column layout (two-panel removed) */
+2502: /* ── Landscape orientation fixes ──────────────────────────────────────── */
+2504: /* Tap button: reduced min-height to avoid overflow; flex:1 handles the rest */
+2510: /* Compact main padding in landscape */
+2515: /* Section cards: tighter in landscape */
+2521: /* Shorter progress panel in landscape */
+2526: /* Metronome bar: thinner to save space */
+2532: /* Warmup overlay: clamp() in .tap-warmup-overlay handles landscape sizing */
+2534: /* Live progress: compact */
+2540: /* Assay screen footer: always horizontal in landscape */
+2546: /* Header: minimal height in landscape */
+2552: /* ── Safe-area insets for notched / Dynamic Island devices ─────────────── */
+2573: /* Main content also respects bottom inset */
+2578: /* Banners also respect safe areas */
+2585: /* Assay footer respects home indicator on iPhone */
+2591: /* ── Prevent text size inflation on mobile browsers ───────────────────── */
+2598: /* ── Smooth scrolling within overflow containers on iOS ────────────────── */
+2607: /* ── Prevent pull-to-refresh during assay (misfires during tapping) ───── */
+2612: /* ── Better mobile focus styles: thicker rings on touch devices ────────── */
+2625: /* ── Genotype select: always fills available width ─────────────────────── */
+2631: /* ── Toggle progress: now inside assay header flex row ───────────────── */
+2632: /* Bug 1 fix: align-self removed — #assayScreen>header's align-items:center
+2633: handles vertical alignment now that the button lives in the header. */
+2643: /* ── Saved assays bulk-actions: proper layout ─────────────────────────── */
+2670: /* ── Saved assays back button ─────────────────────────────────────────── */
+2676: /* ── Export screen: select-all label separator ─────────────────────────── */
+2683: /* ── Bulk select label in saved assays ─────────────────────────────────── */
+2693: /* ── Assay screen: ensure the tapZone always uses remaining space ──────── */
+2695: /* Needed so that flex children calculate height correctly */
+2700: /* =====================================================================
+2701: HAPTIC ARMBAND
+2702: ===================================================================== */
+2704: /* Armband fieldset is hidden by default.
+2705: JS removes [hidden] once it confirms navigator.bluetooth is present.
+2706: This means the entire card is invisible on Firefox and Safari. */
+2711: /* ── Settings card connect row ──────────────────────────────────────── */
+2728: /* ── Status badge ───────────────────────────────────────────────────── */
+2760: /* ── Connect button inside Settings card ────────────────────────────── */
+2787: /* FW-5 FIX: Disconnect button (shown only when connected) */
+2807: /* ── Test Vibration row ───────────────────────────────────────────── */
+2857: /* ── Header icon — connected state ──────────────────────────────────── */
+2859: color: #4ade80;   /* green tint that reads well on the dark header */
+2870: /* ── Header icon — connecting/pairing in progress ────────────────────── */
+2871: /* Applied while the BLE picker is open / GATT handshake is in flight.    */
+2872: /* Uses opacity pulse only — does NOT touch textContent so the SVG survives. */
+2874: color: #60a5fa;          /* blue tint for "pending" */
+2885: /* ── Battery level badge — sits inline in the header button ──────────── */
+2886: /* The header button expands its width automatically to accommodate the text.
+2887: The badge inherits the button's current colour (green/amber/red) so the
+2888: icon and percentage are always the same tint without extra class juggling. */
+2890: /* Allow the button to grow beyond the 36px square when battery % is shown */
+2902: /* Inherits color from the parent .header-icon-btn state class */
+2906: color: #fbbf24;   /* amber — overrides parent green */
+2910: color: #f87171;   /* red — overrides parent green */
+2920: /* =====================================================================
+2921: 22. UI/UX IMPROVEMENTS
+2922: ===================================================================== */
+2924: /* #1: Stop Run vs Finish Trial — clearer visual weight in assay footer */
+2932: border: none;   /* Bug 5 fix: override the base button border that shows on dark mode */
+2944: /* #2: Genotype selector — prominent accent styling in assay header */
+2960: /* #3: Instruction paragraph styled as info callout */
+2972: /* #6: Bulk-delete inline confirmation area */
+3003: /* #7: Toggle progress pill button with eye icon */
+3004: /* Bug 1 fix: removed align-self:flex-start — button now lives inside the
+3005: assay header flex row and inherits align-items:center from the parent. */
+3031: /* #12: Guidelines screen card list */
+3087: /* =====================================================================
+3088: 8. TOOLTIPS & DRAGGABLE CHIPS
+3089: ===================================================================== */
+3115: /* Native Popover Styling */
+3140: /* Draggable Chips */
+--- firmware/haptic_armband/haptic_armband.ino ---
+1: // ============================================================
+2: //  haptic_armband.ino  —  BLE Haptic Armband Firmware
+3: //  Board: Seeed XIAO BLE nRF52840
+4: //  Libraries: ArduinoBLE, Adafruit DRV2605
+5: //
+6: //  ── MOTOR TYPE ──────────────────────────────────────────────
+7: //  Select your motor type by keeping ONE of the two lines below:
+8: //#define MOTOR_LRA   // Linear Resonant Actuator (closed-loop, 1.8V RMS typical)
+9: #define MOTOR_ERM   // Eccentric Rotating Mass coin motor (open-loop, 3V typical)
+10: //
+11: //  ── WIRING ──────────────────────────────────────────────────
+12: //    DRV2605L SDA → D4 (XIAO I²C SDA)
+13: //    DRV2605L SCL → D5 (XIAO I²C SCL)
+14: //    DRV2605L VIN → Dual-voltage OR loop (5V USB + LiPo BAT+ directly via Schottky diodes)
+15: //                   220µF–470µF decoupling cap across VIN/GND. Do NOT use XIAO 3.3V pin.
+16: //    DRV2605L GND → GND
+17: //    DRV2605L EN  → D3  (clone boards only; or hardwire EN to 3.3V)
+18: //    Motor        → DRV2605L OUTP / OUTN
+19: //                   (LRA: observe +/− polarity. ERM: polarity only affects spin direction)
+20: //
+21: //  ── EXTERNAL RGB LED (optional) ─────────────────────────────
+22: //    R anode → 270Ω → D6      Green  = connected
+23: //    G anode → 100Ω → D7      Blue   = advertising
+24: //    B anode → 100Ω → D8      Amber  = low battery
+25: //    Cathode → GND             Red    = error
+26: //    NOTE: Use per-channel resistors — green/blue Vf ≈ 2.8V on a 3.3V rail
+27: //    needs ≤100Ω to reach 5mA. A single 220Ω on all channels will produce
+28: //    near-zero current through green and blue.
+29: //
+30: //  ── GATT layout (must match js/haptic-armband.js exactly) ───
+31: //    Service UUID:   12345678-1234-1234-1234-123456789012
+32: //    Haptic char:    12345678-1234-1234-1234-000000000001  (Write)
+33: //    Heartbeat char: 12345678-1234-1234-1234-000000000002  (Write)
+34: //    Battery char:   0x2A19 / 0x180F service              (Read+Notify)
+35: //
+36: //  ── COMMAND BYTES (haptic characteristic, UUID ...000000000001) ──────
+37: //    0x01 → single tap    (50 ms)
+38: //    0x02 → run complete  (100 ms – 50 ms gap – 200 ms)
+39: //
+40: //  ── HEARTBEAT (separate characteristic, UUID ...000000000002) ─────────
+41: //    JS writes 0x03 every 2 s during a run to the heartbeat characteristic.
+42: //    The firmware only checks that a write occurred — the value is validated
+43: //    (must equal 0x03) as a sanity guard against stray BLE writes.
+44: //    No heartbeat for >3 s → firmware fires stutter warning.
+45: // ============================================================
+51: // ── Motor type validation ────────────────────────────────────
+59: // ── DRV2605L Driver Instance ─────────────────────────────────
+62: // ── XIAO nRF52840 battery monitoring ─────────────────────────
+63: // PIN_VBAT = P0.31, routed through an on-board 1MΩ/1MΩ divider.
+64: // Pin 14 (P0.14) gates the divider FET — drive HIGH before reading.
+70: // ── DRV2605L EN pin (clone boards only) ─────────────────────
+71: // Clone boards float EN low, disabling OUTP/OUTN completely.
+72: // Connect EN → D3 on the XIAO and firmware drives it HIGH.
+73: // If you hardwire EN to 3.3V instead, comment out this define.
+76: // ── Onboard RGB LED ──────────────────────────────────────────
+77: // XIAO nRF52840 built-in RGB is ACTIVE LOW (LOW = ON)
+82: // ── External RGB LED (optional) ──────────────────────────────
+83: // Mirrors onboard LED exactly on external pins D6/D7/D8.
+84: // Comment out USE_EXTERNAL_RGB to disable.
+85: // Uncomment EXT_RGB_COMMON_ANODE if your LED is common-anode.
+87: // #define EXT_RGB_COMMON_ANODE
+94: // Common-anode: LOW = ON
+101: // Common-cathode (default): HIGH = ON
+112: // Drive both onboard (active-low) and external LED simultaneously.
+121: // ── Board State Machine ──────────────────────────────────────
+135: // ── BLE Service & Characteristics ───────────────────────────
+151: // ── Heartbeat watchdog ───────────────────────────────────────
+156: // ── Battery update interval ──────────────────────────────────
+160: // ── Non-Blocking Motor State Machine ─────────────────────────
+161: // Two drive modes share motorRunning:
+162: //
+163: //  RTP mode (default):
+164: //    motorStart() — alternating on/off phases in motorPhases[]
+165: //    motorUpdate() steps through phases using millis() timing.
+166: //
+167: //  Waveform mode (INTTRIG, selected patterns only):
+168: //    motorWaveformStart() — loads up to 4 chained DRV2605L ROM effects and fires GO.
+169: //    motorUpdate() polls the GO bit (reg 0x0C) every 20 ms to detect completion.
+170: //    Used for vibrateTap() and vibrateRunComplete() because the internal effect ROM
+171: //    includes proper resonant frequency sweeps, braking pulses, and pre-optimised
+172: //    timings that make LRA taps feel sharper than raw RTP square waves.
+180: static bool          motorWaveformMode  = false;  // true = INTTRIG waveform playback active
+181: static unsigned long motorWaveformPollMs = 0;     // last GO-bit poll timestamp (throttle)
+195: drv.setRealtimeValue(127); // full amplitude (RTP signed 8-bit: 127 = max)
+200: drv.writeRegister8(0x0C, 0);  // clear GO bit — aborts in-progress waveform immediately
+213: // ── Waveform mode: poll GO bit to detect playback completion ──
+214: // Throttled to one I²C read every 20 ms to keep loop overhead negligible.
+219: if (!(drv.readRegister8(0x0C) & 0x01)) {  // GO bit cleared → playback done
+227: // ── RTP mode: step through on/off phase array ──────────────
+237: // Accumulate phase start to prevent timing drift
+239: bool isOnPhase = (motorPhaseIndex % 2 == 0); // even indices = ON, odd = OFF
+249: // Arms up to 4 chained DRV2605L internal ROM effects and fires GO non-blockingly.
+250: // Effect numbers (1–123) index TI's pre-optimised waveform library.
+251: // Terminate the chain early with 0 (unused slots auto-terminated at slot 4).
+252: // Compatible with both MOTOR_LRA (library 6) and MOTOR_ERM (library 1) builds;
+253: // the same effect index uses waveform data matched to whichever library initMotor() selected.
+255: motorStop();                          // abort any in-progress RTP or waveform sequence
+261: drv.setWaveform(4, 0);               // end-of-sequence sentinel (belt-and-suspenders)
+268: // ── Vibration Pattern Helpers ────────────────────────────────
+269: // NOTE: LRA physics — the resonant mass needs ~20–30 ms to ring up to full amplitude
+270: // and ~80 ms to fully damp. Pulses shorter than ~80 ms feel weak; gaps shorter than
+271: // ~80 ms blur consecutive bursts together. ERM has no such constraint.
+272: // The durations below are shared by both MOTOR_LRA and MOTOR_ERM builds and are
+273: // already tuned for LRA; the ERM will tolerate them fine.
+275: void vibrateTap() {                    // 0x01 — tap registered
+276: // Effect 1: Strong Click 100%
+277: // TI's waveform ROM hits the resonant frequency with a precise sweep + active braking
+278: // pulse — far sharper attack and stop than an RTP square wave can produce.
+282: void vibrateRunComplete() {            // 0x02 — run complete
+283: // Effect 10 (Double Click 100%) chained into Effect 47 (Long Buzz 100%):
+284: // two sharp knocks → sustained buzz = unambiguous "run finished" signal.
+285: // The DRV2605L plays both in sequence autonomously; GO bit clears when done.
+289: void vibrateStutterWarning() {         // heartbeat watchdog
+290: // 3-pulse rapid-fire; 90 ms on / 80 ms off preserves LRA inter-pulse clarity
+295: void startupVibrationSequence() {      // boot alive confirmation (blocking — BLE not up yet)
+296: // Ascending ramp: short→medium→long so the user feels amplitude building at boot
+302: void vibrateDisconnect() {             // rapid 6-pulse burst
+303: // 80 ms on / 80 ms off: fastest clean cadence an LRA can produce distinctly
+308: void vibrateBleReady() {               // double-tap on BLE ready (blocking — safe here)
+309: // 120 ms taps with 80 ms gap: strong, unmistakable ready signal
+317: // ── Battery Reading ──────────────────────────────────────────
+318: // Reads WLY 602040 3.7V LiPo via XIAO on-board 1MΩ/1MΩ divider.
+319: // AR_INTERNAL2V4 = 2.4V internal reference (Seeed nRF52 BSP).
+320: // 12-bit ADC, divider factor ×2, LiPo range: 3.0V (0%) → 4.2V (100%).
+324: delayMicroseconds(1000);  // bumped 500→1000 µs: more settling time on 1MΩ divider under motor load
+334: // ── LED State (call every loop iteration) ────────────────────
+339: setLED(true, true, true);                        // solid white
+346: setLED(false, false, blinkLedState);             // slow blue blink
+349: setLED(false, true, false);                      // solid green
+356: setLED(blinkLedState, blinkLedState, false);     // fast amber blink
+359: setLED(true, false, false);                      // solid red
+364: // ── DRV2605L motor init (LRA) ────────────────────────────────
+367: drv.selectLibrary(6);                                          // library 6 = LRA
+368: drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);    // N_ERM_LRA = 1 (LRA)
+369: drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);   // closed-loop (auto-resonance tracking)
+370: drv.writeRegister8(0x22, 0x00);  // LRARESON_PERIOD = 0 → let closed-loop track resonant freq freely
+371: // ── Haptic strength tuning (LRA) ─────────────────────────────
+372: // Raised from 0x57/0x60 (1.8V RMS / 2.1V peak) to 0x7F/0xA4 (2.5V RMS / 3.6V peak).
+373: // 0x7F = max RATED_VOLTAGE for a 2.5V-rated LRA (2.5 × 255/5.3 ≈ 120 → use 0x78 for exactly 2.5V).
+374: // 0xA4 = OD_CLAMP ceiling that gives strong attack transients without exceeding 5.3V rail.
+375: // If your LRA is rated lower (e.g. 2.0V RMS), drop 0x16 to 0x62 and 0x17 to 0x80.
+376: drv.writeRegister8(0x16, 0x78);  // RATED_VOLTAGE: 2.5V RMS × 255/5.3 ≈ 120
+377: drv.writeRegister8(0x17, 0xA4);  // OD_CLAMP:      3.6V peak × 255/5.6 ≈ 164
+395: // I2C recovery restores full LRA config
+408: // ── DRV2605L motor init (ERM) ────────────────────────────────
+411: drv.selectLibrary(1);                                          // library 1 = ERM
+412: drv.useERM();                                                  // clears N_ERM_LRA bit
+413: drv.writeRegister8(0x1D, drv.readRegister8(0x1D) | 0x20);    // ERM open-loop
+414: // ── Haptic strength tuning ───────────────────────────────────
+415: // Raised from 0x90/0x96 (3.0V/3.3V) to 0xC0/0xD0 (4.0V/4.4V)
+416: // to push the ERM harder within its 5.3V output headroom.
+417: // Do NOT exceed 0xFF/0xFF; stay within your motor's rated voltage.
+418: drv.writeRegister8(0x16, 0xC0);  // RATED_VOLTAGE: ~4.0V × 255/5.3 ≈ 193
+419: drv.writeRegister8(0x17, 0xD0);  // OD_CLAMP:      ~4.4V × 255/5.6 ≈ 208
+424: // I2C recovery restores full ERM config
+436: // ── Setup ────────────────────────────────────────────────────
+438: // LED — start all OFF
+454: updateLED(); // solid white
+460: // Configure ADC for battery monitoring
+464: // Enable DRV2605L output stage (EN pin on clone boards)
+475: updateLED(); // solid red
+515: BLE.setAdvertisingInterval(800);   // 500 ms — saves ~15% power vs default 100 ms
+516: BLE.setConnectionInterval(24, 40); // 30–50 ms — haptic commands arrive at ≤1 Hz
+524: vibrateBleReady(); // double-tap — blocks until done (safe here, BLE up but no central yet)
+529: // ── Loop ─────────────────────────────────────────────────────
+560: // ── Haptic commands ──────────────────────────────────
+567: // BUG-A fix: 0x03 is the heartbeat byte — it belongs on heartbeatChar,
+568: // not here, but ignore it silently as a belt-and-suspenders guard
+569: // so a misdirected write doesn't spam the Serial log as "Unknown cmd".
+570: case 0x03: /* heartbeat no-op */  break;
+576: // ── Heartbeat watchdog ───────────────────────────────
+577: // BUG-A fix: validate the written value is 0x03 (the heartbeat byte
+578: // used by js/haptic-armband.js since the CMD_HEARTBEAT collision fix).
+579: // Any other value is a stray write and must not suppress a real dropout.
+591: // ── Periodic battery update ──────────────────────────
+617: // ── I²C health check (every 5 s) ────────────────────
+618: // Checks the DRV2605L is still on the bus. If lost, attempts
+619: // full recovery including re-asserting the EN pin.
+626: // Re-assert EN in case it glitched low
+641: // Disconnect — re-advertise first so device is immediately visible,
+642: // then play disconnect buzz non-blockingly while advertising.
+--- firmware/haptic_test/haptic_test.ino ---
+1: // ============================================================
+2: //  haptic_test.ino  —  DRV2605L Diagnostic + Vibration Test
+3: //  Board: Seeed XIAO BLE nRF52840
+4: //  Hardware: DRV2605L haptic driver (I²C) + ERM coin motor
+5: //
+6: //  ── WHAT THIS DOES ──────────────────────────────────────────
+7: //  1. Dumps all key DRV2605L registers BEFORE and AFTER init.
+8: //  2. Holds RTP output ON continuously for 10 s so you can
+9: //     measure OUT+/OUT- with a multimeter without chasing pulses.
+10: //  3. Prints STATUS register every second during the ON phase.
+11: //
+12: //  ── MOTOR TYPE ──────────────────────────────────────────────
+13: //  Select your motor type by keeping ONE of the two lines below:
+14: // #define MOTOR_LRA   // Linear Resonant Actuator (closed-loop, 1.8V RMS typical)
+15: #define MOTOR_ERM   // Eccentric Rotating Mass coin motor (open-loop, 3V typical)
+16: //
+17: //  ── WIRING ──────────────────────────────────────────────────
+18: //    DRV2605L SDA → D4 (XIAO I²C SDA)
+19: //    DRV2605L SCL → D5 (XIAO I²C SCL)
+20: //    DRV2605L VIN → Dual-voltage OR loop (5V USB + LiPo BAT+ directly via Schottky diodes)
+21: //                   220µF–470µF decoupling cap across VIN/GND. Do NOT use XIAO 3.3V pin.
+22: //    DRV2605L GND → GND
+23: //    DRV2605L EN  → D3  (clone boards only; or hardwire EN to 3.3V)
+24: //    Motor        → DRV2605L OUTP / OUTN
+25: //                   (LRA: observe +/− polarity. ERM: polarity only affects spin direction)
+26: //
+27: //  ── EXTERNAL RGB LED (optional) ─────────────────────────────
+28: //    R anode → 270Ω → D6
+29: //    G anode → 100Ω → D7
+30: //    B anode → 100Ω → D8
+31: //    Cathode → GND
+32: //    NOTE: Per-channel values. Green/blue Vf ≈ 2.8V — on 3.3V rail, 220Ω
+33: //    leaves barely 2mA. 100Ω gives a proper 5mA brightness.
+34: //    Green = init OK.  Red = DRV2605L not found.
+35: // ============================================================
+42: // ── Motor type validation ────────────────────────────────────
+50: // ── DRV2605L EN pin (clone boards only) ─────────────────────
+51: // Clone DRV2605L breakout boards float EN low, disabling OUTP/OUTN.
+52: // Connect EN → D3 on the XIAO and the firmware drives it HIGH.
+53: // If you hardwire EN to 3.3V instead, comment out this define.
+56: // ── External RGB LED (optional) ──────────────────────────────
+57: // Comment out USE_EXTERNAL_RGB to disable.
+58: // Uncomment EXT_RGB_COMMON_ANODE if your LED is common-anode.
+60: // #define EXT_RGB_COMMON_ANODE
+67: // Common-anode: LOW = ON
+74: // Common-cathode (default): HIGH = ON
+83: pinMode(EXT_LED_R, OUTPUT); digitalWrite(EXT_LED_R, HIGH); // OFF
+87: pinMode(EXT_LED_R, OUTPUT); digitalWrite(EXT_LED_R, LOW);  // OFF
+97: // ── DRV2605L motor init (LRA) ────────────────────────────────
+100: // Library 6 = LRA waveform library
+103: // Set N_ERM_LRA bit (0x1A bit 7 = 1 → LRA mode)
+106: // Enable closed-loop auto-resonance (0x1D bit 2 = LRA_OPEN_LOOP; clear = closed-loop)
+109: // RATED_VOLTAGE: 1.8V RMS × 255 / 5.3 ≈ 87 = 0x57
+110: // Adjust if your LRA has a different rated voltage.
+113: // OD_CLAMP: 2.1V × 255 / 5.6 ≈ 96 = 0x60  (≈17% above rated)
+116: // Auto-calibration — populates A_CAL_COMP (0x18) and A_CAL_BEMF (0x19)
+136: // ── DRV2605L motor init (ERM) ────────────────────────────────
+139: // Library 1 = ERM waveform library
+142: // ERM mode helper (clears N_ERM_LRA bit 7 of 0x1A)
+145: // Open-loop ERM: set ERM_OPEN_LOOP bit (0x1D bit 5 = 1)
+146: // Recommended for coin ERMs — closed-loop back-EMF tracking causes 0V output
+147: // on many small motors due to noisy or weak back-EMF signal.
+150: // RATED_VOLTAGE: 3.0V × 255 / 5.3 ≈ 144 = 0x90
+151: // Adjust for your specific ERM motor.
+154: // OD_CLAMP: 3.3V × 255 / 5.6 ≈ 150 = 0x96
+162: // ── Drive motor for onMs, silent for offMs, repeated reps times ─
+166: drv.setRealtimeValue(127); // max amplitude (RTP signed 8-bit: 127 = full scale)
+174: // ── Register dump helper ────────────────────────────────────
+184: uint8_t feedBk  = drv.readRegister8(0x1A); // FEEDBACK_CTRL
+185: uint8_t ctrl3   = drv.readRegister8(0x1D); // CONTROL3
+195: // MODE: 0=INTTRIG 1=EXTTRIG_EDGE 2=EXTTRIG_LEVEL 3=PWM 4=AUDIO 5=RTP 6=DIAG 7=AUTOCAL
+207: // 0=ERM, 1=LRA
+211: // ERM_OPEN_LOOP bit5=1 → open-loop (required for small ERMs)
+222: // ── EN pin HIGH before Wire.begin() ─────────────────────────
+251: // ── ERM open-loop setup — explicit, step by step ─────────────
+254: drv.selectLibrary(1);                    // Library 1 = ERM
+255: drv.useERM();                            // clear N_ERM_LRA bit
+258: c3 |= 0x20;                              // set ERM_OPEN_LOOP bit5
+261: drv.writeRegister8(0x16, 0x90);          // RATED_VOLTAGE ~3.0 V
+262: drv.writeRegister8(0x17, 0x96);          // OD_CLAMP ~3.3 V
+264: // Explicitly clear STANDBY (bit6) and set MODE=0 (INTTRIG)
+266: modeReg &= ~0x40;  // clear STANDBY
+267: modeReg &= ~0x07;  // MODE = 0 (INTTRIG)
+272: // ── Switch to RTP and hold ON for 10 s ───────────────────────
+277: drv.setMode(DRV2605_MODE_REALTIME);  // 0x05 = RTP mode
+278: drv.setRealtimeValue(127);           // 0x7F = max amplitude
+301: // Diagnostic runs once in setup() — nothing here.

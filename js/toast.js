@@ -122,7 +122,7 @@ function ensureKeyListener() {
  * @param {number} [duration=3500] - Auto-dismiss delay in ms. 0 = persistent.
  * @returns {HTMLElement} The toast element (so callers can dismiss it manually).
  */
-export function showToast(message, type = "info", duration = 3500) {
+export function showToast(message, type = "info", duration = 3500, actionText = "", actionCallback = null) {
   const root = getContainer();
 
   const toast = document.createElement("div");
@@ -132,11 +132,14 @@ export function showToast(message, type = "info", duration = 3500) {
   // Make the toast focusable so keyboard users can tab to it
   toast.tabIndex = 0;
 
-  // Inject only static, trusted HTML (icons + button skeleton); user-supplied `message`
-  // is set via textContent below to prevent XSS from assay names or reason strings (Bug 1).
+  // Inject only static, trusted HTML (icons + button skeleton); user-supplied text
+  // is always set via textContent to prevent XSS from assay names or reason strings.
+  // MED-U7 fix: actionText was previously injected directly into innerHTML — replaced
+  // with an empty button skeleton; textContent is assigned safely below.
   toast.innerHTML = `
     <span class="toast__icon">${ICONS[type] ?? ICONS.info}</span>
     <span class="toast__message"></span>
+    ${actionText ? `<button class="toast__action-btn" type="button"></button>` : ""}
     <button class="toast__close" type="button" aria-label="Dismiss notification">
       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
         stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -145,8 +148,21 @@ export function showToast(message, type = "info", duration = 3500) {
     </button>
     ${duration > 0 ? `<div class="toast__progress" style="animation-duration:${duration}ms"></div>` : ""}
   `;
-  // Set the user-supplied text safely — never via innerHTML
+  // Set user-supplied text safely — never via innerHTML
   toast.querySelector(".toast__message").textContent = message;
+  // MED-U7 fix: also set actionText via textContent (not innerHTML above).
+  if (actionText) {
+    const actionBtn = toast.querySelector(".toast__action-btn");
+    if (actionBtn) actionBtn.textContent = actionText;
+  }
+
+  if (actionText && actionCallback) {
+    const actionBtn = toast.querySelector(".toast__action-btn");
+    actionBtn.addEventListener("click", () => {
+      actionCallback();
+      dismiss(toast);
+    });
+  }
 
   // Dismiss on close button click
   toast.querySelector(".toast__close").addEventListener("click", () => dismiss(toast));
@@ -154,7 +170,7 @@ export function showToast(message, type = "info", duration = 3500) {
   // Enter / Space dismisses a focused toast
   toast.addEventListener("keydown", e => {
     if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault(); // prevent Space from scrolling the page
+      e.preventDefault(); // Prevent Space from scrolling the page
       dismiss(toast);
     }
   });
@@ -167,7 +183,7 @@ export function showToast(message, type = "info", duration = 3500) {
   toast.addEventListener("touchstart", e => { touchStartX = e.touches[0].clientX; }, { passive: true });
   toast.addEventListener("touchend", e => {
     // T-4 fix: changedTouches can be empty in rare multi-touch cancel scenarios;
-    // accessing [0] would throw TypeError.
+    // Accessing [0] would throw TypeError.
     if (!e.changedTouches.length) return;
     const dx = e.changedTouches[0].clientX - touchStartX;
     if (Math.abs(dx) > 60) dismiss(toast);
@@ -186,9 +202,9 @@ export function showToast(message, type = "info", duration = 3500) {
 
   // Pause auto-dismiss while the user hovers over the toast.
   // Note: the timer variable is also held by the close-button and Escape handlers
-  // via closure, but those paths call dismiss() which guards against double-dismiss
-  // using the `toast--exiting` class check. The stale timer firing after an early
-  // dismiss is therefore harmless — dismiss() becomes a no-op on the second call.
+  // Via closure, but those paths call dismiss() which guards against double-dismiss
+  // Using the `toast--exiting` class check. The stale timer firing after an early
+  // Dismiss is therefore harmless — dismiss() becomes a no-op on the second call.
   toast.addEventListener("mouseenter", () => clearTimeout(timer));
   toast.addEventListener("mouseleave", () => {
     if (duration > 0) timer = setTimeout(() => dismiss(toast), 1000);
@@ -224,3 +240,9 @@ function dismiss(toast) {
     cleanup();
   }, { once: true });
 }
+
+// Expose to window for index.html PWA update logic.
+// Also dispatch "toastReady" so the SW update handler can retry if the update
+// notification arrived before this module finished loading (BUG-U4 fix).
+window.showToast = showToast;
+window.dispatchEvent(new Event("toastReady"));
