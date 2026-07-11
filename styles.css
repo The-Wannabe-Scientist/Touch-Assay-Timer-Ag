@@ -762,9 +762,9 @@ button.danger:active {
 
 #visualMetronomeBar {
   height: 100%;
-  width: 100%;
+  width: 100%;           /* full-width base; scaleX() scales from this */
   transform-origin: left;
-  transform: scaleX(0);
+  transform: scaleX(0);  /* JS drives this via style.transform on each rAF */
   /* BUG-U6 fix: promote to its own compositor layer so the first rAF frame
      is already GPU-composited — prevents a visible stutter on mid-tier devices
      when a new stimulus interval starts. */

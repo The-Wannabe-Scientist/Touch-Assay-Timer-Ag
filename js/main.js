@@ -1336,7 +1336,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Use cached DOM reference from UI — avoids getElementById on every frame
     if (UI.Displays.metronomeBar) {
-      UI.Displays.metronomeBar.style.width = `${progress * 100}%`;
+      // Drive via scaleX so the compositor layer added by will-change: transform
+      // is used end-to-end. Previously used style.width which forced layout;
+      // scaleX + transform-origin:left is equivalent visually but GPU-accelerated.
+      UI.Displays.metronomeBar.style.transform = `scaleX(${progress})`;
       // #10: near-full glow at 90%+ to signal upcoming stimulus
       if (progress >= 0.9) {
         UI.Displays.metronomeBar.classList.add("near-full");
