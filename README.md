@@ -123,7 +123,7 @@ The visual metronome bar pulses at the configured ISI. Each stimulus window is c
 
 ### 3. Recording Responses
 
-- **0** is recorded when a non-response is logged within the stimulus window by tapping.
+- **0** is recorded when you tap during the stimulus window to log a non-response.
 - **1** is recorded when the window closes with no tap.
 - The live progress counter shows the current stimulus number.
 - Toggle **Hide/Show Progress** to declutter the screen during recording.
@@ -157,7 +157,7 @@ Data is organised in a three-level hierarchy, persisted to IndexedDB:
 Assay  (experimental parameters, genotype list)
 └── Trial  (one recording session)
     └── Run  (one animal)
-        └── values[]  (one boolean per stimulus: 1 or 0)
+        └── values[]  (one binary value per stimulus: 1 or 0)
 ```
 
 - **Assay** — holds ISI, stimCount, binSize, temperature, humidity, genotypes.
