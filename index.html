@@ -385,7 +385,7 @@
             <input type="range" id="tickPitch" min="200" max="2000" step="50" value="900" class="settings-range">
             <span class="slider-icon-max" aria-hidden="true" style="font-size:0.65rem;font-weight:700;letter-spacing:-0.05em;color:var(--text-muted);">Hi</span>
           </div>
-          <p class="settings-hint">Move slider — a preview tick plays so you can hear the current pitch. Default: 900 Hz.</p>
+          <p class="settings-hint">Adjusts the frequency of the audio tick. A preview will play as you move the slider. (Default: 900 Hz).</p>
         </div>
 
         <div class="settings-slider-group">
@@ -404,7 +404,7 @@
             <input type="range" id="speechLead" min="0" max="490" step="10" value="80" class="settings-range">
             <span class="slider-icon-max" aria-hidden="true" style="font-size:0.6rem;font-weight:700;color:var(--text-muted);">490</span>
           </div>
-          <p class="settings-hint">How early the spoken cue fires before each stimulus. Increase if speech arrives late on your device (typical: 60–150 ms).</p>
+          <p class="settings-hint">Compensates for Bluetooth or system audio latency by triggering the spoken cue slightly early. Increase this if the voice counts seem delayed. (Typical: 60–150 ms).</p>
         </div>
       </fieldset>
 
@@ -507,7 +507,7 @@
             Test Vibration
           </button>
           <div class="armband-test-hint">
-            Sends a single tap to verify the armband is responding.
+            Sends a test pulse to your armband to verify the Bluetooth connection and haptic motor are working.
             <div id="armbandLatencyResult" style="color: var(--color-primary); font-weight: 600; margin-top: 0.25rem;"></div>
           </div>
         </div>
