@@ -2,7 +2,7 @@
 // pick up updated JS/CSS on the next page load instead of serving stale cached files.
 // The activate handler below automatically deletes all caches whose name does not
 // match CACHE_NAME, which forces clients to re-fetch all assets after an update.
-const CACHE_NAME = "touch-assay-cache-v2.0.0.3.11";
+const CACHE_NAME = "touch-assay-cache-v2.0.0.3.12";
 
 // Ensure paths match your actual directory structure!
 const ASSETS_TO_CACHE = [
