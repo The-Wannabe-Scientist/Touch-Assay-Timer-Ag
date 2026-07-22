@@ -131,9 +131,9 @@ export function loadVoices() {
     null;
 }
 
-// M5 fix: speechSynthesis is not available in all browser environments
+// speechSynthesis is not available in all browser environments
 // (some WebViews, embedded browsers). Accessing it at module load time without
-// A guard crashes the entire module, taking down the whole application.
+// a guard crashes the entire module, taking down the whole application.
 if (typeof speechSynthesis !== "undefined") {
   // Browsers load voices asynchronously; listen for when the list is populated
   speechSynthesis.onvoiceschanged = loadVoices;
@@ -156,15 +156,21 @@ function getAudioContext() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
+    // Reset the monotonic guard whenever a new context is created.
+    // If this function is ever called after a context was closed/lost and a new
+    // one is created, the old (large) lastMonotonicTime would make getAudioTime()
+    // return a permanently stale value, freezing the scheduler's timing.
+    lastMonotonicTime = 0;
+
     // Route all oscillators through a single master gain node.
     // Note: Volume control is not needed in this app because device hardware volume
     // Buttons provide sufficient control for users. Default gain is 1.0 (full volume).
     masterGain = audioCtx.createGain();
     masterGain.connect(audioCtx.destination);
   }
-  // H4 fix: enforce the invariant that audioCtx non-null ⇒ masterGain non-null.
+  // Enforce the invariant that audioCtx non-null ⇒ masterGain non-null.
   // If masterGain was somehow lost (e.g. context recycled by a future refactor),
-  // Re-create it so tone functions don't crash on gain.connect(masterGain).
+  // re-create it so tone functions don't crash on gain.connect(masterGain).
   if (!masterGain) {
     masterGain = audioCtx.createGain();
     masterGain.connect(audioCtx.destination);
@@ -330,8 +336,8 @@ export function playTick(exactTime = null) {
 
   osc.start(time);
   osc.stop(time + 0.05);  // Node auto-disconnects after stopping
-  // L3 fix: disconnect the GainNode after the oscillator ends so it is released
-  // From the audio graph and eligible for GC on long-running sessions.
+  // Disconnect the GainNode after the oscillator ends so it is released
+  // from the audio graph and eligible for GC on long-running sessions.
   osc.onended = () => gain.disconnect();
 }
 
@@ -360,7 +366,7 @@ export function playWarmupTone(frequency, exactTime = null) {
 
   osc.start(time);
   osc.stop(time + 0.3);
-  // L3 fix: release GainNode from audio graph after oscillator stops
+  // Release GainNode from audio graph after oscillator stops
   osc.onended = () => gain.disconnect();
 }
 
@@ -392,7 +398,7 @@ export function playCompletionTone() {
 
     osc.start(startAt);
     osc.stop(startAt + 0.3);
-    // L3 fix: release GainNode from audio graph after oscillator stops
+    // Release GainNode from audio graph after oscillator stops
     osc.onended = () => gain.disconnect();
   });
 }

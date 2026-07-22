@@ -10,14 +10,14 @@
  *
  * Sheet layout for every trial/pooled section:
  *   1. Raw stimulus values    (one column per run, one row per stimulus)
- *                              — includes Partial Bin Warning (#4) and Ineligible Reason (#5)
- *   2. Binned percentages     (% response per bin) + mean / SEM / N summary (#2)
+ *                              — includes Partial Bin Warning and Ineligible Reason rows
+ *   2. Binned percentages     (% response per bin) + mean / SEM / N summary
  *   3. Touch Index (binned)   (normalised against bin 1 baseline)
- *   4. Touch Index (analysed) (mean / SEM / N across animals per genotype) (#2)
+ *   4. Touch Index (analysed) (mean / SEM / N across animals per genotype)
  *
  * All three master export functions (Excel, CSV, HTML preview) share a single
- * data-building pass via buildAllSections() (#12).  For pooled configs a shared
- * run-binning cache avoids redundant computation (#11).
+ * data-building pass via buildAllSections(). For pooled configs a shared
+ * run-binning cache avoids redundant computation.
  *
  * Depends on SheetJS (XLSX) being loaded globally for Excel export.
  * The CSV fallback has no external dependencies.
@@ -52,7 +52,7 @@ export const RUN_STATUS_LABELS = {
    XSS Guard
    ========================================================================== */
 
-// EscapeHTML is imported from utils.js — single shared implementation (BUG-10 fix).
+// escapeHTML is imported from utils.js — single shared implementation.
 
 
 /* ==========================================================================
@@ -115,11 +115,11 @@ function calculateStats(values) {
   const mean = values.reduce((a, b) => a + b, 0) / n;
 
   // SEM is undefined for a single observation — return blank so the
-  // Exported cell shows nothing rather than 0 (which implies zero spread).
+  // exported cell shows nothing rather than 0 (which implies zero spread).
   if (n === 1) return { mean, sem: "" };
 
   // Use sample variance (Bessel's correction, divide by n-1) instead of
-  // Population variance (divide by n). Population variance systematically underestimates
+  // population variance (divide by n). Population variance systematically underestimates
   // SEM for small n, which is the typical case in biological experiments.
   const variance = values.reduce((a, v) => a + (v - mean) ** 2, 0) / (n - 1);
   const sem      = Math.sqrt(variance) / Math.sqrt(n);
@@ -132,7 +132,7 @@ function calculateStats(values) {
  * runs, storing results in a Map keyed by run object.
  *
  * Used by buildAllSections() to share a single binning pass across all pooled
- * sub-tables for the same config, avoiding redundant computation (#11).
+ * sub-tables for the same config, avoiding redundant computation.
  *
  * @param {Object[]} runs    - Flat array of run objects.
  * @param {number}   binSize - Number of stimuli per bin.
@@ -161,7 +161,7 @@ function buildRunCache(runs, binSize) {
  */
 export function applySheetLayout(sheet, data) {
   // Data may be empty (e.g. a trial with no runs). Guard before
-  // Accessing data[0] to avoid "Cannot read properties of undefined (reading 'map')".
+  // accessing data[0] to avoid "Cannot read properties of undefined (reading 'map')".
   if (!data || data.length === 0) return;
 
   // Set column widths
@@ -182,9 +182,9 @@ export function applySheetLayout(sheet, data) {
  * Builds the assay-level metadata 2D array (shown on the first Excel sheet
  * and at the top of the HTML preview).
  *
- * Includes both createdAt and lastModifiedAt (#6).
+ * Includes both createdAt and lastModifiedAt.
  *
- * @param {Object} assay - The assay configuration object.
+ * @param {Assay} assay - The assay configuration object.
  * @returns {any[][]} Two-column table: [parameter, value].
  */
 export function buildMetadata2D(assay) {
@@ -214,10 +214,9 @@ export function buildMetadata2D(assay) {
 export function buildHtmlTableFrom2D(title, data2D) {
   if (!data2D || data2D.length === 0) return "";
 
-  // Escape the title to prevent XSS when it contains user-supplied text
-  const safeTitle = title
-    ? title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    : "";
+  // Use the imported escapeHTML() — previously a hand-rolled replacement
+  // only covered &, <, > — omitting " and ' which escapeHTML handles correctly.
+  const safeTitle = title ? escapeHTML(title) : "";
 
   let html = `<div class="preview-section"><h3>${safeTitle}</h3>` +
              `<div class="preview-table-wrapper"><table><tbody>`;
@@ -233,7 +232,11 @@ export function buildHtmlTableFrom2D(title, data2D) {
     row.forEach(cell => {
       const content      = (cell === null || cell === undefined || cell === "") ? "" : cell;
       const displayValue = typeof content === "number"
-        ? (Number.isInteger(content) ? content : content.toFixed(2))
+        // Numeric values are converted via String() before being placed
+        // in innerHTML. Number-derived strings cannot contain HTML-injectable characters
+        // (only digits, '.', '-', 'e') so this path is safe. The String() wrapper is
+        // explicit to document the assumption and catch exotic Number subclasses.
+        ? String(Number.isInteger(content) ? content : content.toFixed(2))
         : escapeHTML(content);  // Escape user-supplied strings to prevent XSS
 
       // Header cells: first row, or rows that start with "Bin" / "Genotype"
@@ -286,11 +289,11 @@ export function buildTouchAnalysedSheet2D({ percentAnalysed2D, tiBinned2D, tiAna
  * Runs that did not complete the full protocol show empty cells for
  * stimulus indices beyond their recorded values.
  *
- * Now includes Partial Bin Warning (#4) and Ineligible Reason (#5) header rows
+ * Includes Partial Bin Warning and Ineligible Reason header rows
  * so QC information is preserved in every raw export.
  *
- * @param {Object} trial - A single trial object with a `runs` array.
- * @param {Object} assay - The parent assay (provides stimCount and genotypes).
+ * @param {Trial} trial - A single trial object with a `runs` array.
+ * @param {Assay} assay - The parent assay (provides stimCount and genotypes).
  * @returns {any[][]} 2D array: [genotypeRow, animalRow, statusRow, partialBinRow, ineligibleRow, ...stimulusRows]
  */
 export function buildTrialRaw2D(trial, assay) {
@@ -301,8 +304,8 @@ export function buildTrialRaw2D(trial, assay) {
   const headerGenotype   = ["Genotype"];
   const headerAnimal     = ["Animal"];
   const headerStatus     = ["Run Status"];
-  const headerPartialBin = ["Partial Bin Warning"];  // #4
-  const headerIneligible = ["Ineligible Reason"];    // #5
+  const headerPartialBin = ["Partial Bin Warning"];
+  const headerIneligible = ["Ineligible Reason"];
 
   genotypes.forEach((g, gi) => {
     runsByGenotype[g].forEach(run => {
@@ -340,10 +343,10 @@ export function buildTrialRaw2D(trial, assay) {
 
 /**
  * Builds the binned percentage table for a single trial, with a summary
- * section showing mean ± SEM ± N per genotype per bin (#2).
+ * section showing mean ± SEM ± N per genotype per bin.
  *
- * @param {Object} trial - A single trial object with a `runs` array.
- * @param {Object} assay - The parent assay (provides genotypes and binSize).
+ * @param {Trial} trial - A single trial object with a `runs` array.
+ * @param {Assay} assay - The parent assay (provides genotypes and binSize).
  * @returns {any[][]} 2D array with raw bins then mean/SEM/N summary rows.
  */
 export function buildTrialBinned2D(trial, assay) {
@@ -379,7 +382,7 @@ export function buildTrialBinned2D(trial, assay) {
   const rawRows     = [];
   const summaryRows = [];
   const summaryHeader = ["Bin"];
-  genotypes.forEach(g => summaryHeader.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
+  genotypes.forEach(g => summaryHeader.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));
 
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
     const start    = binIndex * binSize + 1;
@@ -406,13 +409,13 @@ export function buildTrialBinned2D(trial, assay) {
         .map(run => binnedByRun.get(run)?.[binIndex])  // Optional chain: run may not be in map
         .filter(v => v !== undefined);
       const { mean, sem } = calculateStats(values);
-      sumRow.push(mean, sem, values.length);  // #2
+      sumRow.push(mean, sem, values.length);
     });
     summaryRows.push(sumRow);
   }
 
-  // Separator rows must span the full header width so SheetJS column-width
-  // Detection is consistent (same fix was applied to buildPooledBinned2D at line 691).
+  // Separator rows span the full header width so SheetJS column-width
+  // detection sees a consistent row length.
   const _sep = Array(headerGenotype.length).fill("");
 
   return [
@@ -428,8 +431,8 @@ export function buildTrialBinned2D(trial, assay) {
  * Builds the Touch Index (binned, raw per-run values) table for a single trial.
  * Runs whose first bin is zero are excluded from TI analysis and flagged.
  *
- * @param {Object} trial - A single trial object with a `runs` array.
- * @param {Object} assay - The parent assay (provides genotypes and binSize).
+ * @param {Trial} trial - A single trial object with a `runs` array.
+ * @param {Assay} assay - The parent assay (provides genotypes and binSize).
  * @returns {any[][]} 2D array: [genotypeRow, animalRow, ...binRows]
  */
 export function buildTrialTouchIndexBinned2D(trial, assay) {
@@ -456,9 +459,11 @@ export function buildTrialTouchIndexBinned2D(trial, assay) {
   trial.runs.filter(run => run.eligibleForAnalysis).forEach(run => {
     const binned = binRunValues(run.values, binSize);
     const ti     = computeTouchIndexBins(binned);
-    // Runs with a null TI (zero baseline) are excluded from the map;
-    // CollectTouchIndexExclusions() detects them dynamically without needing
-    // These flags to be written here.
+    // Runs where computeTouchIndexBins returns null (zero baseline) are
+    // excluded from the TI map even though eligibleForAnalysis is true. This means
+    // their column in the header will show all-blank cells in the body. The reason is
+    // documented on the separate "Touch Index Exclusions" sheet generated by
+    // collectTouchIndexExclusions().
     if (ti) {
       binnedByRun.set(run, ti);
       maxBinCount = Math.max(maxBinCount, ti.length);
@@ -485,10 +490,10 @@ export function buildTrialTouchIndexBinned2D(trial, assay) {
 }
 
 /**
- * Builds the Touch Index summary (mean ± SEM ± N per genotype per bin) for a single trial (#2).
+ * Builds the Touch Index summary (mean ± SEM ± N per genotype per bin) for a single trial.
  *
- * @param {Object} trial - A single trial object with a `runs` array.
- * @param {Object} assay - The parent assay (provides genotypes and binSize).
+ * @param {Trial} trial - A single trial object with a `runs` array.
+ * @param {Assay} assay - The parent assay (provides genotypes and binSize).
  * @returns {any[][]} 2D array: [header, ...summaryRows]
  */
 export function buildTrialTouchIndexAnalysed2D(trial, assay) {
@@ -507,13 +512,19 @@ export function buildTrialTouchIndexAnalysed2D(trial, assay) {
     }
   });
 
+  // Filter out undefined/null entries before spreading into Math.max.
+  // If runsByGenotype has an empty genotype bucket, the flat() produces no elements
+  // and Math.max(0) = 0, which is correct. However, if any element of the flat
+  // array is undefined (e.g. from a corrupted TI array), Math.max propagates NaN,
+  // silently producing a zero-row table. The .filter(Boolean) (equivalent to
+  // .filter(n => n != null)) makes the fallback-to-0 explicit and robust.
   const maxBinCount = Math.max(
-    ...Object.values(runsByGenotype).flat().map(r => r.length),
+    ...Object.values(runsByGenotype).flat().map(r => r.length).filter(n => n != null),
     0
   );
 
   const header = ["Bin"];
-  genotypes.forEach(g => header.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
+  genotypes.forEach(g => header.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));
 
   const rows = [];
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
@@ -525,7 +536,7 @@ export function buildTrialTouchIndexAnalysed2D(trial, assay) {
       // Filter out undefined entries (from runs with fewer bins)
       const values        = runsByGenotype[g].map(r => r[binIndex]).filter(v => v != null);
       const { mean, sem } = calculateStats(values);
-      row.push(mean, sem, values.length);  // #2
+      row.push(mean, sem, values.length);
     });
     rows.push(row);
   }
@@ -543,13 +554,13 @@ export function buildTrialTouchIndexAnalysed2D(trial, assay) {
  * Identical structure to buildTrialRaw2D but spans multiple trials, adding
  * Trial and Trial Animal header rows.
  *
- * Now includes Partial Bin Warning (#4) and Ineligible Reason (#5) header rows.
+ * Includes Partial Bin Warning and Ineligible Reason header rows.
  * Accepts pre-collected runs via optional _runs parameter to avoid re-querying
- * when called from buildAllSections (#11).
+ * when called from buildAllSections.
  *
- * @param {Object}   assay    - The full assay object.
+ * @param {Assay}    assay    - The full assay object.
  * @param {Object}   [options]- Filter options passed to collectPooledRuns.
- * @param {Object[]} [_runs]  - Pre-collected runs (optional, avoids re-querying).
+ * @param {Run[]}    [_runs]  - Pre-collected runs (optional, avoids re-querying).
  * @returns {any[][]} 2D array with seven header rows then stimulus rows.
  */
 export function buildPooledRaw2D(assay, options = {}, _runs = null) {
@@ -563,8 +574,8 @@ export function buildPooledRaw2D(assay, options = {}, _runs = null) {
   const hTrial       = ["Trial"];
   const hTrialAnimal = ["Trial Animal"];
   const hStatus      = ["Run Status"];
-  const hPartialBin  = ["Partial Bin Warning"];  // #4
-  const hIneligible  = ["Ineligible Reason"];    // #5
+  const hPartialBin  = ["Partial Bin Warning"];
+  const hIneligible  = ["Ineligible Reason"];
 
   genotypes.forEach((g, gi) => {
     runsByGenotype[g].forEach(run => {
@@ -600,14 +611,14 @@ export function buildPooledRaw2D(assay, options = {}, _runs = null) {
 }
 
 /**
- * Builds the pooled binned percentage table with mean ± SEM ± N summary rows (#2).
+ * Builds the pooled binned percentage table with mean ± SEM ± N summary rows.
  *
  * Accepts pre-collected runs and a pre-built binning cache to avoid redundant
- * computation when called from buildAllSections (#11).
+ * computation when called from buildAllSections.
  *
- * @param {Object}   assay    - The full assay object.
+ * @param {Assay}    assay    - The full assay object.
  * @param {Object}   [options]- Filter options.
- * @param {Object[]} [_runs]  - Pre-collected runs (optional).
+ * @param {Run[]}    [_runs]  - Pre-collected runs (optional).
  * @param {Map}      [_cache] - Pre-built run cache from buildRunCache (optional).
  * @returns {any[][]} 2D array with header rows, raw bin rows, and summary rows.
  */
@@ -655,7 +666,7 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
   const rawRows     = [];
   const summaryRows = [];
   const summaryHeader = ["Bin"];
-  genotypes.forEach(g => summaryHeader.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
+  genotypes.forEach(g => summaryHeader.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));
 
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
     const start    = binIndex * binSize + 1;
@@ -681,7 +692,7 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
         .map(run => binnedByRun.get(run)?.[binIndex])
         .filter(v => v !== undefined);
       const { mean, sem } = calculateStats(values);
-      sumRow.push(mean, sem, values.length);  // #2
+      sumRow.push(mean, sem, values.length);
     });
     summaryRows.push(sumRow);
   }
@@ -689,10 +700,12 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
   return [
     hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus,
     ...rawRows,
-    // Separator rows must have the same column count as the header rows
-    // (5 columns) so SheetJS column-width detection is not confused. Previously these
-    // Used only 2 cells, causing inconsistent column widths in the Excel preview.
-    ["", "", "", "", ""], ["", "", "", "", ""], ["", "", "", "", ""],
+    // Separator rows must span the FULL header width (all run columns
+    // plus the spacer columns between genotypes), not just the 5 static header fields.
+    // The old hardcoded 5-cell arrays caused SheetJS to detect fewer columns than the
+    // data rows had, producing inconsistent column widths in the Excel preview for any
+    // experiment with more than one run per genotype.
+    ...Array(3).fill(Array(hGenotype.length).fill("")),
     summaryHeader,
     ...summaryRows
   ];
@@ -702,11 +715,11 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
  * Builds the pooled Touch Index (raw per-run) table across all selected trials.
  *
  * Accepts pre-collected runs and a pre-built cache to avoid redundant
- * computation when called from buildAllSections (#11).
+ * computation when called from buildAllSections.
  *
- * @param {Object}   assay    - The full assay object.
+ * @param {Assay}    assay    - The full assay object.
  * @param {Object}   [options]- Filter options passed to collectPooledRuns.
- * @param {Object[]} [_runs]  - Pre-collected runs (optional).
+ * @param {Run[]}    [_runs]  - Pre-collected runs (optional).
  * @param {Map}      [_cache] - Pre-built run cache (optional).
  * @returns {any[][]} 2D array: [genotypeRow, animalRow, ...binRows]
  */
@@ -771,14 +784,14 @@ export function buildPooledTouchIndexBinned2D(assay, options = {}, _runs = null,
 }
 
 /**
- * Builds the pooled Touch Index summary (mean ± SEM ± N per genotype per bin) (#2).
+ * Builds the pooled Touch Index summary (mean ± SEM ± N per genotype per bin).
  *
  * Accepts pre-collected runs and a pre-built cache to avoid redundant
- * computation when called from buildAllSections (#11).
+ * computation when called from buildAllSections.
  *
- * @param {Object}   assay    - The full assay object.
+ * @param {Assay}    assay    - The full assay object.
  * @param {Object}   [options]- Filter options passed to collectPooledRuns.
- * @param {Object[]} [_runs]  - Pre-collected runs (optional).
+ * @param {Run[]}    [_runs]  - Pre-collected runs (optional).
  * @param {Map}      [_cache] - Pre-built run cache (optional).
  * @returns {any[][]} 2D array: [header, ...summaryRows]
  */
@@ -808,13 +821,15 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}, _runs = nul
     });
   }
 
+  // Same pattern as buildTrialTouchIndexAnalysed2D: filter out
+  // undefined/null lengths before spreading so NaN cannot silently produce zero rows.
   const maxBinCount = Math.max(
-    ...Object.values(tiByGenotype).flat().map(r => r.length),
+    ...Object.values(tiByGenotype).flat().map(r => r.length).filter(n => n != null),
     0
   );
 
   const header = ["Bin"];
-  genotypes.forEach(g => header.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));  // #2
+  genotypes.forEach(g => header.push(`${g}_Mean`, `${g}_SEM`, `${g}_N`));
 
   const rows = [];
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
@@ -825,7 +840,7 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}, _runs = nul
     genotypes.forEach(g => {
       const values        = tiByGenotype[g].map(r => r[binIndex]).filter(v => v != null);
       const { mean, sem } = calculateStats(values);
-      row.push(mean, sem, values.length);  // #2
+      row.push(mean, sem, values.length);
     });
     rows.push(row);
   }
@@ -835,7 +850,7 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}, _runs = nul
 
 
 /* ==========================================================================
-   Master Section Builder (#12)
+   Master Section Builder
    ========================================================================== */
 
 /**
@@ -845,11 +860,11 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}, _runs = nul
  *
  * This is the single source of truth consumed by performExcelExport,
  * performCSVExport, and generatePreviewHTML, eliminating ~100 lines of
- * duplicated looping logic (#12).
+ * duplicated looping logic.
  *
  * For pooled configs, collectPooledRuns is called once per config and a shared
  * binning cache is passed to all three pooled sub-table builders, avoiding
- * redundant binRunValues calls (#11).
+ * redundant binRunValues calls.
  *
  * @param {Object}   assay         - The full assay object.
  * @param {Object[]} exportConfigs - Array of dataset selection configs from getExportConfigs().
@@ -937,8 +952,8 @@ export function buildAllSections(assay, exportConfigs) {
  * Orchestrates the creation of a multi-sheet Excel workbook and triggers
  * a browser file download.
  *
- * All sections are built via buildAllSections() (#12), which also applies
- * the shared run-binning cache for pooled configs (#11).
+ * All sections are built via buildAllSections(), which also applies
+ * the shared run-binning cache for pooled configs.
  *
  * Requires SheetJS (XLSX) to be loaded globally. If XLSX is unavailable,
  * the caller should use performCSVExport() instead.
@@ -1005,9 +1020,9 @@ function arrayToCSVRow(row) {
  * Used automatically when SheetJS is unavailable (offline / CDN failure)
  * or when the Excel export fails.
  *
- * All sections are built via buildAllSections() (#12).
+ * All sections are built via buildAllSections().
  * The download anchor is clicked directly without appending it to the DOM,
- * which is sufficient in all modern browsers (#13).
+ * which is sufficient in all modern browsers.
  *
  * Each dataset section is preceded by a "=== Section Name ===" heading line
  * and separated by a blank line, making the file human-readable in a text
@@ -1038,8 +1053,8 @@ export function performCSVExport(currentAssay, exportConfigs) {
     a.download = `${currentAssay.assayName || "Assay"}_Export.csv`;
     a.click();
     // Revoking synchronously can race the download initiation on mobile
-    // Browsers where a.click() is asynchronous. Delay to give the browser time
-    // To start the download before the object URL is invalidated.
+    // browsers where a.click() is asynchronous. Delay to give the browser time
+    // to start the download before the object URL is invalidated.
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 
     return { success: true };
@@ -1052,9 +1067,9 @@ export function performCSVExport(currentAssay, exportConfigs) {
 
 /**
  * Generates the full HTML content for the data preview modal.
- * All sections are built via buildAllSections() (#12).
+ * All sections are built via buildAllSections().
  *
- * @param {Object}   currentAssay  - The full assay object.
+ * @param {Assay}    currentAssay  - The full assay object.
  * @param {Object[]} exportConfigs - Array of dataset selection configs.
  * @returns {string} Complete HTML string ready to inject into the modal container.
  */

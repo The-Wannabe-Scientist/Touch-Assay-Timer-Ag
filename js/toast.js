@@ -134,7 +134,7 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
 
   // Inject only static, trusted HTML (icons + button skeleton); user-supplied text
   // is always set via textContent to prevent XSS from assay names or reason strings.
-  // MED-U7 fix: actionText was previously injected directly into innerHTML — replaced
+  // actionText was previously injected directly into innerHTML — replaced
   // with an empty button skeleton; textContent is assigned safely below.
   toast.innerHTML = `
     <span class="toast__icon">${ICONS[type] ?? ICONS.info}</span>
@@ -150,7 +150,7 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
   `;
   // Set user-supplied text safely — never via innerHTML
   toast.querySelector(".toast__message").textContent = message;
-  // MED-U7 fix: also set actionText via textContent (not innerHTML above).
+  // Also set actionText via textContent (not innerHTML above).
   if (actionText) {
     const actionBtn = toast.querySelector(".toast__action-btn");
     if (actionBtn) actionBtn.textContent = actionText;
@@ -182,8 +182,8 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
   let touchStartX = 0;
   toast.addEventListener("touchstart", e => { touchStartX = e.touches[0].clientX; }, { passive: true });
   toast.addEventListener("touchend", e => {
-    // T-4 fix: changedTouches can be empty in rare multi-touch cancel scenarios;
-    // Accessing [0] would throw TypeError.
+    // changedTouches can be empty in rare multi-touch cancel scenarios;
+    // accessing [0] would throw TypeError.
     if (!e.changedTouches.length) return;
     const dx = e.changedTouches[0].clientX - touchStartX;
     if (Math.abs(dx) > 60) dismiss(toast);
@@ -202,9 +202,9 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
 
   // Pause auto-dismiss while the user hovers over the toast.
   // Note: the timer variable is also held by the close-button and Escape handlers
-  // Via closure, but those paths call dismiss() which guards against double-dismiss
-  // Using the `toast--exiting` class check. The stale timer firing after an early
-  // Dismiss is therefore harmless — dismiss() becomes a no-op on the second call.
+  // via closure, but those paths call dismiss() which guards against double-dismiss
+  // using the `toast--exiting` class check. The stale timer firing after an early
+  // dismiss is therefore harmless — dismiss() becomes a no-op on the second call.
   toast.addEventListener("mouseenter", () => clearTimeout(timer));
   toast.addEventListener("mouseleave", () => {
     if (duration > 0) timer = setTimeout(() => dismiss(toast), 1000);
@@ -223,6 +223,12 @@ function dismiss(toast) {
   toast.classList.add("toast--exiting");
 
   function cleanup() {
+    // toast.remove() MUST be called before the querySelectorAll below.
+    // The query checks for ".toast:not(.toast--exiting)" to decide whether to remove
+    // the global key listener. If the toast were still in the DOM at query time, it
+    // would be counted as a remaining toast (its exiting class was added, not yet
+    // animated out), and the listener would be kept alive incorrectly.
+    // Removing the element first guarantees the query sees the post-removal state.
     toast.remove();
     // If the container is now empty, remove the global listener
     const root = container;
@@ -243,6 +249,6 @@ function dismiss(toast) {
 
 // Expose to window for index.html PWA update logic.
 // Also dispatch "toastReady" so the SW update handler can retry if the update
-// notification arrived before this module finished loading (BUG-U4 fix).
+// notification arrived before this module finished loading.
 window.showToast = showToast;
 window.dispatchEvent(new Event("toastReady"));

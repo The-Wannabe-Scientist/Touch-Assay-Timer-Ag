@@ -10,6 +10,47 @@
  *   3. Data Extraction & Aggregation
  */
 
+/**
+ * @typedef {Object} Assay
+ * @property {string}   assayId        - Unique identifier.
+ * @property {string}   assayName      - Human-readable experiment name.
+ * @property {number}   createdAt      - Unix timestamp (ms) of creation.
+ * @property {number}   lastModifiedAt - Unix timestamp (ms) of last write.
+ * @property {number}   isi            - Inter-stimulus interval in seconds.
+ * @property {number}   stimCount      - Total stimuli per run.
+ * @property {number}   binSize        - Stimuli per analysis bin.
+ * @property {number|null} temperature - Ambient temperature in °C, or null if not recorded.
+ * @property {number|null} humidity    - Relative humidity 0–100 %, or null if not recorded.
+ * @property {string[]} genotypes      - Ordered list of genotype labels.
+ * @property {Trial[]}  trials         - All trials belonging to this assay.
+ */
+
+/**
+ * @typedef {Object} Trial
+ * @property {string}      trialId         - Unique identifier.
+ * @property {number}      trialIndex      - 1-based sequential index within the parent assay.
+ * @property {"active"|"completed"|"abandoned"} status
+ * @property {string|null} abandonedReason - Human-readable reason, set when abandoned.
+ * @property {number}      startedAt       - Unix timestamp (ms).
+ * @property {number|null} endedAt         - Unix timestamp (ms), null while active.
+ * @property {Run[]}       runs            - All runs recorded in this trial.
+ */
+
+/**
+ * @typedef {Object} Run
+ * @property {string}      runId                    - Unique identifier.
+ * @property {string}      genotype                 - Genotype label for this animal.
+ * @property {number|string} animalIndex            - 1-based sequential ID within genotype+trial.
+ * @property {number}      expectedStimCount        - Target number of stimuli to record.
+ * @property {number[]}    values                   - 1 = responded, 0 = did not respond (one per stimulus).
+ * @property {"active"|"completed"|"stoppedEarly"|"abandoned"} status
+ * @property {boolean|null} eligibleForAnalysis     - Set to true/false on run completion.
+ * @property {string|null} ineligibleReason         - Human-readable reason when ineligible.
+ * @property {string|null} partialBinWarning        - Set when stimulus count is not a multiple of binSize.
+ * @property {number}      startedAt                - Unix timestamp (ms).
+ * @property {number|null} endedAt                  - Unix timestamp (ms), null while active.
+ */
+
 
 /* ==========================================================================
    1. Validation & ID Generation
@@ -34,6 +75,24 @@
  *   warnings — non-blocking advisories (e.g. very short ISI) that do not
  *              prevent submission but are surfaced to the user as toasts.
  */
+/**
+ * Normalises a genotype label for fuzzy duplicate comparison.
+ * Strips: case, whitespace, hyphens (including Unicode dash variants),
+ * underscores, and all remaining non-alphanumeric characters.
+ *
+ * This function is the single source of truth for normalisation — the same
+ * logic is mirrored in the chip-input IIFE in index.html.
+ *
+ * @param {string} str - Raw genotype label.
+ * @returns {string} Lower-cased alphanumeric-only key.
+ */
+export function normaliseGenotype(str) {
+  return String(str)
+    .toLowerCase()
+    .replace(/[\s\-_\u2010-\u2015\u2212]+/g, '')  // whitespace + hyphens (all Unicode dash variants)
+    .replace(/[^a-z0-9]/g, '');                    // strip remaining punctuation / symbols
+}
+
 export function validateInputs(values) {
   const errors   = [];
   const warnings = [];
@@ -45,14 +104,17 @@ export function validateInputs(values) {
   if (!values.genotypes || values.genotypes.length === 0) {
     errors.push("At least one genotype is required.");
   } else {
-    // U-3 fix: reject blank/whitespace-only genotype labels
+    // Reject blank/whitespace-only genotype labels
     if (values.genotypes.some(g => !g || !g.trim())) {
       errors.push("Genotype labels must not be empty.");
     }
-    // U-2 fix: reject duplicate genotype labels — duplicates corrupt export column headers
-    // And cause summary statistics to be computed from a merged pool of two genotypes.
-    if (new Set(values.genotypes.map(g => g.trim())).size !== values.genotypes.length) {
-      errors.push("Genotype labels must be unique.");
+    // Fuzzy duplicate check — mirrors normaliseGenotype() used in the chip-input UI.
+    // Two labels that differ only in case, spacing, hyphens, or punctuation
+    // (e.g. "Wild-Type" vs "wildtype") are treated as the same genotype because
+    // they would produce identical export column headers after normalisation.
+    const normKeys = values.genotypes.map(g => normaliseGenotype(g));
+    if (new Set(normKeys).size !== values.genotypes.length) {
+      errors.push("Genotype labels must be unique (ignoring case, spaces, and punctuation).");
     }
   }
 
@@ -60,7 +122,7 @@ export function validateInputs(values) {
     errors.push("Inter-stimulus interval (ISI) must be greater than zero.");
   } else if (values.isi < 0.5) {
     // Non-blocking advisory — very short ISIs may be below reliable scheduling
-    // Resolution on slow or throttled devices, risking silent data inaccuracy.
+    // resolution on slow or throttled devices, risking silent data inaccuracy.
     warnings.push(
       `ISI of ${values.isi}s is very short — timing accuracy may be reduced on this device. ` +
       `Consider using ≥0.5s for reliable results.`
@@ -77,14 +139,14 @@ export function validateInputs(values) {
 
   // If binSize > stimCount, binRunValues() produces an empty array
   // (all values are dropped as a trailing partial bin) causing completely blank
-  // Columns in the export with no user-facing explanation.
+  // columns in the export with no user-facing explanation.
   if (values.binSize > 0 && values.stimCount > 0 && values.binSize > values.stimCount) {
     errors.push(`Bin size (${values.binSize}) cannot be larger than the total stimulus count (${values.stimCount}).`);
   }
 
-  // Temperature and humidity are optional — main.js maps an empty field
-  // To null, which is a valid "not recorded" state. Only validate when a value is
-  // Actually provided (non-null), and reject only genuinely bad values (NaN, etc.).
+  // Temperature and humidity are optional — main.js maps an empty field to null,
+  // which is a valid "not recorded" state. Only validate when a value is
+  // actually provided (non-null), and reject only genuinely bad values (NaN, etc.).
   if (values.temperature != null && isNaN(Number(values.temperature))) {
     errors.push("Temperature must be a valid number.");
   }
@@ -148,7 +210,7 @@ export function generateAutoID() {
 export function binRunValues(values, binSize, options = {}) {
   const { allowPartialBin = false, warnOnDrop = true } = options;
 
-  // U-4 fix: guard against null/undefined values (e.g. from a partially-written DB record)
+  // Guard against null/undefined values (e.g. from a partially-written DB record)
   if (!values || !Array.isArray(values)) return [];
 
   const totalValues = values.length;
@@ -194,15 +256,19 @@ export function binRunValues(values, binSize, options = {}) {
  * @returns {number[]|null} Normalised ratios, or null if baseline is invalid.
  */
 export function computeTouchIndexBins(binnedPercentages) {
-  // U-5 fix: explicitly guard the empty-array case before reading index 0.
+  // Explicitly guard the empty-array case before reading index 0.
   // Previously this relied on binnedPercentages[0] === undefined being == null,
-  // Which is correct but fragile — a future strict-equality change would break it.
+  // which is correct but fragile — a future strict-equality change would break it.
   if (!binnedPercentages || binnedPercentages.length === 0) return null;
 
   const baseline = binnedPercentages[0];
 
-  // Prevent division by zero (baseline = 0 means no responses in the first bin)
-  if (baseline === 0 || baseline == null) {
+  // Prevent division by zero (baseline = 0 means no responses in the first bin).
+  // Also guard against NaN baseline — possible if upstream values[] contains
+  // non-numeric entries that slipped through DB validation, causing bin.reduce()
+  // to return NaN. Without this guard the function would return an all-NaN TI
+  // array that silently corrupts the export instead of triggering an exclusion.
+  if (baseline === 0 || baseline == null || isNaN(baseline)) {
     return null;
   }
 
@@ -218,8 +284,8 @@ export function computeTouchIndexBins(binnedPercentages) {
  * Escapes HTML special characters to prevent XSS when rendering
  * user-supplied strings (e.g. assay names, genotype labels) into innerHTML.
  *
- * Extracted here from main.js and export.js to serve as a single source of
- * truth — previously both modules had an identical private copy (BUG-10).
+ * Shared between main.js and export.js as a single source of truth —
+ * previously both modules had an identical private copy.
  *
  * @param {string} str - Raw user input string.
  * @returns {string} Safely escaped HTML string.
@@ -243,10 +309,10 @@ export function escapeHTML(str) {
  * By default only runs from completed trials are included; pass
  * { includeAbandoned: true } to also include abandoned trials.
  *
- * @param {Object}  assay                        - The full assay object.
+ * @param {Assay}   assay                        - The full assay object.
  * @param {Object}  [options]                    - Filter options.
  * @param {boolean} [options.includeAbandoned=false] - Include abandoned trials.
- * @returns {Object[]} Flat array of run objects, each with a `trialIndex` field.
+ * @returns {Run[]} Flat array of run objects, each with a `trialIndex` field.
  */
 export function collectPooledRuns(assay, options = {}) {
   const { includeAbandoned = false } = options;
@@ -271,25 +337,25 @@ export function collectPooledRuns(assay, options = {}) {
  * This guarantees that the exclusion list is always consistent regardless of
  * whether preview, export, or CSV functions have been called beforehand.
  *
- * @param {Object} assay - The full assay object (needs assay.binSize).
+ * @param {Assay} assay - The full assay object (needs assay.binSize).
  * @returns {Array<[number, string, number, string]>}
  *   Each row: [trialIndex, genotype, animalIndex, exclusionReason]
  */
 export function collectTouchIndexExclusions(assay) {
   // Only scan completed trials — abandoned or still-active trials must not
-  // Produce spurious exclusion rows in the export output.
+  // produce spurious exclusion rows in the export output.
   return assay.trials
     .filter(t => t.status === "completed")
     .flatMap(trial =>
       trial.runs
         // Only eligible runs can be TI-excluded. Ineligible runs (stopped early,
-        // Abandoned) have empty or partial values[] — their binned result is []
-        // Which causes computeTouchIndexBins to return null, producing spurious
-        // Exclusion rows in the export sheet.
+        // abandoned) have empty or partial values[] — their binned result is []
+        // which causes computeTouchIndexBins to return null, producing spurious
+        // exclusion rows in the export sheet.
         .filter(run => run.eligibleForAnalysis)
         .filter(run => {
           // A run is excluded if its Touch Index cannot be computed —
-          // I.e. computeTouchIndexBins returns null (baseline bin = 0).
+          // i.e. computeTouchIndexBins returns null (baseline bin = 0).
           const binned = binRunValues(run.values, assay.binSize);
           return computeTouchIndexBins(binned) === null;
         })

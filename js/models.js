@@ -22,8 +22,8 @@
 
 /**
  * Generates a pseudo-random unique ID combining the current Unix timestamp
- * with a random five-digit suffix to prevent collisions within the same
- * millisecond (e.g. rapid back-to-back run creation in a loop).
+ * with a random suffix to prevent collisions within the same millisecond
+ * (e.g. rapid back-to-back run creation in a loop).
  *
  * Format: "<timestamp>_<suffix>"  e.g. "1686731847000_42853"
  *
@@ -55,7 +55,7 @@ function generateUniqueId() {
  * @param {number}   setupValues.temperature - Ambient temperature in °C.
  * @param {number}   setupValues.humidity   - Relative humidity as a percentage.
  * @param {string[]} setupValues.genotypes  - Ordered list of genotype labels.
- * @returns {Object} A freshly initialised assay instance.
+ * @returns {Assay} A freshly initialised assay instance.
  */
 export function createAssay({ assayName, isi, stimCount, binSize, temperature, humidity, genotypes }) {
   return {
@@ -79,7 +79,7 @@ export function createAssay({ assayName, isi, stimCount, binSize, temperature, h
  * (one per animal / genotype combination).
  *
  * @param {number} trialIndex - Sequential 1-based index within the parent assay.
- * @returns {Object} A freshly initialised trial instance.
+ * @returns {Trial} A freshly initialised trial instance.
  */
 export function createTrial(trialIndex) {
   return {
@@ -101,7 +101,7 @@ export function createTrial(trialIndex) {
  * @param {string}        params.genotype          - Genotype label for this animal.
  * @param {number|string} params.animalIndex       - 1-based sequential ID within this genotype+trial.
  * @param {number}        params.expectedStimCount - Target number of stimuli to record.
- * @returns {Object} A freshly initialised run instance.
+ * @returns {Run} A freshly initialised run instance.
  */
 export function createRun({ genotype, animalIndex, expectedStimCount }) {
   return {
@@ -173,10 +173,19 @@ export function completeRun(run) {
  * Retrieves the currently active trial from an assay.
  * There should only ever be one active trial at a time.
  *
- * @param {Object} assay - The assay object with a `trials` array.
- * @returns {Object|null} The active trial, or null if none exists.
+ * @param {Assay} assay - The assay object with a `trials` array.
+ * @returns {Trial|null} The active trial, or null if none exists.
  */
 export function getActiveTrial(assay) {
   if (!assay || !assay.trials) return null;
-  return assay.trials.find(trial => trial.status === "active") || null;
+  const activeTrials = assay.trials.filter(trial => trial.status === "active");
+  // Invariant: at most one active trial should exist at any time.
+  // Log a warning if this is violated so the corruption is detectable in logs.
+  if (activeTrials.length > 1) {
+    console.warn(
+      `[getActiveTrial] Invariant violation: found ${activeTrials.length} active trials ` +
+      `in assay "${assay.assayName || assay.assayId}". Returning the first one.`
+    );
+  }
+  return activeTrials[0] || null;
 }

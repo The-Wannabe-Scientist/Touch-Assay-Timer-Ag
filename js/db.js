@@ -166,7 +166,7 @@ export async function loadAllAssays() {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result || []);
     // Without these handlers the Promise would leak forever on an IDB error,
-    // Causing the Saved Assays panel to hang with no feedback.
+    // causing the Saved Assays panel to hang with no feedback.
     req.onerror   = () => reject(req.error);
     tx.onerror    = () => reject(tx.error);
   });
@@ -227,7 +227,7 @@ export async function hydrateAssay(assayId) {
       req.onerror   = () => reject(req.error);
     });
     // Sort chronologically — IDB getAll() returns records in insertion order, which
-    // May not match startedAt after aborted/retried transactions on some browsers.
+    // may not match startedAt after aborted/retried transactions on some browsers.
     trial.runs = runs.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   }
 
@@ -257,16 +257,16 @@ export async function hydrateAssay(assayId) {
 export async function deleteAssay(assayId) {
   const db = await openDB();
 
-  // ── Phase 0: Resolve true ID type (string vs number) ───────────────────────────
+  // Resolve true ID type (string vs number).
   // Older versions may have used purely numeric IDs (like Date.now()).
   // DOM dataset attributes always cast these to strings, so we must
-  // Check if a numeric version exists in the DB if the string fails.
+  // check if a numeric version exists in the DB if the string fails.
   //
   // Note: this fallback block is intentionally duplicated from hydrateAssay()
-  // Rather than extracted into a shared helper because both functions open their
-  // Own transactions at different points. A shared async helper would require an
-  // Extra round-trip to IDB and could open a transaction in a context where
-  // Auto-commit has already fired in the caller.
+  // rather than extracted into a shared helper because both functions open their
+  // own transactions at different points. A shared async helper would require an
+  // extra round-trip to IDB and could open a transaction in a context where
+  // auto-commit has already fired in the caller.
   let trueAssayId = assayId;
   const assayExists = await new Promise((resolve, reject) => {
     const tx = db.transaction(STORES.ASSAYS, "readonly");
@@ -294,7 +294,7 @@ export async function deleteAssay(assayId) {
     return;
   }
 
-  // ── Phase 1a: Collect all trial records for this assay ──────────────────
+  // Collect all trial records for this assay
   const trials = await new Promise((resolve, reject) => {
     const tx  = db.transaction(STORES.TRIALS, "readonly");
     const req = tx.objectStore(STORES.TRIALS).index("assayId").getAll(trueAssayId);
@@ -302,7 +302,7 @@ export async function deleteAssay(assayId) {
     req.onerror   = () => reject(req.error);
   });
 
-  // ── Phase 1b: Collect all run IDs for every trial ───────────────────────
+  // Collect all run IDs for every trial
   // Each trial gets its own readonly transaction (safe — reads never conflict).
   const allRunIds = [];
   for (const trial of trials) {
@@ -315,9 +315,9 @@ export async function deleteAssay(assayId) {
     allRunIds.push(...runIds);
   }
 
-  // ── Phase 2: Delete everything in one atomic transaction ─────────────────
+  // Delete everything in one atomic transaction.
   // All requests are queued synchronously — no await inside this Promise so
-  // The transaction cannot auto-commit before every delete is registered.
+  // the transaction cannot auto-commit before every delete is registered.
   await new Promise((resolve, reject) => {
     const tx = db.transaction(
       [STORES.RUNS, STORES.TRIALS, STORES.ASSAYS],
@@ -359,7 +359,7 @@ export async function saveTrial(assayId, trial) {
   const tx = db.transaction(STORES.TRIALS, "readwrite");
   // Exclude the in-memory runs array — runs live in their own store (saveRun).
   // Spreading trial directly would write duplicate run data into the trials record,
-  // Bloating IDB storage and potentially overwriting in-progress run state.
+  // bloating IDB storage and potentially overwriting in-progress run state.
   const { runs: _runs, ...trialData } = trial;
   tx.objectStore(STORES.TRIALS).put({ ...trialData, assayId });
   return new Promise((resolve, reject) => {
@@ -388,8 +388,8 @@ export async function markTrialCompleted(_assayId, trialId) {
   req.onsuccess = () => {
     const trial = req.result;
     // If the trial doesn't exist, abort the transaction so the caller
-    // Receives a rejection instead of a silent no-op (tx.oncomplete would resolve
-    // Even with no actual write, giving a false sense of success).
+    // receives a rejection instead of a silent no-op (tx.oncomplete would resolve
+    // even with no actual write, giving a false sense of success).
     if (!trial) { tx.abort(); return; }
     trial.status  = "completed";
     trial.endedAt = Date.now();
@@ -632,10 +632,10 @@ export async function recoverCrashGuard() {
     const db = await openDB();
 
     // The IDB spec auto-commits a readwrite transaction once there are no
-    // Pending requests. Awaiting a Promise between .get() and .put() can flush the
-    // Microtask queue, trigger auto-commit, and silently drop the write — especially
-    // On Safari. The safe pattern is to queue the .put() synchronously inside
-    // Onsuccess, ensuring both requests share the same transaction lifetime.
+    // pending requests. Awaiting a Promise between .get() and .put() can flush the
+    // microtask queue, trigger auto-commit, and silently drop the write — especially
+    // on Safari. The safe pattern is to queue the .put() synchronously inside
+    // onsuccess, ensuring both requests share the same transaction lifetime.
     await new Promise((resolve, reject) => {
       const tx    = db.transaction(STORES.RUNS, "readwrite");
       const store = tx.objectStore(STORES.RUNS);
@@ -660,6 +660,6 @@ export async function recoverCrashGuard() {
       };
     });
   } catch {
-    // SessionStorage or IDB unavailable (e.g. Private Browsing) — silent no-op
+    // sessionStorage or IDB unavailable (e.g. Private Browsing) — silent no-op
   }
 }

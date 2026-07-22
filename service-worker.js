@@ -1,13 +1,10 @@
 // Bump this version string on EVERY deployment so existing PWA installs
-// Pick up updated JS/CSS on the next page load instead of serving stale cached files.
+// pick up updated JS/CSS on the next page load instead of serving stale cached files.
 // The activate handler below automatically deletes all caches whose name does not
-// Match CACHE_NAME, which forces clients to re-fetch all assets after an update.
+// match CACHE_NAME, which forces clients to re-fetch all assets after an update.
 const CACHE_NAME = "touch-assay-cache-v2.0.0.3.10";
 
 // Ensure paths match your actual directory structure!
-// Removed "./js/logger.js" — that file was deleted in a prior refactor
-// But remained here, causing SW install failures (network error for a 404 response)
-// On browsers that enforce addAll() atomicity (Chrome, Firefox).
 const ASSETS_TO_CACHE = [
   "./",
   "./index.html",
@@ -26,19 +23,19 @@ const ASSETS_TO_CACHE = [
   "./icon-512.png"
 ];
 
-// Cross-origin CDN URL separated from local assets.
-// Cache.addAll() uses no-cors for cross-origin URLs, producing opaque responses
+// Cross-origin CDN URLs are handled separately from local assets.
+// cache.addAll() uses no-cors for cross-origin URLs, producing opaque responses
 // (status 0) that Chrome rejects. Instead we fetch with mode: 'cors' and
-// Cache.put() explicitly, wrapped in try/catch so SW install still succeeds
-// If the CORS fetch fails (the lib will just be fetched at runtime).
+// cache.put() explicitly, wrapped in try/catch so SW install still succeeds
+// if the CORS fetch fails (the lib will just be fetched at runtime).
 const CDN_URLS = [
   "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"
 ];
 
 // 1. INSTALL
 self.addEventListener("install", (event) => {
-  // SkipWaiting() is now chained into waitUntil() so the SW
-  // Does not activate before caching completes.
+  // skipWaiting() is chained into waitUntil() so the SW
+  // does not activate before caching completes.
   const cachePromise = caches.open(CACHE_NAME).then(async (cache) => {
     // Cache local assets atomically
     await cache.addAll(ASSETS_TO_CACHE);
@@ -71,7 +68,7 @@ self.addEventListener("activate", (event) => {
           if (name !== CACHE_NAME) return caches.delete(name);
         })
       );
-    }).then(() => self.clients.claim())  // H6: chain into waitUntil so claim() fires after old caches are purged
+    }).then(() => self.clients.claim())  // Chain into waitUntil so claim() fires after old caches are purged
   );
 });
 
@@ -84,10 +81,10 @@ self.addEventListener("fetch", (event) => {
       // The network fetch that will update the cache in the background
       const fetchPromise = fetch(event.request).then((networkResponse) => {
         // Cache only successful same-origin responses; skip opaque (cross-origin)
-        // Responses to avoid inflated storage costs (~7 MB padding per entry)
-        // NOTE: Cross-origin resources (e.g. Google Fonts) are cached during install
-        // But never revalidated here — this is intentional. Fonts are immutable CDN
-        // Assets and permanent caching is the accepted trade-off. (C5)
+        // responses to avoid inflated storage costs (~7 MB padding per entry).
+        // Cross-origin resources (e.g. Google Fonts) are cached during install
+        // but never revalidated here — this is intentional. Fonts are immutable CDN
+        // assets and permanent caching is the accepted trade-off.
         if (networkResponse && networkResponse.status === 200) {
           caches.open(CACHE_NAME).then((cache) => {
             cache.put(event.request, networkResponse.clone());

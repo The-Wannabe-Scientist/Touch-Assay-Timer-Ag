@@ -668,19 +668,101 @@
     const textInput  = document.getElementById('genotypeTextInput');
     const hiddenInput = document.getElementById('genotypes');
 
+    /**
+     * Normalises a genotype label for fuzzy duplicate comparison.
+     * Strips: leading/trailing whitespace, internal whitespace, hyphens,
+     * underscores, and any other ASCII punctuation, then lowercases the result.
+     *
+     * Examples:
+     *   "Wild-Type"  → "wildtype"
+     *   "wt / WT"   → "wtWT"  (wait — let's also collapse slashes and spaces)
+     *   " WT "      → "wt"
+     *   "KO-1"      → "ko1"
+     *   "ko_1"      → "ko1"
+     */
+    function normaliseGenotype(str) {
+      return str
+        .toLowerCase()
+        // Remove all whitespace, hyphens, underscores, and non-alphanumeric chars
+        .replace(/[\s\-_\u2010-\u2015\u2212]+/g, '')  // spaces, hyphens (all Unicode dash variants)
+        .replace(/[^a-z0-9]/g, '');                    // strip remaining punctuation / symbols
+    }
+
     function getValues() {
       return Array.from(chipList.querySelectorAll('.chip')).map(c => c.dataset.value);
     }
 
     function syncHidden() {
-      const vals = getValues();
-      hiddenInput.value = vals.join(',');
+      hiddenInput.value = getValues().join(',');
+    }
+
+    /** Clears a lingering duplicate tooltip from the wrapper. */
+    function clearDupHint() {
+      const old = wrapper.querySelector('.chip-dup-hint');
+      if (old) old.remove();
+    }
+
+    /**
+     * Visually signals that `val` is a near-duplicate of `existingChip`.
+     * - Shakes the existing chip.
+     * - Flashes the wrapper border red.
+     * - Shows a self-removing tooltip naming the conflicting chip.
+     */
+    function showDupFeedback(existingChip, val) {
+      const existingLabel = existingChip.dataset.value;
+
+      // 1. Shake the colliding chip: remove class first so animation can re-trigger
+      //    if the user types the same duplicate multiple times.
+      existingChip.classList.remove('chip--duplicate');
+      // Force a reflow so the browser registers the class removal before re-adding.
+      void existingChip.offsetWidth;
+      existingChip.classList.add('chip--duplicate');
+      existingChip.addEventListener('animationend', () => {
+        existingChip.classList.remove('chip--duplicate');
+      }, { once: true });
+
+      // 2. Flash wrapper border.
+      wrapper.classList.add('chip-input-wrapper--error');
+      setTimeout(() => wrapper.classList.remove('chip-input-wrapper--error'), 600);
+
+      // 3. Tooltip: "Already added as X" — auto-removed after its CSS fade-out finishes.
+      clearDupHint();
+      const hint = document.createElement('span');
+      hint.className = 'chip-dup-hint';
+      hint.setAttribute('role', 'alert');
+      hint.setAttribute('aria-live', 'assertive');
+      // Show the normalised form only when it differs from what was typed,
+      // otherwise just echo the existing label.
+      const normTyped    = normaliseGenotype(val);
+      const normExisting = normaliseGenotype(existingLabel);
+      hint.textContent = (normTyped === normExisting && val.trim() !== existingLabel)
+        ? `"${val.trim()}" duplicates "${existingLabel}"`
+        : `"${existingLabel}" already added`;
+      wrapper.appendChild(hint);
+      // Remove from DOM after the CSS fade-out animation finishes (1.5s delay + 0.3s fade = 1.8s)
+      hint.addEventListener('animationend', function handler(e) {
+        if (e.animationName === 'dupHintOut') {
+          hint.remove();
+          hint.removeEventListener('animationend', handler);
+        }
+      });
     }
 
     function addChip(raw) {
       const val = raw.replace(/,/g, '').trim();
       if (!val) return;
-      if (getValues().includes(val)) return; // No duplicates
+
+      // Fuzzy duplicate check: ignore case, whitespace, hyphens and punctuation.
+      const normVal = normaliseGenotype(val);
+      const existingChips = Array.from(chipList.querySelectorAll('.chip'));
+      const collision = existingChips.find(c => normaliseGenotype(c.dataset.value) === normVal);
+      if (collision) {
+        showDupFeedback(collision, val);
+        return;
+      }
+
+      // Clear any lingering tooltip from a previous failed attempt.
+      clearDupHint();
 
       const chip = document.createElement('span');
       chip.className = 'chip';
@@ -776,24 +858,33 @@
     });
 
     function getDragAfterElement(container, x, y) {
+      // BUG-4 fix: the previous algorithm used Math.abs(distanceY) < box.height to
+      // filter candidates, which silently excluded chips on a different flex-wrap row
+      // from the one the cursor was on. Cross-row drags therefore always fell through
+      // to appendChild (insert at end) instead of the correct insertion point.
+      //
+      // New strategy: a chip is a valid "insert before" candidate if:
+      //   (a) the cursor is on the same row as the chip AND to the left of its center, OR
+      //   (b) the chip's row is entirely below the cursor (cursor is above this chip).
+      // Among all candidates, pick the nearest one by 2D distance.
       const draggableElements = [...container.querySelectorAll('.chip:not(.dragging)')];
-      return draggableElements.reduce((closest, child) => {
+      let closest = { distance: Number.POSITIVE_INFINITY, element: null };
+      for (const child of draggableElements) {
         const box = child.getBoundingClientRect();
-        // Since chips wrap, calculate distance based on both x and y
-        const distanceX = x - (box.left + box.width / 2);
-        const distanceY = y - (box.top + box.height / 2);
-        const distance = Math.sqrt(distanceX * distanceX + distanceY * distanceY);
-        
-        // Return child if we are to the left/above its center
-        if (distanceX < 0 && Math.abs(distanceY) < box.height) {
-          if (distance < closest.distance) {
-            return { offset: distance, element: child, distance: distance };
+        const centerX = box.left + box.width / 2;
+        const centerY = box.top  + box.height / 2;
+        const offsetX = x - centerX;
+        const offsetY = y - centerY;
+        const onSameRow = Math.abs(offsetY) <= box.height * 0.75;  // within ¾ row height
+        const onLowerRow = box.top > y + box.height * 0.25;         // chip is below cursor
+        if ((onSameRow && offsetX < 0) || onLowerRow) {
+          const dist = Math.hypot(offsetX, offsetY);
+          if (dist < closest.distance) {
+            closest = { distance: dist, element: child };
           }
         }
-        return closest;
-      // BUG-U5 fix: explicitly define element: null so we return null instead of undefined
-      // when dragging past the very last chip in the flex container.
-      }, { distance: Number.POSITIVE_INFINITY, element: null }).element;
+      }
+      return closest.element;  // null → append to end (BUG-U5 fix preserved)
     }
 
     // BUG-J fix: Expose chip manipulation functions to main.js so restoreSetupDraft()

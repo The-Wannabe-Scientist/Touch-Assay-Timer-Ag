@@ -79,7 +79,7 @@
   --border-warning:#7f1d1d;
   --text-warning:  #fca5a5;
 
-  /* #13: Restore subtle gradient in dark mode */
+  /* Restore subtle gradient in dark mode */
   --tap-bg:              linear-gradient(145deg, #1e293b, #0f172a);
   --tap-text:            #f1f5f9;
   --tap-active:          #0f172a;
@@ -248,7 +248,7 @@ body {
   border-radius: 6px;
   cursor: pointer;
   color: var(--text-main);
-  /* #9: icon + text inline */
+  /* icon + text inline */
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -337,7 +337,7 @@ legend {
   margin-left: -0.5rem;
 }
 
-/* #14: Setup fieldset legends styled to match settings-legend treatment */
+/* Setup fieldset legends styled to match settings-legend treatment */
 #setupForm fieldset legend {
   display: inline-flex;
   align-items: center;
@@ -361,7 +361,7 @@ label {
   gap: 0.4rem;
 }
 
-/* #3: Setup + settings form labels get stronger text colour */
+/* Setup + settings form labels get stronger text colour */
 #setupForm label,
 #settingsScreen fieldset label {
   color: var(--text-main);
@@ -482,6 +482,7 @@ select option:disabled {
    ===================================================================== */
 
 .chip-input-wrapper {
+  position: relative; /* Anchor for the .chip-dup-hint tooltip */
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -752,7 +753,7 @@ button.danger:active {
 /* VISUAL METRONOME ANIMATION BAR */
 #visualMetronomeContainer {
   width: 100%;
-  height: 16px; /* #10: slightly taller for better visibility */
+  height: 16px; /* slightly taller for better visibility */
   background: var(--border-base);
   border-radius: 8px;
   overflow: hidden;
@@ -775,7 +776,7 @@ button.danger:active {
 #visualMetronomeBar.fulfilled {
   background: var(--color-success);
 }
-/* #10: Near-full glow signals upcoming stimulus */
+/* Near-full glow signals upcoming stimulus */
 #visualMetronomeBar.near-full {
   box-shadow: 0 0 10px color-mix(in srgb, var(--color-primary) 70%, transparent);
 }
@@ -889,7 +890,7 @@ body.state-warming-up #liveProgress {
   background: var(--tap-fulfilled-flash) !important;
 }
 
-/* #4: Tap button dimmed during ISI (between taps) — signals system is timing */
+/* Tap button dimmed during ISI (between taps) — signals system is timing */
 #tapButton.isi-waiting {
   opacity: var(--tap-isi-opacity);
   transition: opacity 0.15s ease;
@@ -1148,7 +1149,7 @@ th {
 }
 
 /* .warmup-display removed — countdown now rendered via .tap-warmup-overlay inside #tapButton */
-/* #5: Export action layout — primary full-width, secondaries in a row below */
+/* Export action layout — primary full-width, secondaries in a row below */
 .export-actions {
   display: flex;
   flex-direction: column;
@@ -1240,7 +1241,7 @@ body.state-export #exportScreen {
   display: flex;
 }
 
-/* #1: Active recording — subtle primary border/glow so the state is unmistakable */
+/* Active recording — subtle primary border/glow so the state is unmistakable */
 body.state-running #assayScreen {
   border-color: var(--color-primary);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 18%, transparent),
@@ -2958,7 +2959,7 @@ body.state-running {
    22. UI/UX IMPROVEMENTS
    ===================================================================== */
 
-/* #1: Stop Run vs Finish Trial — clearer visual weight in assay footer */
+/* Stop Run vs Finish Trial — clearer visual weight in assay footer */
 #assayScreen > footer #stopRun {
   flex: 1.2;
 }
@@ -2978,7 +2979,7 @@ body.state-running {
   box-shadow: none;
 }
 
-/* #2: Genotype selector — prominent accent styling in assay header */
+/* Genotype selector — prominent accent styling in assay header */
 #assayScreen > header {
   border-bottom: 1px solid var(--border-base);
   background: color-mix(in srgb, var(--color-primary) 4%, var(--bg-card));
@@ -2994,7 +2995,7 @@ body.state-running {
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
-/* #3: Instruction paragraph styled as info callout */
+/* Instruction paragraph styled as info callout */
 p.instruction {
   background: color-mix(in srgb, var(--color-primary) 6%, var(--bg-card));
   border-left: 3px solid var(--color-primary);
@@ -3006,7 +3007,7 @@ p.instruction {
   margin-bottom: 0;
 }
 
-/* #6: Bulk-delete inline confirmation area */
+/* Bulk-delete inline confirmation area */
 .bulk-delete-confirm {
   display: flex;
   align-items: center;
@@ -3037,7 +3038,7 @@ p.instruction {
   color: var(--text-main);
 }
 
-/* #7: Toggle progress pill button with eye icon */
+/* Toggle progress pill button with eye icon */
 /* Removed align-self:flex-start — button now lives inside the
    assay header flex row and inherits align-items:center from the parent. */
 #toggleProgress {
@@ -3065,7 +3066,7 @@ p.instruction {
   background: color-mix(in srgb, var(--color-primary) 6%, var(--bg-card));
 }
 
-/* #12: Guidelines screen card list */
+/* Guidelines screen card list */
 .guidelines-intro {
   color: var(--text-muted);
   font-size: 0.9rem;
@@ -3136,4 +3137,59 @@ p.instruction {
   opacity: 0.5;
   transform: scale(1.05);
   box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+/* ── Duplicate-genotype feedback ─────────────────────────────────────── */
+
+/* Shake keyframe: quick lateral jiggle to signal rejection */
+@keyframes chipShake {
+  0%   { transform: translateX(0); }
+  15%  { transform: translateX(-6px); }
+  35%  { transform: translateX(5px); }
+  55%  { transform: translateX(-4px); }
+  75%  { transform: translateX(3px); }
+  90%  { transform: translateX(-2px); }
+  100% { transform: translateX(0); }
+}
+
+/* Applied to the existing chip that is a near-match for the rejected entry */
+.chip--duplicate {
+  border-color: var(--color-danger, #ef4444) !important;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.30);
+  animation: chipShake 0.42s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+/* Tiny pill tooltip that floats below the input when a dup is rejected */
+.chip-dup-hint {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: var(--color-danger, #ef4444);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.22rem 0.65rem;
+  border-radius: 20px;
+  pointer-events: none;
+  opacity: 1;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  animation: dupHintIn 0.18s ease both, dupHintOut 0.3s ease 1.5s both;
+}
+@keyframes dupHintIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@keyframes dupHintOut {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* Wrapper gets a brief red-border flash when a duplicate is rejected */
+.chip-input-wrapper--error {
+  border-color: var(--color-danger, #ef4444) !important;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.20) !important;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
