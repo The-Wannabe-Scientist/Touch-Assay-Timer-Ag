@@ -26,6 +26,9 @@ Desktop.ini
 *.sln
 *.sw?
 
+# ── Claude Code (local, machine-specific settings) ──────────────────────────
+.claude/settings.local.json
+
 # ── Node (if a dev server / build tool is ever added) ────────────────────────
 node_modules/
 npm-debug.log*
