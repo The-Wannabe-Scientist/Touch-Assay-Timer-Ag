@@ -503,13 +503,13 @@
               Human Reaction Grace Period
             </label>
             <input type="number" id="gracePeriodDisplay" class="settings-slider-badge settings-slider-input"
-                   min="0" max="500" step="10" value="250"
+                   min="0" max="400" step="10" value="250"
                    aria-label="Grace period in milliseconds" inputmode="numeric">
           </div>
           <div class="settings-slider-track-wrap">
             <span class="slider-icon-min" aria-hidden="true" style="font-size:0.6rem;font-weight:700;color:var(--text-muted);">0</span>
-            <input type="range" id="gracePeriod" min="0" max="500" step="10" value="250" class="settings-range">
-            <span class="slider-icon-max" aria-hidden="true" style="font-size:0.6rem;font-weight:700;color:var(--text-muted);">500</span>
+            <input type="range" id="gracePeriod" min="0" max="400" step="10" value="250" class="settings-range">
+            <span class="slider-icon-max" aria-hidden="true" style="font-size:0.6rem;font-weight:700;color:var(--text-muted);">400</span>
           </div>
           <p class="settings-hint">Extends each stimulus window by this amount after it closes, accepting late taps as valid responses. 250 ms is the average human simple reaction time. Set to 0 to disable.</p>
         </div>
@@ -737,7 +737,7 @@
             </tr>
             <tr>
               <td>Grace Period</td>
-              <td>0 – 500 ms</td>
+              <td>0 – 400 ms</td>
               <td>10 ms</td>
             </tr>
           </tbody>
@@ -771,26 +771,6 @@
         Back to Settings
       </button>
 
-      <!-- Pre-populate defaults from localStorage as soon as the section is parsed -->
-      <script>
-        (function() {
-          try {
-            var fields = {
-              defaultTemperature: { key: 'touchAssayDefaultTemperature', fallback: '20' },
-              defaultHumidity:    { key: 'touchAssayDefaultHumidity',    fallback: '60' },
-              defaultISI:         { key: 'touchAssayDefaultISI',         fallback: '1'  },
-              defaultStimCount:   { key: 'touchAssayDefaultStimCount',   fallback: '100'},
-              defaultBinSize:     { key: 'touchAssayDefaultBinSize',     fallback: '10' },
-            };
-            Object.keys(fields).forEach(function(id) {
-              var el = document.getElementById(id);
-              if (!el) return;
-              var stored = localStorage.getItem(fields[id].key);
-              el.value = stored !== null ? stored : fields[id].fallback;
-            });
-          } catch(e) { /* localStorage unavailable — HTML default values stand */ }
-        })();
-      </script>
     </section>
 
 

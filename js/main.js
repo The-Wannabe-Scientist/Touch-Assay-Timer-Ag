@@ -174,6 +174,15 @@ let runStimCount = 0;
  */
 let runBinSize = 10;
 
+/**
+ * Grace period for the current run in seconds, clamped to half the ISI at
+ * run-start. Set by startCueLoop() and read by scheduler() on every tick.
+ * Using a stable cached value (rather than recomputing from gracePeriodMs
+ * each tick) ensures mid-run slider changes don't affect the ongoing run.
+ * @type {number}
+ */
+let runGraceSec = 0;
+
 /** @type {number} AudioContext time when the next speech/UI update should fire. */
 let nextSpeechTime = 0.0;
 
@@ -291,7 +300,9 @@ try { warmupDuration = Math.min(60, Math.max(1, parseInt(localStorage.getItem("t
 let gracePeriodMs = 250;
 try {
   const _gp = parseInt(localStorage.getItem("touchAssayGracePeriodMs"), 10);
-  if (!isNaN(_gp)) gracePeriodMs = Math.max(0, Math.min(500, _gp));
+  // Bug 3 fix: clamp to 400 ms max (new ceiling) and snap to step=10 on load
+  // so a stale value like 255 doesn't cause a silent jump on first slider interaction.
+  if (!isNaN(_gp)) gracePeriodMs = Math.max(0, Math.min(400, Math.round(_gp / 10) * 10));
 } catch { /* use default */ }
 
 /**
@@ -733,6 +744,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     runStimCount  = currentAssay.stimCount;
     runBinSize    = currentAssay.binSize || 10;
 
+    // Bug 1 fix: if gracePeriodMs >= ISI the grace window of interval N overlaps
+    // the real window of interval N+1, making tap attribution semantically undefined.
+    // Clamp to at most half the ISI (in ms) so grace never bleeds into the next window.
+    const _maxGrace = Math.floor((runISI * 1000) / 2);
+    if (gracePeriodMs > _maxGrace) {
+      console.warn(
+        `Grace period (${gracePeriodMs} ms) ≥ half ISI (${_maxGrace} ms). ` +
+        `Clamping to ${_maxGrace} ms for this run.`
+      );
+      showToast(
+        `Grace period clamped to ${_maxGrace} ms (half the ISI) for this run.`,
+        "warning",
+        4000
+      );
+    }
+    runGraceSec = Math.min(gracePeriodMs, _maxGrace) / 1000;
+
     // Forward bin size to audio module for "bins" voice mode
     setBinSpeak(runBinSize);
 
@@ -863,10 +891,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       const intervalStart = nextDataIntervalTime - runISI;
       const intervalEnd   = nextDataIntervalTime;
       // Grace period: extend acceptance window for taps that arrived up to
-      // gracePeriodMs ms after this interval closed. Cached in seconds for
-      // direct comparison against AudioContext timestamps.
-      const graceSec      = gracePeriodMs / 1000;
-      const graceEnd      = intervalEnd + graceSec;
+      // gracePeriodMs ms after this interval closed. Use runGraceSec (computed
+      // at startCueLoop and already clamped to half-ISI) rather than the raw
+      // module-level gracePeriodMs, which could be updated mid-run by the slider.
+      const graceEnd      = intervalEnd + runGraceSec;
 
       // Check if the experimenter tapped within this stimulus window.
       // Uses an index pointer (tapReadIndex) to scan only unconsumed entries,
@@ -975,6 +1003,11 @@ document.addEventListener("DOMContentLoaded", async () => {
    * returns the UI to POISED state so the next run can begin.
    */
   async function completeRunNormally(run) {
+    // Bug 5 fix: clear the double-Escape timer so the first Esc press in a new
+    // run can never inadvertently skip the confirmation toast because the previous
+    // run's first-Esc time is still within the 1 s window.
+    lastEscapeTime = 0;
+
     const activeTrial = getActiveTrial(currentAssay);
     // run is passed directly from the scheduler — no .find() needed.
     // (activeRun is already null at this point because stopCueLoop() was called first.)
@@ -1052,6 +1085,10 @@ document.addEventListener("DOMContentLoaded", async () => {
    * @param {string} [reason="Run stopped early by user"] - Explanation for the stop.
    */
   function stopRunEarly(reason = "Run stopped early by user") {
+    // Bug 5 fix: clear the double-Escape timer so the first Esc press in a new
+    // run can never skip the confirmation toast due to a stale timestamp from
+    // a prior run's Escape press that didn't complete within the window.
+    lastEscapeTime = 0;
     isWarmingUp = false;
     // if warmup was in progress, clear the overlay and ring class so
     // the UI doesn't get stuck in an unresponsive state after an external stop.
@@ -2863,10 +2900,17 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Assay Defaults sub-page navigation (within settings overlay)
   document.getElementById("openAssayDefaults").addEventListener("click", () => {
+    // Bug 2 fix: mirror what showScreen() does — collapse overflow menu and reset
+    // its aria-expanded so it isn't left open behind the sub-page.
+    UI.Displays.overflowMenu.hidden = true;
+    UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
     UI.Screens.settings.hidden      = true;
     UI.Screens.assayDefaults.hidden = false;
   });
   document.getElementById("closeAssayDefaults").addEventListener("click", () => {
+    // Bug 2 fix: same guard when returning to settings.
+    UI.Displays.overflowMenu.hidden = true;
+    UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
     UI.Screens.assayDefaults.hidden = true;
     UI.Screens.settings.hidden      = false;
   });
@@ -3226,7 +3270,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Settings.gracePeriod.addEventListener("input", e => {
       const parsed = parseInt(e.target.value, 10);
       if (isNaN(parsed)) return;
-      gracePeriodMs = Math.max(0, Math.min(500, parsed));
+      gracePeriodMs = Math.max(0, Math.min(400, parsed));
       try { localStorage.setItem("touchAssayGracePeriodMs", gracePeriodMs); } catch { /* storage unavailable */ }
       if (UI.Settings.gracePeriodDisplay) {
         UI.Settings.gracePeriodDisplay.value = gracePeriodMs;
@@ -3238,7 +3282,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const _syncGracePeriodFromInput = () => {
         let v = parseInt(UI.Settings.gracePeriodDisplay.value, 10);
         if (isNaN(v)) return;
-        v = Math.max(0, Math.min(500, Math.round(v / 10) * 10));  // snap to step
+        v = Math.max(0, Math.min(400, Math.round(v / 10) * 10));  // snap to step, max 400 ms
         gracePeriodMs = v;
         UI.Settings.gracePeriodDisplay.value = v;
         UI.Settings.gracePeriod.value        = v;
@@ -3269,21 +3313,34 @@ document.addEventListener("DOMContentLoaded", async () => {
     function _wireDefaultStepper(input, storageField) {
       if (!input) return;
 
-      // Persist on direct keyboard/spinner changes
-      input.addEventListener("change", () => {
-        // Clamp to HTML min/max attributes if present
+      // Bug 4 fix: track the last-valid value in a closure so that if the user
+      // types a non-numeric string and blurs, we restore their previous valid
+      // value instead of falling back to the HTML defaultValue attribute (which
+      // would silently overwrite localStorage with the compile-time default).
+      let lastValid = parseFloat(input.value);
+      if (isNaN(lastValid)) lastValid = parseFloat(input.defaultValue) || 0;
+
+      // Shared clamp-and-save logic used by both the change handler and steppers.
+      function _applyAndSave(raw) {
         const min = input.min !== "" ? parseFloat(input.min) : -Infinity;
         const max = input.max !== "" ? parseFloat(input.max) :  Infinity;
-        let val = parseFloat(input.value);
-        if (isNaN(val)) val = parseFloat(input.defaultValue) || 0;
-        val = Math.max(min, Math.min(max, val));
-        // Round to step precision to avoid floating-point display noise
         const step = parseFloat(input.step) || 1;
         const decimals = (step.toString().split(".")[1] || "").length;
+        let val = parseFloat(raw);
+        if (isNaN(val)) {
+          // Bug 4 fix: restore previous valid value instead of overwriting with HTML default
+          input.value = lastValid;
+          return;
+        }
+        val = Math.max(min, Math.min(max, val));
         val = parseFloat(val.toFixed(decimals));
         input.value = val;
+        lastValid = val;
         _saveAssayDefault(storageField, val);
-      });
+      }
+
+      // Persist on direct keyboard/spinner changes
+      input.addEventListener("change", () => _applyAndSave(input.value));
 
       // Wire stepper buttons via event delegation on the wrapper
       const wrapper = input.closest(".stepper-wrapper");
@@ -3291,16 +3348,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       wrapper.querySelectorAll(".stepper-btn").forEach(btn => {
         btn.addEventListener("click", () => {
           const delta   = parseFloat(btn.dataset.delta) || 0;
-          const min     = input.min !== "" ? parseFloat(input.min) : -Infinity;
-          const max     = input.max !== "" ? parseFloat(input.max) :  Infinity;
           const step    = parseFloat(input.step) || 1;
           const decimals = (step.toString().split(".")[1] || "").length;
-          let current = parseFloat(input.value);
-          if (isNaN(current)) current = parseFloat(input.defaultValue) || 0;
-          let next = parseFloat((current + delta).toFixed(decimals));
-          next = Math.max(min, Math.min(max, next));
+          const current = isNaN(parseFloat(input.value)) ? lastValid : parseFloat(input.value);
+          const next    = parseFloat((current + delta).toFixed(decimals));
+          // Bug 7 fix: dispatch a change event so external listeners (e.g. validation
+          // or bin-warning checks) receive the update through standard DOM event bubbling.
           input.value = next;
-          _saveAssayDefault(storageField, next);
+          input.dispatchEvent(new Event("change", { bubbles: true }));
         });
       });
     }
