@@ -26,7 +26,7 @@
 let running = false;
 
 /**
- * W-2 fix: generation counter to invalidate stale setTimeout callbacks.
+ * Generation counter to invalidate stale setTimeout callbacks.
  *
  * Problem: on a rapid stop→start sequence within the 8 ms setTimeout window,
  * a pending setTimeout from the old loop fires after the new loop has already
@@ -47,7 +47,7 @@ let generation = 0;
 const channel = new MessageChannel();
 
 // Explicitly start port1 so it receives messages even if a future refactor
-// Switches from .onmessage assignment to .addEventListener (W-1 note).
+// switches from .onmessage assignment to .addEventListener.
 channel.port1.start();
 
 /**
@@ -67,23 +67,24 @@ channel.port1.onmessage = () => {
   if (!running) return;
   postMessage("tick");
   // Capture current generation so the callback can self-invalidate if a
-  // Stop→start pair occurs before this setTimeout fires (W-2 fix).
+  // stop→start pair occurs before this setTimeout fires.
   const gen = generation;
   setTimeout(() => {
     if (gen === generation) channel.port2.postMessage(null);
-  }, 8);  // ~125 Hz ceiling
+  }, 8);  // ~125 Hz ceiling.
 };
 
 self.onmessage = function (e) {
   if (e.data === "start") {
-    if (running) return;  // Guard against duplicate starts
+    if (running) return;  // Guard against duplicate starts.
     running = true;
-    generation++;                         // Invalidate any pending setTimeout from before
-    channel.port2.postMessage(null);      // Kick off the loop
+    generation++;                    // Invalidate any pending setTimeout from before.
+    channel.port2.postMessage(null); // Kick off the loop.
 
   } else if (e.data === "stop") {
     running = false;
-    generation++;                         // Invalidate the pending setTimeout so the loop
-                                          // Truly stops rather than firing one last time
+    // Invalidate the pending setTimeout so the loop truly stops rather than
+    // firing one last time.
+    generation++;
   }
 };

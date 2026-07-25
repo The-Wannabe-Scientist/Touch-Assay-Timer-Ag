@@ -1,8 +1,101 @@
 /* =====================================================================
+   Touch Assay Timer — Stylesheet
+   =====================================================================
+   Sections:
+     0.  Typefaces
+     1.  Design Tokens (CSS Variables)
+     2.  Global Reset & Base
+     3.  App Header & Navigation Menus
+     4.  Layout & Sections (Responsive Containers)
+     5.  Form Elements & Dark Mode Overrides
+     6.  Chip / Tag Input (Genotypes)
+     7.  Standard Buttons
+     8.  Assay Screen & Interactive Tap Zone
+     9.  Progress Panel & Data Tables
+     10. Modals & Export Previews
+     11. Utilities, Lists & Warnings
+     12. Browser Specific Fixes (Disabled States)
+     13. CSS State Machine (Visibility Architecture)
+     14. Screen Transitions
+     15. Toast Notifications
+     16. Settings Page
+     17. Persistent Notification Banners
+     18. Range Sliders
+     19. Export Button Loading State
+     20. Saved Assays Empty State
+     21. Mobile Responsiveness
+     22. Haptic Armband
+     23. Assay Screen Polish & Guidelines Cards
+     24. Chip Drag & Duplicate Feedback
+     25. Setup & Assay Screen Micro-Interactions
+     26. Reduced Motion
+   ===================================================================== */
+
+/* =====================================================================
+   0. TYPEFACES (self-hosted — see fonts/, cached by service-worker.js)
+   ===================================================================== */
+
+/* IBM Plex Sans — UI/body text. Shipped as a single variable-weight file
+   (covers 400–700); the browser selects the exact weight from the axis
+   itself, so declaring the same file across four font-weight blocks below
+   costs one download, not four.
+   Two subsets: Latin loads unconditionally; Greek loads only if a genotype
+   or label actually contains a Greek character (unicode-range makes this
+   on-demand, not a bigger unconditional download for everyone). */
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('fonts/IBMPlexSans-Variable.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+                 U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+                 U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('fonts/IBMPlexSans-Variable-Greek.woff2') format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+
+/* IBM Plex Mono — reserved for numeric/timing displays only (stimulus
+   counter, warmup countdown, ISI/bin/temperature/etc. fields, settings
+   badges) so digits get true monospace alignment, not just tabular-nums
+   on a proportional face. Three static weights (this family isn't shipped
+   as variable), Latin-only — genotype/timing numerals don't need Greek. */
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/IBMPlexMono-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('fonts/IBMPlexMono-Medium.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/IBMPlexMono-SemiBold.woff2') format('woff2');
+}
+
+/* =====================================================================
    1. DESIGN TOKENS (CSS VARIABLES)
    ===================================================================== */
 
 :root {
+  --font-ui:   'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
   color-scheme: light;
 
   --bg-body:          #f1f5f9;
@@ -33,6 +126,13 @@
   --bg-warning:    #fef2f2;
   --border-warning:#fecaca;
   --text-warning:  #b91c1c;
+
+  /* Distinct from both --text-warning (validation errors, red-toned) and
+     --color-primary (indigo accent) — amber marks "a human decided this",
+     its own category the researcher should be able to spot at a glance. */
+  --bg-override:    #fffbeb;
+  --border-override:#fde68a;
+  --text-override:  #b45309;
 
   --tap-bg:              linear-gradient(145deg, #f8fafc, #e2e8f0);
   --tap-text:            #0f172a;
@@ -79,6 +179,10 @@
   --border-warning:#7f1d1d;
   --text-warning:  #fca5a5;
 
+  --bg-override:    #451a03;
+  --border-override:#78350f;
+  --text-override:  #fbbf24;
+
   /* Restore subtle gradient in dark mode */
   --tap-bg:              linear-gradient(145deg, #1e293b, #0f172a);
   --tap-text:            #f1f5f9;
@@ -119,8 +223,7 @@ html, body {
 }
 
 body {
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
-  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  font-family: var(--font-ui);
   background: var(--bg-body);
   color: var(--text-main);
   line-height: 1.5;
@@ -225,8 +328,8 @@ body {
   position: absolute;
   top: calc(100% + 4px);
   right: 0; /* Aligned with right edge of .header-actions */
-  /* BUG-H fix: prevent clipping on sub-320px viewports. max() keeps the menu
-     at least 8px from the left edge of the screen when the header is narrow. */
+  /* Prevent clipping on sub-320px viewports. max() keeps the menu at least
+     8px from the left edge of the screen when the header is narrow. */
   max-width: calc(100vw - 16px);
   background: var(--bg-card);
   border: 1px solid var(--border-base);
@@ -387,6 +490,15 @@ input::placeholder {
   color: var(--text-placeholder);
 }
 
+/* Every numeric field (ISI, stim count, bin size, temp/humidity, all Settings
+   sliders' badges, Assay Defaults) gets true monospace digits rather than
+   tabular-nums on the UI face — this is a timing instrument, and numbers
+   that don't jitter or need alignment tricks are worth the small font swap. */
+input[type="number"] {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
 input:focus, select:focus, textarea:focus {
   outline: none;
   background-color: var(--bg-input-focus);
@@ -478,7 +590,7 @@ select option:disabled {
 }
 
 /* =====================================================================
-   5b. CHIP / TAG INPUT  (Genotypes)
+   6. CHIP / TAG INPUT (GENOTYPES)
    ===================================================================== */
 
 .chip-input-wrapper {
@@ -628,7 +740,7 @@ select option:disabled {
 }
 
 /* =====================================================================
-   6. STANDARD BUTTONS
+   7. STANDARD BUTTONS
    ===================================================================== */
 
 button {
@@ -707,7 +819,7 @@ button.danger:active {
 }
 
 /* =====================================================================
-   7. ASSAY SCREEN & INTERACTIVE TAP ZONE
+   8. ASSAY SCREEN & INTERACTIVE TAP ZONE
    ===================================================================== */
 
 #assayScreen {
@@ -766,9 +878,9 @@ button.danger:active {
   width: 100%;           /* full-width base; scaleX() scales from this */
   transform-origin: left;
   transform: scaleX(0);  /* JS drives this via style.transform on each rAF */
-  /* BUG-U6 fix: promote to its own compositor layer so the first rAF frame
-     is already GPU-composited — prevents a visible stutter on mid-tier devices
-     when a new stimulus interval starts. */
+  /* Promote to its own compositor layer so the first rAF frame is already
+     GPU-composited — prevents a visible stutter on mid-tier devices when a
+     new stimulus interval starts. */
   will-change: transform;
   background: var(--color-primary);
   transition: box-shadow 0.1s ease;
@@ -849,8 +961,7 @@ body.state-warming-up #liveProgress {
   align-items: center;
   justify-content: center;
 
-  /* BUG-G fix: merged here from the duplicate #tapButton block below (line ~894).
-     Needed to anchor the .tap-warmup-overlay which is position:absolute. */
+  /* Needed to anchor the .tap-warmup-overlay which is position:absolute. */
   position: relative;
 }
 
@@ -900,6 +1011,29 @@ body.state-warming-up #liveProgress {
   opacity: 1;
 }
 
+/* Idle dial — the tap button reads as an instrument face even before a run
+   starts, instead of a blank gradient rectangle. Purely static (no animation,
+   no JS): a border ring plus two soft halo rings via box-shadow, painted once.
+   Explicitly scoped to the not-yet-started states only — warmup and running
+   already have their own (already-sufficient) feedback via the pop-in number,
+   the CSS countdown bar, and the pulsing ring below, so this never doubles up
+   with those or adds anything during the timing-critical running state. */
+body.state-configured #tapButton::before,
+body.state-poised #tapButton::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: min(58%, 210px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--tap-text) 10%, transparent);
+  box-shadow: 0 0 0 14px color-mix(in srgb, var(--tap-text) 5%, transparent),
+              0 0 0 28px color-mix(in srgb, var(--tap-text) 2%, transparent);
+  pointer-events: none;
+  z-index: 0;
+}
+
 /* ── Warmup-countdown state: button stays visible, countdown renders inside it */
 
 /* The tap button is non-interactive but fully visible during warmup */
@@ -925,10 +1059,6 @@ body.state-warming-up #liveProgress {
   100% { box-shadow: 0 8px 20px rgba(0,0,0,0.15), 0 0 0 0   rgba(99, 102, 241, 0); }
 }
 
-/* BUG-G fix: position:relative was a separate #tapButton block here. It has
-   been merged into the primary #tapButton rule above. Block removed. */
-
-
 .tap-warmup-overlay {
   position: absolute;
   inset: 0;
@@ -952,6 +1082,8 @@ body.state-warming-up #liveProgress {
 
 /* Pop-in animation — replays on every display:none→flex toggle (or via JS class toggle/reflow) */
 .warmup-number {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   animation: warmup-number-in 0.18s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
@@ -970,7 +1102,7 @@ body.state-warming-up #liveProgress {
 }
 
 /* =====================================================================
-   8. PROGRESS PANEL & DATA TABLES
+   9. PROGRESS PANEL & DATA TABLES
    ===================================================================== */
 
 .live-progress {
@@ -980,6 +1112,13 @@ body.state-warming-up #liveProgress {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   /* Removed margin-bottom; #tapZone gap handles spacing uniformly */
+}
+
+/* The counter values (not the "Stimulus:" label or "/" divider) get the
+   monospace data face — the label stays UI text, the numbers read as data. */
+#currentStimDisplay, #totalStimDisplay {
+  font-family: var(--font-mono);
+  color: var(--text-main);
 }
 
 #assayProgress {
@@ -1034,10 +1173,57 @@ th {
 }
 
 .override-badge {
-  color: var(--color-primary);
+  color: var(--text-override);
   font-weight: 600;
   font-size: 0.72rem;
   white-space: nowrap;
+}
+
+/* Eligibility state as a solid pill, not just coloured text — the researcher
+   scans this column rather than reading it, so shape + colour together carry
+   the state (colour alone isn't enough for colour-blind users, hence the
+   ✓/✕ glyphs staying in the label too). */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  padding: 0.15em 0.6em;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.status-pill--good {
+  background: color-mix(in srgb, var(--color-success) 16%, transparent);
+  color: var(--color-success);
+}
+
+.status-pill--bad {
+  background: color-mix(in srgb, var(--color-danger) 14%, transparent);
+  color: var(--color-danger);
+}
+
+/* Summary-table counts — only rendered as a pill when the count is > 0
+   (see updateProgressTable() in main.js), so a calm table stays calm. */
+.count-pill {
+  display: inline-flex;
+  min-width: 1.6em;
+  justify-content: center;
+  padding: 0.1em 0.5em;
+  border-radius: 999px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.count-pill--good {
+  background: color-mix(in srgb, var(--color-success) 16%, transparent);
+  color: var(--color-success);
+}
+
+.count-pill--bad {
+  background: color-mix(in srgb, var(--color-danger) 14%, transparent);
+  color: var(--color-danger);
 }
 
 .run-override-cell {
@@ -1066,7 +1252,7 @@ th {
 }
 
 /* =====================================================================
-   9. MODALS & EXPORT PREVIEWS
+   10. MODALS & EXPORT PREVIEWS
    ===================================================================== */
 
 .modal-overlay {
@@ -1125,26 +1311,45 @@ th {
   position: sticky; top: 0; box-shadow: 0 1px 0 var(--border-base);
 }
 
+/* Numeric data (raw 0/1 grid, bin %, mean/SEM/N) gets the mono/tabular
+   treatment consistent with the live app's numeric displays; text values
+   (genotype names, dates, reasons) are left-aligned — centering read oddly
+   for long strings like "N2, mec-4(u253), unc-13" or a full timestamp. */
+.preview-table-wrapper td.cell-numeric {
+  font-family: var(--font-mono);
+}
+.preview-table-wrapper td.cell-text {
+  text-align: left;
+  white-space: normal;
+}
+
 .modal-actions {
   padding: 1rem 1.25rem; border-top: 1px solid var(--border-base);
   display: flex; justify-content: flex-end;
 }
 
 /* =====================================================================
-   10. UTILITIES, LISTS & WARNINGS
+   11. UTILITIES, LISTS & WARNINGS
    ===================================================================== */
 
 #savedAssaysScreen, #guidelinesScreen, #exportScreen fieldset, #exportDatasetList {
   overflow-y: auto;
 }
 
-/* Desktop-safe formatting for the Saved Assays items */
+/* Desktop-safe formatting for the Saved Assays items.
+   Card treatment (background/border/radius) mirrors #exportDatasetList's
+   dataset rows below — previously this was a flat list separated only by
+   hairlines while Export used cards for the same "list of selectable items"
+   pattern; unified so both read the same way. */
 .saved-assay-row {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  padding: 1rem 0;
-  border-bottom: 1px solid var(--border-base);
+  padding: 1rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border-base);
+  border-radius: 10px;
+  margin-bottom: 0.75rem;
 }
 .assay-row-header {
   display: flex;
@@ -1155,9 +1360,19 @@ th {
   margin-top: 0.2rem !important; /* Aligns with text visually */
   flex-shrink: 0;
 }
-.assay-info {
-  font-weight: 600;
+/* Name is the primary identifier; genotypes + date are secondary metadata
+   on their own muted line, instead of one run-on string that wrapped
+   awkwardly for assays with several genotypes. */
+.assay-info-name {
+  font-weight: 700;
+  font-size: 1rem;
   color: var(--text-main);
+}
+.assay-info-meta {
+  font-weight: 500;
+  font-size: 0.83rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
 }
 .assay-actions {
   display: flex;
@@ -1167,6 +1382,24 @@ th {
 .assay-actions button {
   flex: 1;
   min-width: 100px;
+}
+
+/* Row-level Delete — outline, not solid. The destructive action is already
+   gated behind a confirmation modal, so this button doesn't need to carry
+   full alarm weight on a screen you visit routinely just to browse assays;
+   solid red is reserved for the bulk "Delete Selected" action and the
+   confirm-modal button, where it signals a real point of no return. */
+.btn-danger-outline {
+  flex: 1;
+  min-width: 100px;
+  background: transparent;
+  border: 1px solid var(--color-danger);
+  color: var(--color-danger);
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.btn-danger-outline:hover {
+  background: var(--color-danger);
+  color: #fff;
 }
 
 /* Checkbox fixes for the Export screen */
@@ -1250,7 +1483,7 @@ th {
 .input-group { display: flex; flex-direction: column; flex: 1; }
 
 /* =====================================================================
-   11. BROWSER SPECIFIC FIXES (DISABLED STATES)
+   12. BROWSER SPECIFIC FIXES (DISABLED STATES)
    ===================================================================== */
 
 input:disabled, select:disabled, button:disabled {
@@ -1277,7 +1510,7 @@ input:disabled, select:disabled, button:disabled {
 }
 
 /* =====================================================================
-   12. CSS STATE MACHINE (VISIBILITY ARCHITECTURE)
+   13. CSS STATE MACHINE (VISIBILITY ARCHITECTURE)
    ===================================================================== */
 
 #setupScreen, 
@@ -1342,7 +1575,7 @@ body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):
 }
 
 /* =====================================================================
-   13. SCREEN TRANSITIONS
+   14. SCREEN TRANSITIONS
    ===================================================================== */
 
 /*
@@ -1408,7 +1641,7 @@ body.state-warming-up #visualMetronomeContainer {
 
 
 /* =====================================================================
-   14. TOAST NOTIFICATIONS
+   15. TOAST NOTIFICATIONS
    ===================================================================== */
 
 /* Per-type colour tokens */
@@ -1607,7 +1840,7 @@ body.state-warming-up #visualMetronomeContainer {
 
 
 /* =====================================================================
-   SETTINGS PAGE — Premium Redesign
+   16. SETTINGS PAGE
    ===================================================================== */
 
 /* ── Settings screen: transparent card so fieldsets stand out ──────── */
@@ -1969,10 +2202,22 @@ input.settings-slider-input.settings-slider-badge:focus {
   background: var(--color-primary) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E") center / 11px no-repeat;
 }
 
+/* Line-art SVG icon (not emoji, for consistency with the rest of the app's
+   icon set — emoji render with platform-dependent color/weight that clashed
+   with these stroke-based icons everywhere else). Muted by default, tinted
+   primary when the card is selected — same language the rest of the card
+   already uses for its border/background. */
 .voice-option-icon {
-  font-size: 1.4rem;
-  line-height: 1;
+  display: flex;
   margin-bottom: 0.1rem;
+  color: var(--text-muted);
+}
+.voice-option-icon svg {
+  width: 22px;
+  height: 22px;
+}
+.voice-option-card:has(input[type="radio"]:checked) .voice-option-icon {
+  color: var(--color-primary);
 }
 
 .voice-option-title {
@@ -2214,6 +2459,15 @@ input.settings-slider-input.settings-slider-badge:focus {
   line-height: 1.45;
 }
 
+/* Explicit column widths — table-layout:fixed sizes columns from the FIRST
+   row only (spec behaviour), and that row's Range cell ("> 0 s") is much
+   shorter than later ones ("1 – stim count", "200 – 2000 Hz"). Without an
+   explicit width here, those longer pills overflowed into the Notes column
+   instead of the table allocating room for its longest actual content. */
+.clamp-table th:first-child,   .clamp-table td:first-child   { width: 21%; }
+.clamp-table th:nth-child(2),  .clamp-table td:nth-child(2)   { width: 37%; }
+.clamp-table th:nth-child(3),  .clamp-table td:nth-child(3)   { width: 42%; }
+
 /* Field column — bold */
 .clamp-table td:first-child {
   font-weight: 600;
@@ -2222,7 +2476,7 @@ input.settings-slider-input.settings-slider-badge:focus {
 
 /* Range column — monospace pill badge */
 .clamp-table td:nth-child(2) {
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
   color: var(--text-main);
@@ -2256,14 +2510,18 @@ input.settings-slider-input.settings-slider-badge:focus {
   border-bottom: none;
 }
 
-/* Range pill badge */
+/* Range pill badge — wraps (rather than nowrap) as a safety net for the
+   longest strings ("1 – stim count") at narrow widths. The explicit column
+   widths above make one line the common case; this just stops it from ever
+   overflowing into the Notes column if a future range string is even longer. */
 .clamp-range {
   display: inline-block;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
   font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
+  line-height: 1.3;
+  white-space: normal;
+  overflow-wrap: break-word;
   padding: 0.2em 0.55em;
   border-radius: 5px;
   background: color-mix(in srgb, var(--color-primary) 10%, transparent);
@@ -2316,7 +2574,7 @@ input.settings-slider-input.settings-slider-badge:focus {
 
 
 /* =====================================================================
-   15. PERSISTENT NOTIFICATION BANNERS
+   17. PERSISTENT NOTIFICATION BANNERS
    ===================================================================== */
 
 /* Shared banner base */
@@ -2373,7 +2631,7 @@ body.state-running #runBanner {
 
 
 /* =====================================================================
-   17. RANGE SLIDERS  (#15)
+   18. RANGE SLIDERS
    ===================================================================== */
 
 .slider-row {
@@ -2435,7 +2693,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* =====================================================================
-   18. EXPORT BUTTON LOADING STATE  (#30)
+   19. EXPORT BUTTON LOADING STATE
    ===================================================================== */
 
 button.btn-loading {
@@ -2471,7 +2729,7 @@ button.secondary.btn-loading::before {
 
 
 /* =====================================================================
-   19. SAVED ASSAYS EMPTY STATE  (#31)
+   20. SAVED ASSAYS EMPTY STATE
    ===================================================================== */
 
 .saved-assays-empty {
@@ -2702,7 +2960,7 @@ button.secondary.btn-loading::before {
 
   /* Saved assays: tighter layout */
   .saved-assay-row {
-    padding: 0.75rem 0;
+    padding: 0.75rem;
     gap: 0.5rem;
   }
   .assay-actions {
@@ -2729,8 +2987,9 @@ button.secondary.btn-loading::before {
     min-height: 80px;
     padding: 0.7rem;
   }
-  .voice-option-icon {
-    font-size: 1.2rem;
+  .voice-option-icon svg {
+    width: 19px;
+    height: 19px;
   }
   .voice-option-desc {
     font-size: 0.7rem;
@@ -3008,7 +3267,7 @@ body.state-running {
 
 
 /* =====================================================================
-   HAPTIC ARMBAND
+   22. HAPTIC ARMBAND
    ===================================================================== */
 
 /* Armband fieldset is hidden by default.
@@ -3264,7 +3523,7 @@ body.state-running {
 
 
 /* =====================================================================
-   22. UI/UX IMPROVEMENTS
+   23. ASSAY SCREEN POLISH & GUIDELINES CARDS
    ===================================================================== */
 
 /* Stop Run vs Finish Trial — clearer visual weight in assay footer */
@@ -3431,7 +3690,7 @@ p.instruction {
 }
 
 /* =====================================================================
-   8. DRAGGABLE CHIPS
+   24. CHIP DRAG & DUPLICATE FEEDBACK
    ===================================================================== */
 
 /* Draggable Chips */
@@ -3503,10 +3762,10 @@ p.instruction {
 }
 
 /* =====================================================================
-   23. NEW IMPROVEMENTS (checkpoint 2 batch)
+   25. SETUP & ASSAY SCREEN MICRO-INTERACTIONS
    ===================================================================== */
 
-/* ── 1.7: Sticky Begin Bar ────────────────────────────────────────────
+/* ── Sticky Begin Bar ─────────────────────────────────────────────────
    Keeps the "Begin Assay" CTA visible at the bottom of the setup form
    without the user needing to scroll. On large screens it just sits in
    normal flow (no sticky, which would be weird on a page that doesn't scroll). */
@@ -3541,7 +3800,7 @@ p.instruction {
   }
 }
 
-/* ── 1.4: Progress run badge ──────────────────────────────────────────
+/* ── Progress run badge ───────────────────────────────────────────────
    Small numeric pill shown inside the #toggleProgress button to surface
    the run count without opening the progress table. */
 .progress-run-badge {
@@ -3566,8 +3825,8 @@ p.instruction {
   to   { transform: scale(1);   opacity: 1; }
 }
 
-/* ── 1.8: Export button icon alignment ───────────────────────────────
-   Export buttons now contain an SVG icon + text. Use flex to align them. */
+/* ── Export button icon alignment ─────────────────────────────────────
+   Export buttons contain an SVG icon + text. Use flex to align them. */
 #exportExcel,
 #previewExcel,
 #exportCSV {
@@ -3577,7 +3836,7 @@ p.instruction {
   gap: 0.45rem;
 }
 
-/* ── 2.7 / 3.1: Inline warning paragraphs ────────────────────────────
+/* ── Inline warning paragraphs ─────────────────────────────────────────
    Strengthen the existing .warning style to include a border + background
    for inline-form warnings (grace×ISI, genotype max, bin mismatch). */
 .warning {
@@ -3596,9 +3855,30 @@ p.instruction {
   animation: chipIn 0.18s cubic-bezier(0.34,1.56,0.64,1) both;
 }
 
-/* ── 3.4: Touch-index exclusion warning on export screen ─────────────
+/* ── Touch-index exclusion warning on export screen ───────────────────
    Re-uses .warning; just ensure it sits between the intro <p> and fieldset. */
 #tiExclusionWarning {
   margin-top: 0;
   margin-bottom: 0.5rem;
+}
+
+/* =====================================================================
+   26. REDUCED MOTION
+   =====================================================================
+   Every animation in this file (chip pop-ins, screen transitions, toasts,
+   the warmup pulse/countdown, the idle dial, spinners, connection/battery
+   pulses) is purely decorative or redundant with a static/textual signal
+   that's already present — nothing here is the only carrier of information.
+   Collapsing all of it to near-zero duration for users who've asked the OS
+   for reduced motion is therefore safe: every state is still communicated,
+   just without the motion. Effectively instant rather than literally 0s/
+   0-iterations, so elements still reach their end state instead of getting
+   stuck mid-transition (e.g. a toast stuck at opacity:0). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

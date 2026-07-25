@@ -35,8 +35,10 @@ const BATT_LEVEL_UUID   = 0x2A19;
 // Command bytes — must match the firmware switch-case exactly
 const CMD_TAP          = new Uint8Array([0x01]);  // Mirrors vibrate(50)
 const CMD_RUN_COMPLETE = new Uint8Array([0x02]);  // Mirrors vibrate([100,50,200])
-const CMD_HEARTBEAT    = new Uint8Array([0x03]);  // Must differ from CMD_TAP (0x01)
-const CMD_HEARTBEAT_STOP = new Uint8Array([0x04]); // Tells firmware the run ended on purpose, so it doesn't fire a false "connection lost" alert 3s later
+const CMD_HEARTBEAT    = new Uint8Array([0x03]);  // Must differ from CMD_TAP (0x01).
+// Tells firmware the run ended on purpose, so it doesn't fire a false
+// "connection lost" alert ~3s later when the watchdog would otherwise time out.
+const CMD_HEARTBEAT_STOP = new Uint8Array([0x04]);
 
 // Module-level connection state
 let _device             = null;
@@ -148,7 +150,7 @@ export function armbandTest() {
  * Call immediately after timerWorker.postMessage("start").
  */
 export function armbandStartHeartbeat() {
-  _stopHeartbeat(); // Guard against double-start on rapid stop→start
+  _stopHeartbeat(); // Guard against double-start on rapid stop→start.
   _hbTimer = setInterval(() => {
     if (!_connected) { _stopHeartbeat(); return; }
     _write(_hbChar, CMD_HEARTBEAT);
@@ -175,7 +177,7 @@ function _write(char, data) {
   if (!_connected || !char) return Promise.resolve();
   return char.writeValueWithoutResponse(data).catch(err => {
     // A failed write does not imply a disconnect — BLE can recover from
-    // Transient radio congestion without dropping the GATT connection.
+    // transient radio congestion without dropping the GATT connection.
     console.warn("[HapticArmband] Write failed:", err.message);
   });
 }
@@ -199,8 +201,8 @@ async function _subscribeBattery(server) {
     _battChar = await battService.getCharacteristic(BATT_LEVEL_UUID);
     _battChar.addEventListener("characteristicvaluechanged", _handleBatteryUpdate);
     await _battChar.startNotifications();
-    // Do an immediate read so the UI shows the level right after connecting
-    // Rather than waiting for the first notification (which may be minutes away).
+    // Do an immediate read so the UI shows the level right after connecting,
+    // rather than waiting for the first notification (which may be minutes away).
     const initial = await _battChar.readValue();
     _onBatteryUpdateCb?.(initial.getUint8(0));
   } catch (err) {
@@ -249,17 +251,15 @@ async function _attemptReconnect(attempt = 0) {
     _hbChar       = await service.getCharacteristic(HEARTBEAT_UUID);
     await _subscribeBattery(server);  // Re-subscribe after reconnect
     _connected    = true;
-    // Restart heartbeat if it was running before the dropout.
-    // Without this, a brief BLE disconnect during an active run stops
-    // The heartbeat permanently → firmware watchdog fires stutter
-    // Warnings every 3 s for the rest of the run.
+    // Restart heartbeat if it was running before the dropout. Without this, a
+    // brief BLE disconnect during an active run stops the heartbeat permanently,
+    // and the firmware watchdog fires stutter warnings every 3s for the rest of the run.
     if (_hbWasActive) {
       _hbWasActive = false;
       armbandStartHeartbeat();
     }
     console.log(`[HapticArmband] Auto-reconnected (attempt ${attempt + 1}).`);
-    // Notify the UI so it can restore the "connected" appearance.
-    _onReconnectCb?.();
+    _onReconnectCb?.();  // Notify the UI so it can restore the "connected" appearance.
   } catch (err) {
     const nextAttempt = attempt + 1;
     if (nextAttempt < RECONNECT_DELAYS_MS.length) {
@@ -276,9 +276,9 @@ async function _attemptReconnect(attempt = 0) {
 
 function _handleDisconnect() {
   _connected = false;
-  _hbWasActive = _hbTimer !== null;  // Remember if heartbeat was running
+  _hbWasActive = _hbTimer !== null;  // Remember if heartbeat was running.
   _stopHeartbeat();
-  _battChar = null;  // GATT handles are invalid after disconnect
+  _battChar = null;  // GATT handles are invalid after disconnect.
   _onDisconnectCb?.();
   _attemptReconnect(0);
 }

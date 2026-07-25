@@ -37,10 +37,13 @@ describe("buildTrialRaw2D", () => {
   };
 
   const result = buildTrialRaw2D(trial, assay);
-  const [headerGenotype, headerAnimal, headerStatus, headerPartialBin, headerIneligible, headerOverride, stim1, stim2, stim3] = result;
+  // Partial Bin Warning is dropped: no run in this fixture has one set, and
+  // buildTrialRaw2D omits empty optional QC rows entirely (see
+  // isDescriptorRowEmpty in export.js) rather than rendering an empty row.
+  const [headerGenotype, headerAnimal, headerStatus, headerIneligible, headerOverride, stim1, stim2, stim3] = result;
 
-  test("returns six header rows plus one row per stimulus", () => {
-    assert.equal(result.length, 6 + assay.stimCount);
+  test("returns five header rows (Partial Bin Warning omitted — empty) plus one row per stimulus", () => {
+    assert.equal(result.length, 5 + assay.stimCount);
   });
 
   test("labels the genotype and status of every run, spacer between genotypes", () => {
@@ -54,6 +57,10 @@ describe("buildTrialRaw2D", () => {
 
   test("carries the ineligible reason through unmodified for non-overridden runs", () => {
     assert.deepEqual(headerIneligible, ["Ineligible Reason", "", "Incomplete stimulus count", "", "Excluded for movement artifact"]);
+  });
+
+  test("omits the Partial Bin Warning row entirely when no run has one", () => {
+    assert.ok(!result.some(row => row[0] === "Partial Bin Warning"));
   });
 
   test("documents a manual override with the original automatic decision", () => {
@@ -87,14 +94,15 @@ describe("buildTrialBinned2D", () => {
   const result = buildTrialBinned2D(trial, assay);
 
   test("computes the correct raw per-bin percentages for each run", () => {
-    // rows: [genotype, animal, status, override, rawBin1, rawBin2, sep, sep, sep, summaryHeader, summaryBin1, summaryBin2]
-    assert.deepEqual(result[4], ["Bin 1 (1–2)", 100, 50]);
-    assert.deepEqual(result[5], ["Bin 2 (3–4)", 0, 100]);
+    // rows: [genotype, animal, status, rawBin1, rawBin2, sep, sep, sep, summaryHeader, summaryBin1, summaryBin2]
+    // (no "Manual Override" row — omitted since neither run was overridden)
+    assert.deepEqual(result[3], ["Bin 1 (1–2)", 100, 50]);
+    assert.deepEqual(result[4], ["Bin 2 (3–4)", 0, 100]);
   });
 
   test("computes mean/SEM/N across eligible runs for the summary section", () => {
-    assert.deepEqual(result[9], ["Bin", "WT_Mean", "WT_SEM", "WT_N"]);
-    assert.deepEqual(result[10], ["Bin 1 (1–2)", 75, 25, 2]);
+    assert.deepEqual(result[8], ["Bin", "WT_Mean", "WT_SEM", "WT_N"]);
+    assert.deepEqual(result[9], ["Bin 1 (1–2)", 75, 25, 2]);
   });
 
   test("excludes ineligible runs from the summary statistics", () => {
@@ -106,7 +114,7 @@ describe("buildTrialBinned2D", () => {
     };
     const r = buildTrialBinned2D(trialWithIneligible, assay);
     // N is still 2 — the ineligible third run must not be counted
-    assert.equal(r[10][3], 2);
+    assert.equal(r[9][3], 2);
   });
 });
 
@@ -135,7 +143,11 @@ describe("buildHtmlTableFrom2D", () => {
     ]);
     assert.match(html, /<th>Genotype<\/th>/);
     assert.match(html, /<th>Animal<\/th>/);
-    assert.match(html, /<td>Stimulus 1<\/td>/);
+    // Data cells carry a cell-text/cell-numeric class (see isNumeric in
+    // buildHtmlTableFrom2D) so the preview can style them differently —
+    // left-aligned text vs. mono/tabular numbers.
+    assert.match(html, /<td class="cell-text">Stimulus 1<\/td>/);
+    assert.match(html, /<td class="cell-numeric">1<\/td>/);
   });
 
   test("escapes user-supplied string content to prevent XSS", () => {

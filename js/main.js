@@ -35,7 +35,7 @@
  */
 
 
-import { validateInputs, generateAutoID, binRunValues, escapeHTML } from "./utils.js";  // escapeHTML is shared from utils.js
+import { validateInputs, generateAutoID, binRunValues, escapeHTML, formatDateTime } from "./utils.js";  // escapeHTML is shared from utils.js
 import {
   createAssay, createTrial, createRun,
   getActiveTrial, completeRun
@@ -300,8 +300,8 @@ try { warmupDuration = Math.min(60, Math.max(1, parseInt(localStorage.getItem("t
 let gracePeriodMs = 250;
 try {
   const _gp = parseInt(localStorage.getItem("touchAssayGracePeriodMs"), 10);
-  // Bug 3 fix: clamp to 400 ms max (new ceiling) and snap to step=10 on load
-  // so a stale value like 255 doesn't cause a silent jump on first slider interaction.
+  // Clamp to 400 ms max and snap to step=10 on load so a stale value like
+  // 255 doesn't cause a silent jump on first slider interaction.
   if (!isNaN(_gp)) gracePeriodMs = Math.max(0, Math.min(400, Math.round(_gp / 10) * 10));
 } catch { /* use default */ }
 
@@ -352,6 +352,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     handleFatalError(reason);
   });
 
+  /**
+   * Displays the full-screen fatal error boundary and wires its recovery
+   * actions (download a JSON snapshot of the in-progress assay/run, or reload).
+   * Called for genuine unexpected JS errors — transient/recoverable rejections
+   * (BLE write failures, IDB NotFoundError, network timeouts) are filtered out
+   * before reaching here (see the unhandledrejection listener above).
+   *
+   * @param {Error|string} err - The error (or message) to log and display.
+   */
   function handleFatalError(err) {
     console.error("Fatal Error Caught:", err);
     const boundary = document.getElementById('errorBoundary');
@@ -383,8 +392,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (reloadBtn) reloadBtn.onclick = () => window.location.reload();
   }
 
-  // use a proportional threshold (>90% full) instead of absolute
-  // 50 MB, and only show once per session to avoid toasting mid-assay reloads.
+  /**
+   * Warns the user once per session if IndexedDB storage is nearly full.
+   * Uses a proportional threshold (>90% of quota) rather than an absolute
+   * byte count, since quota varies widely by browser/device. Checked once at
+   * startup rather than continuously, to avoid toasting mid-assay.
+   */
   async function checkStorageQuota() {
     if (!(navigator.storage && navigator.storage.estimate)) return;
     try {
@@ -515,14 +528,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   initializeSettings();                      // Restore saved preferences from localStorage
   setState(STATES.SETUP);                    // Render the initial state
 
-  // Clean up orphan sessions from previous crashes, then check IDB availability.
-  // These three all read/write the same orphaned run record, so they must run
-  // sequentially rather than concurrently — running them in parallel let
-  // whichever transaction committed last silently overwrite the others'
-  // status/values. Order matters: recoverCrashGuard() merges any last-second
-  // values into the run while it's still "active"; abandonAllActiveTrialsInDB()
-  // is the primary cleanup; markOrphanRunsStopped() is a superset safety net
-  // that must run last so it doesn't race the primary cleanup's writes.
+  /**
+   * Cleans up orphaned sessions left by a previous crash/force-close.
+   *
+   * Runs three steps sequentially rather than concurrently — all three read
+   * and write the same orphaned run record, and running them in parallel let
+   * whichever transaction committed last silently overwrite the others'
+   * status/values. Order matters: recoverCrashGuard() merges any last-second
+   * values into the run while it's still "active"; abandonAllActiveTrialsInDB()
+   * is the primary cleanup; markOrphanRunsStopped() is a superset safety net
+   * that must run last so it doesn't race the primary cleanup's writes.
+   */
   async function runStartupCleanup() {
     await recoverCrashGuard();
     await abandonAllActiveTrialsInDB();
@@ -772,8 +788,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     runStimCount  = currentAssay.stimCount;
     runBinSize    = currentAssay.binSize || 10;
 
-    // Bug 1 fix: if gracePeriodMs >= ISI the grace window of interval N overlaps
-    // the real window of interval N+1, making tap attribution semantically undefined.
+    // If gracePeriodMs >= ISI the grace window of interval N overlaps the real
+    // window of interval N+1, making tap attribution semantically undefined.
     // Clamp to at most half the ISI (in ms) so grace never bleeds into the next window.
     // Math.round (not Math.floor) avoids an off-by-one that would give 0 for
     // ISIs just under 2 ms and produce imprecise results for short ISIs generally.
@@ -1047,9 +1063,9 @@ document.addEventListener("DOMContentLoaded", async () => {
    * returns the UI to POISED state so the next run can begin.
    */
   async function completeRunNormally(run) {
-    // Bug 5 fix: clear the double-Escape timer so the first Esc press in a new
-    // run can never inadvertently skip the confirmation toast because the previous
-    // run's first-Esc time is still within the 1 s window.
+    // Clear the double-Escape timer so the first Esc press in a new run can
+    // never inadvertently skip the confirmation toast because the previous
+    // run's first-Esc time is still within the 2 s window.
     lastEscapeTime = 0;
 
     const activeTrial = getActiveTrial(currentAssay);
@@ -1147,6 +1163,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   // complete could call stopRunEarly() a second time on the same run.
   let _stopRunPromise = null;
 
+  /**
+   * Stops the active run before it reaches its full stimulus count, marking
+   * it "stoppedEarly" and persisting the reason.
+   * @param {string} [reason="Run stopped early by user"] - Human-readable reason, stored on the run record.
+   */
   function stopRunEarly(reason = "Run stopped early by user") {
     // Clear the double-Escape timer unconditionally — BEFORE the re-entrancy
     // guard — so a blocked second call still resets the stale timestamp.
@@ -1178,7 +1199,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     stopCueLoop();
     stopSpeech();
 
-    // Bug 5: guard against currentAssay being null (e.g. corrupted state or a
+    // Guard against currentAssay being null (e.g. corrupted state or a
     // spurious call after resetToSetup). Without this, saveRun(currentAssay.assayId, ...)
     // below would throw TypeError: Cannot read properties of null.
     if (!currentAssay) return;
@@ -1318,9 +1339,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // ── Audio warm-up (first interaction) ────────────────────────────────────
     if (!isAudioReady()) {
-      // Bug 3: warmUpAudio() now re-throws on failure. Catch here so we can
-      // show a user-facing error and abort instead of continuing with a
-      // suspended AudioContext where getAudioTime() returns 0.
+      // warmUpAudio() re-throws on failure. Catch here so we can show a
+      // user-facing error and abort instead of continuing with a suspended
+      // AudioContext where getAudioTime() returns 0.
       try {
         await warmUpAudio();
       } catch {
@@ -1331,7 +1352,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         );
         return;
       }
-      // Bug 7 (audio): speak("") with an empty string can break iOS speechSynthesis.
+      // speak("") with an empty string can break iOS speechSynthesis.
       // primeSpeechEngine() uses a silent space utterance (" ") for the same purpose
       // and is already used during warmup for exactly this reason.
       primeSpeechEngine();
@@ -1389,7 +1410,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (!isWarmupEnabled) {
       primeSpeechEngine();  // Warm the TTS engine even when skipping the countdown
-      // Bug 2: wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
+      // Wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
       try {
         await startRun();
       } catch (err) {
@@ -1490,7 +1511,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.tapLabel.removeAttribute("aria-hidden");
     UI.Buttons.tap.classList.remove("warming-up");
 
-    // Bug 2: wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
+    // Wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
     try {
       await startRun();
     } catch (err) {
@@ -1728,7 +1749,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // accessibility tree — setting aria-hidden on top is redundant and can cause
     // screen readers to announce a hidden element when aria-hidden="false" is present.
     container.removeAttribute("aria-hidden");
-    // #7/#15: Update text, icon, and aria-pressed together
+    // Update text, icon, and aria-pressed together
     const label = UI.Buttons.progress.querySelector(".toggle-progress-label");
     const eyeOn  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
     const eyeOff = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye-off");
@@ -1860,7 +1881,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function updateProgressTable() {
     const container = document.getElementById("assayProgress");
-    if (!container) return;  // Bug 8: guard against missing element
+    if (!container) return;  // guard against missing element
     container.innerHTML = "";
 
     // call getActiveTrial once and reuse — avoids a second .find() scan.
@@ -1894,11 +1915,21 @@ document.addEventListener("DOMContentLoaded", async () => {
                `</tr></thead><tbody>`;
 
     currentAssay.genotypes.forEach(g => {
+      // Only colour a count when it's actually informative — an ineligible
+      // count of 0 doesn't need red, and an eligible count of 0 doesn't need
+      // green. Keeps the table calm until there's something worth noticing.
+      const eligibleCell   = summary[g].eligible > 0
+        ? `<span class="count-pill count-pill--good">${summary[g].eligible}</span>`
+        : summary[g].eligible;
+      const ineligibleCell = summary[g].ineligible > 0
+        ? `<span class="count-pill count-pill--bad">${summary[g].ineligible}</span>`
+        : summary[g].ineligible;
+
       html += `<tr>` +
               `<td>${escapeHTML(g)}</td>` +
               `<td>${summary[g].total}</td>` +
-              `<td>${summary[g].eligible}</td>` +
-              `<td>${summary[g].ineligible}</td>` +
+              `<td>${eligibleCell}</td>` +
+              `<td>${ineligibleCell}</td>` +
               `</tr>`;
     });
 
@@ -1919,7 +1950,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       runs.forEach(r => {
         const statusLabel = RUN_STATUS_LABELS[r.status] ?? r.status;
-        const eligibleLabel = r.eligibleForAnalysis ? "✓ Eligible" : "✕ Ineligible";
+        // Colour is the primary signal here — the researcher scans this column,
+        // not reads it word by word — so eligibility gets a solid state pill
+        // (green/red) while "(manual)" gets its own amber tag, deliberately a
+        // different hue from both eligibility states and the app's own indigo
+        // accent, so "a human overrode this" always reads as its own category.
+        const eligibleLabel = r.eligibleForAnalysis
+          ? `<span class="status-pill status-pill--good">✓ Eligible</span>`
+          : `<span class="status-pill status-pill--bad">✕ Ineligible</span>`;
         const manualTag = r.manuallyOverridden
           ? ` <span class="override-badge" title="Manually ${r.eligibleForAnalysis ? "included" : "excluded"}${r.overrideReason ? `: ${escapeHTML(r.overrideReason)}` : ""}">(manual)</span>`
           : "";
@@ -2002,7 +2040,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    * the two pooled (completed-only vs all-trials) options.
    * Completed trials are pre-checked; abandoned/active are unchecked.
    * Shows a per-genotype run breakdown alongside the totals.
-   * Syncs the Select All checkbox and refreshes button state after building (#8, #9).
+   * Syncs the Select All checkbox and refreshes button state after building.
    *
    * @param {Object} assay - The full assay object.
    */
@@ -2012,7 +2050,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (!assay || !assay.trials) return;
 
-    // Bug 9: accumulate into a string and assign once — avoids O(n²) DOM
+    // Accumulate into a string and assign once — avoids O(n²) DOM
     // re-parsing that happens when innerHTML += is called inside a loop
     // (each append reads the entire current DOM, re-serialises it, and
     // re-parses the concatenated result).
@@ -2033,13 +2071,20 @@ document.addEventListener("DOMContentLoaded", async () => {
         .filter(Boolean)
         .join(", ");
 
+      // Same green-pill treatment as the assay screen's progress table, so
+      // "how much usable data is in this trial" reads the same way in both
+      // places instead of being colored state in one and plain text here.
+      const eligibleDisplay = eligible > 0
+        ? `<span class="count-pill count-pill--good">${eligible}</span>`
+        : eligible;
+
       html +=
         `<label>` +
         `<input type="checkbox" data-dataset-type="trial" data-trial-id="${trial.trialId}"` +
         ` aria-label="Trial ${Number(trial.trialIndex)}, ${eligible} eligible of ${total} total${isAbandoned ? ', abandoned' : ''}"` +
         ` ${isCompleted ? "checked" : ""}>` +
         ` Trial ${Number(trial.trialIndex)}` +
-        ` — ${eligible} eligible (${total} total)` +
+        ` — ${eligibleDisplay} eligible (${total} total)` +
         (genotypeSummary ? ` &middot; ${genotypeSummary}` : "") +
         (isAbandoned ? " <em>(abandoned)</em>" : "") +
         `</label>`;
@@ -2056,7 +2101,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Single assignment — all trial rows are parsed in one pass
     container.innerHTML = html;
 
-    // ── 3.4: Touch-Index exclusion advisory ─────────────────────────────────
+    // ── Touch-Index exclusion advisory ──────────────────────────────────────
     // Warn the experimenter if any eligible run has a stimCount that is not an
     // exact multiple of binSize — those trailing stimuli are dropped in the
     // Touch Index calculation, which can subtly skew per-animal summaries.
@@ -2183,18 +2228,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Sort newest first
     let html = "";
     assays.sort((a, b) => b.createdAt - a.createdAt).forEach(assay => {
+      // Name is the primary identifier and gets its own line; genotypes + date
+      // are secondary metadata on a muted line underneath — previously all
+      // three were run together in one sentence-like string that wrapped
+      // awkwardly for assays with several genotypes.
+      const metaParts = [];
+      if (assay.genotypes && assay.genotypes.length) metaParts.push(escapeHTML(assay.genotypes.join(", ")));
+      metaParts.push(formatDateTime(assay.createdAt));
+
       html += `
         <div class="saved-assay-row">
           <div class="assay-row-header">
             <input type="checkbox" class="assay-select-checkbox" data-assay-id="${escapeHTML(assay.assayId)}">
             <div class="assay-info">
-              ${escapeHTML(assay.assayName) || "Untitled"}${assay.genotypes && assay.genotypes.length ? ` (${escapeHTML(assay.genotypes.join(', '))})` : ''} — ${assay.createdAt ? new Date(assay.createdAt).toLocaleString() : "Unknown date"}
+              <div class="assay-info-name">${escapeHTML(assay.assayName) || "Untitled"}</div>
+              <div class="assay-info-meta">${metaParts.join(" &middot; ")}</div>
             </div>
           </div>
           <div class="assay-actions">
             <button class="secondary" data-action="start"  data-assay-id="${escapeHTML(assay.assayId)}">Start New Trial</button>
             <button class="secondary" data-action="export" data-assay-id="${escapeHTML(assay.assayId)}">Export</button>
-            <button class="danger"    data-action="delete" data-assay-id="${escapeHTML(assay.assayId)}"
+            <button class="btn-danger-outline" data-action="delete" data-assay-id="${escapeHTML(assay.assayId)}"
               data-assay-name="${escapeHTML(assay.assayName)}">Delete</button>
           </div>
         </div>
@@ -2258,7 +2312,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Wake Locks are released when hidden; re-acquire when visible, but only
     // if a run is still active — there is no point holding the lock otherwise.
-    // Bug 4: also check activeRun !== null. On slow devices the timing-gap auto-stop
+    // Also check activeRun !== null. On slow devices the timing-gap auto-stop
     // in scheduler() fires on the first tick after resume, which means currentState
     // is still RUNNING when this handler fires. Without the activeRun guard, we
     // re-acquire a lock that will be released again moments later.
@@ -2353,7 +2407,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function resetTimingState() {
     isWarmingUp            = false;
     currentStimulusIndex   = 0;
-    // Bug 4: also reset the two speech/audio index counters so a fresh session after
+    // Also reset the two speech/audio index counters so a fresh session after
     // resetToSetup() cannot inherit stale values from a previous run.
     nextSpeechIndex        = 0;
     nextAudioStimulusIndex = 0;
@@ -2403,7 +2457,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Inputs.assayName.value     = generateAutoID();
     UI.Displays.binWarning.hidden = true;
 
-    // Bug 4: form.reset() clears the hidden #genotypes input value but does NOT
+    // form.reset() clears the hidden #genotypes input value but does NOT
     // clear the chip DOM elements — chips from the previous assay would remain
     // visually, while the hidden input is empty, causing a confusing validation
     // error on next submit. Clear the chip list explicitly.
@@ -2417,7 +2471,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       progressContainer.innerHTML = "";
       progressContainer.hidden    = true;
     }
-    // #7/#15: Sync progress toggle button state
+    // Sync progress toggle button state
     const label = UI.Buttons.progress.querySelector(".toggle-progress-label");
     const eyeOn  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
     const eyeOff = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye-off");
@@ -2434,7 +2488,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 
   /* -----------------------------------------------------------------------
-     showConfirmModal — Bug 8 fix
+     showConfirmModal
      Theme-aware async confirmation dialog. Replaces blocking confirm() that
      cannot be styled and may be suppressed in PWA / Private Browsing mode.
    ----------------------------------------------------------------------- */
@@ -2819,10 +2873,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Non-activation keys (Tab, arrow keys, etc.) pass through unaffected.
       if (event.key !== " " && event.key !== "Enter") return;
 
-      // Bug 11: Enter is silently swallowed — no tap, no button activation.
-      // (The previous code used `if (event.key !== " ") return` which was
-      // unreachable dead code: the guard above already ensures key is " " or
-      // "Enter", so the only case that would pass this check is "Enter".)
+      // Enter is silently swallowed — no tap, no button activation. The guard
+      // above already ensures key is " " or "Enter", so the only case that
+      // reaches this point is "Enter".
       if (event.key === "Enter") return;
 
       // RUNNING: tap unconditionally takes priority over everything
@@ -3149,7 +3202,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const activeTrial = getActiveTrial(currentAssay);
 
-    // Bug 3: guard against null (can occur if the trial was already completed via another
+    // Guard against null (can occur if the trial was already completed via another
     // path, e.g. a rapid double-click or a race with the crash-guard cleanup).
     if (!activeTrial) {
       showToast("No active trial to finish.", "warning", 4000);
@@ -3189,7 +3242,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // also set aria-hidden. Setting aria-hidden="false" on a hidden element
     // can cause some screen readers to announce it erroneously.
     progressContainer.removeAttribute("aria-hidden");
-    // #7/#15: Update text, icon, and aria-pressed
+    // Update text, icon, and aria-pressed
     const label  = UI.Buttons.progress.querySelector(".toggle-progress-label");
     const eyeOn  = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye");
     const eyeOff = UI.Buttons.progress.querySelector(".toggle-progress-icon-eye-off");
@@ -3572,18 +3625,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Settings.warmupDurationContainer.style.display = isWarmupEnabled ? "flex" : "none";
   });
 
-  // split into two handlers so clamping only snaps the displayed value
-  // on blur/commit (change), not on every keystroke (input).
-  //
-  // Problem: the old single-handler called on "input" clamped and wrote back the
-  // value on every keypress.  Typing "10" would:
-  //   keystroke "1" → parsed=1 → clamp(1..60)=1 → field snaps to "1"  ← jank!
-  //   keystroke "0" → parsed=10 → clamp=10 → field stays "10"  (fine)
-  //
-  // Fix: on "input" only update the JS variable when the value is already within
-  // the valid range — do NOT write it back into the field mid-typing.
-  // On "change" (blur / Enter / spinner commit), always clamp, write back, and persist.
+  // Split into two handlers so clamping only snaps the displayed value on
+  // blur/commit (change), not on every keystroke (input). A single handler on
+  // "input" that clamped and wrote back on every keypress caused visible jank:
+  // typing "10" would clamp keystroke "1" to the range and snap the field back
+  // to "1" before the second keystroke could complete the intended value.
 
+  /**
+   * Updates the in-memory warmupDuration on every keystroke, without writing
+   * back into the field — see the split-handler rationale above.
+   * @param {Event} e - The input event on the warmup duration field.
+   */
   function _applyWarmupDurationOnInput(e) {
     const parsed = parseInt(e.target.value, 10);
     if (isNaN(parsed)) return;  // Let the field stay mid-edit (e.g. user cleared it)
@@ -3591,6 +3643,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     warmupDuration = Math.min(60, Math.max(1, parsed));
   }
 
+  /**
+   * Clamps, writes back, and persists the warmup duration on blur/Enter/spinner
+   * commit — see the split-handler rationale above.
+   * @param {Event} e - The change event on the warmup duration field.
+   */
   function _applyWarmupDurationOnChange(e) {
     const parsed = parseInt(e.target.value, 10);
     if (isNaN(parsed)) {
@@ -3793,14 +3850,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     function _wireDefaultStepper(input, storageField) {
       if (!input) return;
 
-      // Bug 4 fix: track the last-valid value in a closure so that if the user
-      // types a non-numeric string and blurs, we restore their previous valid
-      // value instead of falling back to the HTML defaultValue attribute (which
+      // Track the last-valid value in a closure so that if the user types a
+      // non-numeric string and blurs, we restore their previous valid value
+      // instead of falling back to the HTML defaultValue attribute (which
       // would silently overwrite localStorage with the compile-time default).
       let lastValid = parseFloat(input.value);
       if (isNaN(lastValid)) lastValid = parseFloat(input.defaultValue) || 0;
 
-      // Shared clamp-and-save logic used by both the change handler and steppers.
+      /**
+       * Clamps a raw value to the input's min/max/step, writes it back to the
+       * field, updates `lastValid`, and persists it. Shared by the change
+       * handler and both stepper buttons below.
+       * @param {number|string} raw - Candidate value before clamping.
+       */
       function _applyAndSave(raw) {
         const min = input.min !== "" ? parseFloat(input.min) : -Infinity;
         const max = input.max !== "" ? parseFloat(input.max) :  Infinity;
@@ -3808,7 +3870,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const decimals = (step.toString().split(".")[1] || "").length;
         let val = parseFloat(raw);
         if (isNaN(val)) {
-          // Bug 4 fix: restore previous valid value instead of overwriting with HTML default
+          // Restore previous valid value instead of overwriting with HTML default
           input.value = lastValid;
           return;
         }
@@ -3840,7 +3902,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           const min     = input.min !== "" ? parseFloat(input.min) : -Infinity;
           const max     = input.max !== "" ? parseFloat(input.max) :  Infinity;
           const clamped = parseFloat(Math.max(min, Math.min(max, raw)).toFixed(decimals));
-          // Bug 7: dispatch a change event so external listeners receive the
+          // Dispatch a change event so external listeners receive the
           // update through standard DOM event bubbling.
           input.value = clamped;
           input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -3957,7 +4019,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.previewModal.hidden = true;
   });
 
-  // ── Export dataset list — checkbox delegation (#8, #9) ──────────────────
+  // ── Export dataset list — checkbox delegation ────────────────────────────
   // Refresh button state and keep the select-all checkbox in sync whenever
   // any individual dataset checkbox changes.
   document.getElementById("exportDatasetList").addEventListener("change", () => {
@@ -3975,9 +4037,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   // ── SheetJS availability detection ────────────────────────────────
-  // The SheetJS script loads with `defer`, so we check after the window has
-  // fully loaded.  If it failed to load (e.g. offline), update button labels
-  // to "Export to CSV" so users are not surprised by the fallback format.
+
+  /**
+   * Relabels the export buttons to reflect whether SheetJS (XLSX) loaded.
+   * The SheetJS script loads with `defer`, so this is checked after the window
+   * has fully loaded. If it failed to load (e.g. offline), buttons are relabeled
+   * to "Export to CSV" so users are not surprised by the fallback format.
+   */
   function updateExportButtonLabels() {
     const isExcel = typeof XLSX !== "undefined";
     if (!isExcel) {

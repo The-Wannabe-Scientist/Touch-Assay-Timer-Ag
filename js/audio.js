@@ -29,10 +29,13 @@ let audioCtx = null;
 /** @type {GainNode|null} Master gain node — all oscillators route through this. */
 let masterGain = null;
 
-/** @type {SpeechSynthesisVoice|null} The selected TTS voice, or null if unavailable. */
-let selectedVoice = null;
 /** @type {number} Frequency in Hz for the metronome tick tone. */
 let tickPitch = 900;
+
+/** @type {boolean} True once the AudioContext has been resumed after a user gesture. */
+let isReady = false;
+
+// ── Cue mode state (shared by tick + speech) ─────────────────────────────────
 
 /**
  * Controls which audio cues are emitted per stimulus.
@@ -52,13 +55,13 @@ let voiceMode = "tick";
  */
 let binSpeakSize = 10;
 
+// ── Speech state ──────────────────────────────────────────────────────────────
+
+/** @type {SpeechSynthesisVoice|null} The selected TTS voice, or null if unavailable. */
+let selectedVoice = null;
+
 /** @type {{ rate: number, pitch: number, lang: string }} TTS configuration. */
 let speechConfig = { rate: 1.0, pitch: 1.0, lang: "en" };
-
-/** @type {boolean} True once the AudioContext has been resumed after a user gesture. */
-let isReady = false;
-
-// ── Speech state ─────────────────────────────────────────────────────────────
 
 
 /* ==========================================================================
@@ -127,7 +130,7 @@ export function configureSpeech(config) {
  */
 export function loadVoices() {
   const voices = speechSynthesis.getVoices();
-  if (voices.length === 0) return;  // List not ready yet; will retry via onvoiceschanged
+  if (voices.length === 0) return;  // List not ready yet; will retry via onvoiceschanged.
 
   selectedVoice =
     voices.find(v => v.lang.startsWith(speechConfig.lang) && v.name.includes("Google")) ||
@@ -140,9 +143,9 @@ export function loadVoices() {
 // (some WebViews, embedded browsers). Accessing it at module load time without
 // a guard crashes the entire module, taking down the whole application.
 if (typeof speechSynthesis !== "undefined") {
-  // Browsers load voices asynchronously; listen for when the list is populated
+  // Browsers load voices asynchronously; listen for when the list is populated.
   speechSynthesis.onvoiceschanged = loadVoices;
-  // Synchronously attempt to load if the list is already available (common on desktop)
+  // Synchronously attempt to load if the list is already available (common on desktop).
   if (speechSynthesis.getVoices().length > 0) loadVoices();
 }
 
@@ -168,8 +171,8 @@ function getAudioContext() {
     lastMonotonicTime = 0;
 
     // Route all oscillators through a single master gain node.
-    // Note: Volume control is not needed in this app because device hardware volume
-    // Buttons provide sufficient control for users. Default gain is 1.0 (full volume).
+    // Note: volume control is not needed in this app because device hardware volume
+    // buttons provide sufficient control for users. Default gain is 1.0 (full volume).
     masterGain = audioCtx.createGain();
     masterGain.connect(audioCtx.destination);
   }
@@ -191,14 +194,14 @@ function getAudioContext() {
  * @returns {Promise<void>} Resolves when the context is running.
  */
 export function warmUpAudio() {
-  if (isReady) return Promise.resolve();  // Already running — no-op
+  if (isReady) return Promise.resolve();  // Already running — no-op.
   const ctx = getAudioContext();
   return ctx.resume()
     .then(() => { isReady = true; })
     .catch(err => {
       // Log the cause but re-throw so callers can surface a user-facing error.
       // Swallowing here would let execution continue with a suspended context,
-      // Causing getAudioTime() to return 0 and all scheduled ticks to misfire.
+      // causing getAudioTime() to return 0 and all scheduled ticks to misfire.
       console.warn("Audio context resume blocked by browser policy.", err);
       throw err;
     });
@@ -266,11 +269,11 @@ export function speak(text) {
   speechSynthesis.cancel();  // Flush any queued utterances to prevent lag drift
 
   // Safari (and some Chromium builds) silently drop a speak() call issued in
-  // The same task as cancel(). Deferring via queueMicrotask ensures the cancel
-  // Completes before the new utterance is enqueued, while avoiding the 1–16 ms
-  // Latency penalty of setTimeout(fn, 0) which is subject to browser clamping.
+  // the same task as cancel(). Deferring via queueMicrotask ensures the cancel
+  // completes before the new utterance is enqueued, while avoiding the 1–16 ms
+  // latency penalty of setTimeout(fn, 0) which is subject to browser clamping.
   // Microtasks run at the end of the current task — effectively ~0 ms delay —
-  // And are more than offset by the SPEECH_LEAD_TIME advance in main.js.
+  // and are more than offset by the SPEECH_LEAD_TIME advance in main.js.
   queueMicrotask(() => {
     const utterance = new SpeechSynthesisUtterance(text);
     if (selectedVoice)         utterance.voice = selectedVoice;
@@ -331,16 +334,16 @@ export function playTick(exactTime = null) {
   const time = exactTime !== null ? exactTime : ctx.currentTime;
 
   osc.type            = "sine";
-  osc.frequency.value = tickPitch;  // Configurable via setTickPitch()
+  osc.frequency.value = tickPitch;  // Configurable via setTickPitch().
 
   gain.gain.setValueAtTime(0.25, time);
-  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);  // 50ms decay
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);  // 50ms decay.
 
   osc.connect(gain);
   gain.connect(masterGain);
 
   osc.start(time);
-  osc.stop(time + 0.05);  // Node auto-disconnects after stopping
+  osc.stop(time + 0.05);
   // Disconnect the GainNode after the oscillator ends so it is released
   // from the audio graph and eligible for GC on long-running sessions.
   osc.onended = () => gain.disconnect();
@@ -364,14 +367,14 @@ export function playWarmupTone(frequency, exactTime = null) {
   osc.frequency.value = frequency;
 
   gain.gain.setValueAtTime(0.2, time);
-  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.3);  // 300ms sustain
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.3);  // 300ms sustain.
 
   osc.connect(gain);
   gain.connect(masterGain);
 
   osc.start(time);
   osc.stop(time + 0.3);
-  // Release GainNode from audio graph after oscillator stops
+  // Release GainNode from audio graph after oscillator stops.
   osc.onended = () => gain.disconnect();
 }
 
@@ -386,11 +389,11 @@ export function playCompletionTone() {
   const ctx  = getAudioContext();
   const time = ctx.currentTime;
 
-  // Schedule both notes relative to the current time
+  // Schedule both notes relative to the current time.
   [800, 1200].forEach((freq, i) => {
     const osc     = ctx.createOscillator();
     const gain    = ctx.createGain();
-    const startAt = time + i * 0.15;  // 0ms and 150ms offsets
+    const startAt = time + i * 0.15;  // 0ms and 150ms offsets.
 
     osc.type            = "sine";
     osc.frequency.value = freq;
@@ -403,7 +406,7 @@ export function playCompletionTone() {
 
     osc.start(startAt);
     osc.stop(startAt + 0.3);
-    // Release GainNode from audio graph after oscillator stops
+    // Release GainNode from audio graph after oscillator stops.
     osc.onended = () => gain.disconnect();
   });
 }
@@ -428,7 +431,7 @@ export function playCompletionTone() {
  * @param {number} exactTime     - AudioContext timestamp to schedule the beep.
  */
 export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime) {
-  // Fast ISI override: always tick even in count mode (speech can't keep up)
+  // Fast ISI override: always tick even in count mode (speech can't keep up).
   if (voiceMode === "count" && assayIsi < 1) {
     playTick(exactTime);
     return;
@@ -436,7 +439,7 @@ export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime) {
 
   switch (voiceMode) {
     case "tick":
-      // Tick on every stimulus
+      // Tick on every stimulus.
       playTick(exactTime);
       break;
 
@@ -447,12 +450,12 @@ export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime) {
 
     case "tens":
       // Tick on all stimuli that are NOT multiples of 10
-      // (multiples will have speech instead, scheduled in triggerImmediateSpeech)
+      // (multiples will have speech instead, scheduled in triggerImmediateSpeech).
       if (stimulusIndex % 10 !== 0) playTick(exactTime);
       break;
 
     case "bins":
-      // Always tick every stimulus — speech fires separately at bin boundaries
+      // Always tick every stimulus — speech fires separately at bin boundaries.
       playTick(exactTime);
       break;
   }
@@ -469,28 +472,27 @@ export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime) {
  * @param {number} assayIsi      - ISI of the active assay in seconds.
  */
 export function triggerImmediateSpeech(stimulusIndex, assayIsi) {
-  // Fast ISI: speech can't complete before the next tick — skip all voice modes
+  // Fast ISI: speech can't complete before the next tick — skip all voice modes.
   if (assayIsi < 1) return;
 
   switch (voiceMode) {
     case "count":
-      // Speak the stimulus number on every interval
+      // Speak the stimulus number on every interval.
       speak(String(stimulusIndex));
       break;
 
     case "tens":
       if (stimulusIndex % 10 === 0) {
-        // Speak on multiples of 10
+        // Speak on multiples of 10.
         speak(String(stimulusIndex));
       } else if (typeof speechSynthesis !== "undefined" && (speechSynthesis.speaking || speechSynthesis.pending)) {
-        // Guard typeof before accessing .speaking/.pending —
-        // Some browsers/WebViews expose no speechSynthesis at all.
-        // Flush any overrunning speech from the previous multiple-of-10.
-        // Without this, a spoken "10" or "20" can still be playing when the
-        // Next tick fires on short ISIs (≈ 1 s), causing audible overlap.
-        // Guarded behind speaking/pending check to avoid no-op cancel() churn
-        // Which can cause the speech engine to needlessly re-initialise on
-        // Some platforms.
+        // Flush any overrunning speech from the previous multiple-of-10 — without
+        // this, a spoken "10" or "20" can still be playing when the next tick fires
+        // on short ISIs (≈ 1s), causing audible overlap. Guarded behind the
+        // speaking/pending check (rather than an unconditional cancel()) because
+        // cancel() can needlessly re-initialise the speech engine on some platforms;
+        // typeof speechSynthesis is checked first since some browsers/WebViews
+        // expose no speechSynthesis at all.
         speechSynthesis.cancel();
       }
       break;
@@ -498,18 +500,17 @@ export function triggerImmediateSpeech(stimulusIndex, assayIsi) {
     case "bins":
       // Speak the stimulus number only when it lands exactly on a bin boundary
       // (i.e. is a multiple of binSpeakSize). All other stimuli just get the
-      // Hardware tick scheduled by scheduleWebAudioTick — no speech needed.
+      // hardware tick scheduled by scheduleWebAudioTick — no speech needed.
       if (stimulusIndex % binSpeakSize === 0) {
         speak(String(stimulusIndex));
       } else if (typeof speechSynthesis !== "undefined" && (speechSynthesis.speaking || speechSynthesis.pending)) {
-        // Guard typeof before accessing .speaking/.pending.
-        // Flush any overrun from the previous bin-boundary utterance so it
-        // Doesn't bleed into the following tick interval.
-        // Guarded to avoid needless cancel() calls on every non-boundary tick.
+        // Flush any overrun from the previous bin-boundary utterance so it doesn't
+        // bleed into the following tick interval. Guarded behind the speaking/pending
+        // check to avoid needless cancel() calls on every non-boundary tick.
         speechSynthesis.cancel();
       }
       break;
 
-    // "tick" mode: no speech — tick only, handled in scheduleWebAudioTick
+    // "tick" mode: no speech — tick only, handled in scheduleWebAudioTick.
   }
 }

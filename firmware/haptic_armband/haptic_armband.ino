@@ -564,9 +564,9 @@ void loop() {
         switch (cmd) {
           case 0x01: vibrateTap();         break;
           case 0x02: vibrateRunComplete(); break;
-          // BUG-A fix: 0x03 is the heartbeat byte — it belongs on heartbeatChar,
-          // not here, but ignore it silently as a belt-and-suspenders guard
-          // so a misdirected write doesn't spam the Serial log as "Unknown cmd".
+          // 0x03 is the heartbeat byte — it belongs on heartbeatChar, not here,
+          // but ignore it silently as a belt-and-suspenders guard so a
+          // misdirected write doesn't spam the Serial log as "Unknown cmd".
           case 0x03: /* heartbeat no-op */  break;
           default:
             Serial.print("Unknown cmd: 0x"); Serial.println(cmd, HEX);
@@ -574,9 +574,9 @@ void loop() {
       }
 
       // ── Heartbeat watchdog ───────────────────────────────
-      // BUG-A fix: validate the written value is 0x03 (the heartbeat byte
-      // used by js/haptic-armband.js since the CMD_HEARTBEAT collision fix).
-      // Any other value is a stray write and must not suppress a real dropout.
+      // Validate the written value is 0x03 (the heartbeat byte used by
+      // js/haptic-armband.js). Any other value is a stray write and must
+      // not suppress a real dropout.
       if (heartbeatChar.written()) {
         uint8_t hbCmd = heartbeatChar.value();
         if (hbCmd == 0x03) {

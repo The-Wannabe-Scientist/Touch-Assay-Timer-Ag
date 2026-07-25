@@ -238,9 +238,7 @@ void setup() {
   dumpRegisters("AFTER begin(), BEFORE manual init");
 
   // Applies the LRA or ERM register/voltage/calibration sequence selected by
-  // the MOTOR_LRA / MOTOR_ERM switch at the top of this file. Previously this
-  // was hardcoded to the ERM sequence regardless of the switch, so testing an
-  // LRA motor silently applied the wrong (ERM) drive voltage and registers.
+  // the MOTOR_LRA / MOTOR_ERM switch at the top of this file.
   Serial.println();
 #ifdef MOTOR_LRA
   Serial.println("--- Configuring LRA closed-loop ---");

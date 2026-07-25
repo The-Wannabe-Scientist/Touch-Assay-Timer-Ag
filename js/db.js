@@ -75,15 +75,15 @@ let cachedDB = null;
  * @returns {Promise<IDBDatabase>} Resolves with the open database connection.
  */
 export function openDB() {
-  // Return the cached connection immediately if available
+  // Return the cached connection immediately if available.
   if (cachedDB) return Promise.resolve(cachedDB);
 
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
 
-    // Schema setup — runs only on first launch or version upgrade.
-    // Each `if (event.oldVersion < N)` block is idempotent and only runs
-    // When migrating from an older version, ensuring safe incremental upgrades.
+    // Schema setup — runs only on first launch or version upgrade. Each
+    // `if (event.oldVersion < N)` block is idempotent and only runs when
+    // migrating from an older version, ensuring safe incremental upgrades.
     req.onupgradeneeded = event => {
       // Use req.result/req.transaction (not event.target.result) — event.target
       // is the same IDBOpenDBRequest as req for a handler attached directly to
@@ -123,7 +123,7 @@ export function openDB() {
     req.onsuccess = () => {
       cachedDB = req.result;
       // Invalidate the cache when the browser closes the connection
-      // (e.g. on storage pressure) so the next call re-opens it
+      // (e.g. on storage pressure) so the next call re-opens it.
       cachedDB.onclose = () => { cachedDB = null; };
       resolve(cachedDB);
     };
@@ -191,7 +191,7 @@ export async function loadAllAssays() {
 export async function hydrateAssay(assayId) {
   const db = await openDB();
 
-  // Step 1: Load the top-level assay record
+  // Step 1: Load the top-level assay record.
   // Typed string|number (not just string) — older DB records can have a
   // numeric key (see the fallback branch below), so trueAssayId may be
   // reassigned to a number after the initial string lookup misses.
@@ -204,7 +204,7 @@ export async function hydrateAssay(assayId) {
     req.onerror   = () => reject(req.error);
   });
 
-  // Older numeric IDs from DB get cast to strings via DOM dataset properties
+  // Older numeric IDs from DB get cast to strings via DOM dataset properties.
   if (!assay && !isNaN(Number(assayId)) && String(Number(assayId)) === String(assayId)) {
     const numId = Number(assayId);
     assay = await new Promise((resolve, reject) => {
@@ -218,7 +218,7 @@ export async function hydrateAssay(assayId) {
 
   if (!assay) throw new Error(`Assay not found in DB: ${assayId}`);
 
-  // Step 2: Load all trials belonging to this assay
+  // Step 2: Load all trials belonging to this assay.
   const trials = await new Promise((resolve, reject) => {
     const tx  = db.transaction(STORES.TRIALS, "readonly");
     const req = tx.objectStore(STORES.TRIALS).index("assayId").getAll(trueAssayId);
@@ -226,7 +226,7 @@ export async function hydrateAssay(assayId) {
     req.onerror   = () => reject(req.error);
   });
 
-  // Step 3: Load all runs for each trial
+  // Step 3: Load all runs for each trial.
   for (const trial of trials) {
     const runs = await new Promise((resolve, reject) => {
       const tx  = db.transaction(STORES.RUNS, "readonly");
@@ -300,11 +300,11 @@ export async function deleteAssay(assayId) {
       return;
     }
   } else if (!assayExists) {
-    // Doesn't exist, nothing to do
+    // Doesn't exist, nothing to do.
     return;
   }
 
-  // Collect all trial records for this assay
+  // Collect all trial records for this assay.
   const trials = await new Promise((resolve, reject) => {
     const tx  = db.transaction(STORES.TRIALS, "readonly");
     const req = tx.objectStore(STORES.TRIALS).index("assayId").getAll(trueAssayId);
@@ -341,7 +341,7 @@ export async function deleteAssay(assayId) {
     const trialStore = tx.objectStore(STORES.TRIALS);
     const assayStore = tx.objectStore(STORES.ASSAYS);
 
-    // Queue all deletes synchronously (children before parent)
+    // Queue all deletes synchronously (children before parent).
     allRunIds.forEach(id => runStore.delete(id));
     trials.forEach(t   => trialStore.delete(t.trialId));
     assayStore.delete(trueAssayId);
@@ -433,7 +433,7 @@ export async function markTrialAbandoned(_assayId, trialId, reason = "App closed
 
   req.onsuccess = () => {
     const trial = req.result;
-    // Abort if trial not found (same rationale as markTrialCompleted)
+    // Abort if trial not found (same rationale as markTrialCompleted).
     if (!trial) { tx.abort(); return; }
     trial.status          = "abandoned";
     trial.abandonedReason = reason;
@@ -469,7 +469,7 @@ export async function markTrialAbandoned(_assayId, trialId, reason = "App closed
 export async function saveRun(_assayId, trialId, run) {
   const db = await openDB();
   const tx = db.transaction(STORES.RUNS, "readwrite");
-  // Spread trialId in so the index can look up runs by parent trial
+  // Spread trialId in so the index can look up runs by parent trial.
   tx.objectStore(STORES.RUNS).put({ ...run, trialId });
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
@@ -498,7 +498,7 @@ export async function saveRun(_assayId, trialId, run) {
 export async function abandonAllActiveTrialsInDB() {
   const db = await openDB();
 
-  // Phase 1: Find all active trials
+  // Phase 1: Find all active trials.
   const activeTrials = await new Promise((resolve, reject) => {
     const tx  = db.transaction(STORES.TRIALS, "readonly");
     const req = tx.objectStore(STORES.TRIALS).index("status").getAll("active");
@@ -506,10 +506,10 @@ export async function abandonAllActiveTrialsInDB() {
     req.onerror   = () => reject(req.error);
   });
 
-  // Nothing to clean up — exit early
+  // Nothing to clean up — exit early.
   if (activeTrials.length === 0) return;
 
-  // Phase 2: Collect any active runs across all orphaned trials
+  // Phase 2: Collect any active runs across all orphaned trials.
   const runUpdates = [];
   for (const trial of activeTrials) {
     const runs = await new Promise((resolve, reject) => {
@@ -519,7 +519,7 @@ export async function abandonAllActiveTrialsInDB() {
       req.onerror   = () => reject(req.error);
     });
 
-    // Mutate the in-memory objects that will be written in Phase 3
+    // Mutate the in-memory objects that will be written in Phase 3.
     runs
       .filter(r => r.status === "active")
       .forEach(run => {
@@ -536,7 +536,7 @@ export async function abandonAllActiveTrialsInDB() {
       });
   }
 
-  // Phase 3: Commit all trial and run updates atomically
+  // Phase 3: Commit all trial and run updates atomically.
   const tx = db.transaction([STORES.TRIALS, STORES.RUNS], "readwrite");
 
   activeTrials.forEach(trial => {
@@ -578,16 +578,16 @@ export async function markOrphanRunsStopped() {
   try {
     db = await openDB();
   } catch {
-    return;  // IDB unavailable — nothing we can do
+    return;  // IDB unavailable — nothing we can do.
   }
 
-  // Fetch all runs with status "active"
+  // Fetch all runs with status "active".
   let activeRuns = [];
   try {
     activeRuns = await new Promise((resolve, reject) => {
       const tx    = db.transaction(STORES.RUNS, "readonly");
       const store = tx.objectStore(STORES.RUNS);
-      // Use status index if available (DB_VERSION 4+); fall back to getAll filter
+      // Use status index if available (DB_VERSION 4+); fall back to getAll filter.
       if (store.indexNames.contains("status")) {
         const req = store.index("status").getAll("active");
         req.onsuccess = () => resolve(req.result || []);
@@ -605,7 +605,7 @@ export async function markOrphanRunsStopped() {
 
   if (activeRuns.length === 0) return;
 
-  // Mark each orphan as stoppedEarly in one atomic transaction
+  // Mark each orphan as stoppedEarly in one atomic transaction.
   await new Promise((resolve, reject) => {
     const tx    = db.transaction(STORES.RUNS, "readwrite");
     const store = tx.objectStore(STORES.RUNS);
@@ -626,7 +626,7 @@ export async function markOrphanRunsStopped() {
 }
 
 /**
- * C4: Crash-guard recovery — called at startup to merge any sessionStorage
+ * Crash-guard recovery — called at startup to merge any sessionStorage
  * snapshot written by the beforeunload handler into the IDB run record.
  *
  * When the tab is killed while hidden on mobile, neither `unload` nor a
@@ -672,13 +672,13 @@ export async function recoverCrashGuard() {
         ) {
           const recovered = guard.values.length - (existing.values?.length ?? 0);
           existing.values = guard.values;
-          store.put(existing);  // Queued synchronously — transaction cannot auto-commit before this
+          store.put(existing);  // Queued synchronously — transaction cannot auto-commit before this.
           console.log(`[CrashGuard] Recovered ${recovered} value(s) for run ${guard.runId}`);
         }
       };
     });
   } catch {
-    // sessionStorage or IDB unavailable (e.g. Private Browsing) — silent no-op
+    // sessionStorage or IDB unavailable (e.g. Private Browsing) — silent no-op.
   }
 }
 

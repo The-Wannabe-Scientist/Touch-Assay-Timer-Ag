@@ -42,10 +42,10 @@ const ICONS = {
   </svg>`,
 };
 
-/** @type {HTMLElement|null} Lazily-created container element */
+/** @type {HTMLElement|null} Lazily-created container element. */
 let container = null;
 
-/** @type {boolean} Whether the module-level Escape listener is active */
+/** @type {boolean} Whether the module-level Escape listener is active. */
 let keyListenerActive = false;
 
 /**
@@ -76,16 +76,16 @@ function handleGlobalKeydown(e) {
   if (e.key !== "Escape") return;
 
   const root = getContainer();
-  // Collect all toasts that are not already animating out
+  // Collect all toasts that are not already animating out.
   const active = Array.from(root.querySelectorAll(".toast:not(.toast--exiting)"));
   if (active.length === 0) {
-    // Nothing left — remove the listener
+    // Nothing left — remove the listener.
     document.removeEventListener("keydown", handleGlobalKeydown);
     keyListenerActive = false;
     return;
   }
 
-  // Dismiss the last (newest) toast in the stack
+  // Dismiss the last (newest) toast in the stack.
   dismiss(active[active.length - 1]);
 }
 
@@ -120,6 +120,8 @@ function ensureKeyListener() {
  * @param {string} message   - The notification text.
  * @param {"success"|"error"|"warning"|"info"} [type="info"] - Visual style.
  * @param {number} [duration=3500] - Auto-dismiss delay in ms. 0 = persistent.
+ * @param {string} [actionText=""] - Label for an optional inline action button; omitted if empty.
+ * @param {Function|null} [actionCallback=null] - Invoked when the action button is clicked, then the toast dismisses.
  * @returns {HTMLElement} The toast element (so callers can dismiss it manually).
  */
 export function showToast(message, type = "info", duration = 3500, actionText = "", actionCallback = null) {
@@ -129,13 +131,12 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
   toast.className = `toast toast--${type}`;
   toast.setAttribute("role", "alert");
   toast.setAttribute("aria-live", "assertive");
-  // Make the toast focusable so keyboard users can tab to it
+  // Make the toast focusable so keyboard users can tab to it.
   toast.tabIndex = 0;
 
   // Inject only static, trusted HTML (icons + button skeleton); user-supplied text
-  // is always set via textContent to prevent XSS from assay names or reason strings.
-  // actionText was previously injected directly into innerHTML — replaced
-  // with an empty button skeleton; textContent is assigned safely below.
+  // (message, actionText) is always assigned via textContent below to prevent XSS
+  // from assay names or reason strings.
   toast.innerHTML = `
     <span class="toast__icon">${ICONS[type] ?? ICONS.info}</span>
     <span class="toast__message"></span>
@@ -148,9 +149,8 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
     </button>
     ${duration > 0 ? `<div class="toast__progress" style="animation-duration:${duration}ms"></div>` : ""}
   `;
-  // Set user-supplied text safely — never via innerHTML
+  // Set user-supplied text safely — never via innerHTML.
   toast.querySelector(".toast__message").textContent = message;
-  // Also set actionText via textContent (not innerHTML above).
   if (actionText) {
     const actionBtn = toast.querySelector(".toast__action-btn");
     if (actionBtn) actionBtn.textContent = actionText;
@@ -164,21 +164,21 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
     });
   }
 
-  // Dismiss on close button click
+  // Dismiss on close button click.
   toast.querySelector(".toast__close").addEventListener("click", () => dismiss(toast));
 
-  // Enter / Space dismisses a focused toast
+  // Enter / Space dismisses a focused toast.
   toast.addEventListener("keydown", e => {
     if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault(); // Prevent Space from scrolling the page
+      e.preventDefault(); // Prevent Space from scrolling the page.
       dismiss(toast);
     }
   });
 
-  // Ensure the module-level Escape handler is active
+  // Ensure the module-level Escape handler is active.
   ensureKeyListener();
 
-  // Swipe-to-dismiss (touch)
+  // Swipe-to-dismiss (touch).
   let touchStartX = 0;
   toast.addEventListener("touchstart", e => { touchStartX = e.touches[0].clientX; }, { passive: true });
   toast.addEventListener("touchend", e => {
@@ -191,7 +191,7 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
 
   root.appendChild(toast);
 
-  // Force reflow so the animation triggers correctly after insertion
+  // Force reflow so the animation triggers correctly after insertion.
   toast.getBoundingClientRect();
   toast.classList.add("toast--visible");
 
@@ -224,14 +224,12 @@ function dismiss(toast) {
   toast.classList.add("toast--exiting");
 
   function cleanup() {
-    // toast.remove() MUST be called before the querySelectorAll below.
-    // The query checks for ".toast:not(.toast--exiting)" to decide whether to remove
-    // the global key listener. If the toast were still in the DOM at query time, it
-    // would be counted as a remaining toast (its exiting class was added, not yet
-    // animated out), and the listener would be kept alive incorrectly.
-    // Removing the element first guarantees the query sees the post-removal state.
+    // toast.remove() must run before the querySelectorAll below: that query
+    // checks for ".toast:not(.toast--exiting)" to decide whether to remove the
+    // global key listener, and a still-in-DOM toast (exiting class added, but
+    // not yet animated out) would be miscounted as a remaining toast.
     toast.remove();
-    // If the container is now empty, remove the global listener
+    // If the container is now empty, remove the global listener.
     const root = container;
     if (root && root.querySelectorAll(".toast:not(.toast--exiting)").length === 0) {
       document.removeEventListener("keydown", handleGlobalKeydown);
@@ -240,7 +238,7 @@ function dismiss(toast) {
   }
 
   // Fallback timeout in case the CSS exit animation is missing or instant
-  // (e.g. prefers-reduced-motion: reduce without a duration override)
+  // (e.g. prefers-reduced-motion: reduce without a duration override).
   const fallback = setTimeout(cleanup, 500);
   toast.addEventListener("animationend", () => {
     clearTimeout(fallback);

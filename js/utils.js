@@ -64,25 +64,6 @@
    ========================================================================== */
 
 /**
- * Validates the input parameters collected from the assay setup form.
- * Returns a structured result rather than throwing, so the caller can
- * display all errors at once instead of one at a time.
- *
- * @param {Object}   values             - The raw assay configuration object.
- * @param {string}   values.assayName   - Name / ID of the experiment.
- * @param {string[]} values.genotypes   - Array of genotype labels.
- * @param {number}   values.isi         - Inter-stimulus interval in seconds (> 0).
- * @param {number}   values.stimCount   - Total number of stimuli per run (> 0).
- * @param {number}   values.binSize     - Stimuli grouped per analysis bin (> 0).
- * @param {number}   values.temperature - Room temperature in °C.
- * @param {number}   values.humidity    - Relative humidity, 0–100 %.
- * @returns {{ isValid: boolean, errors: string[], warnings: string[] }}
- *   isValid  — true only when the errors array is empty.
- *   errors   — human-readable description of each failed validation check.
- *   warnings — non-blocking advisories (e.g. very short ISI) that do not
- *              prevent submission but are surfaced to the user as toasts.
- */
-/**
  * Normalises a genotype label for fuzzy duplicate comparison.
  * Strips: case, whitespace, hyphens (including Unicode dash variants),
  * underscores, and all remaining non-alphanumeric characters.
@@ -96,10 +77,29 @@
 export function normaliseGenotype(str) {
   return String(str)
     .toLowerCase()
-    .replace(/[\s\-_\u2010-\u2015\u2212]+/g, '')  // whitespace + hyphens (all Unicode dash variants)
-    .replace(/[^a-z0-9]/g, '');                    // strip remaining punctuation / symbols
+    .replace(/[\s\-_\u2010-\u2015\u2212]+/g, '')  // Whitespace + hyphens (all Unicode dash variants).
+    .replace(/[^a-z0-9]/g, '');                    // Strip remaining punctuation / symbols.
 }
 
+/**
+ * Validates the input parameters collected from the assay setup form.
+ * Returns a structured result rather than throwing, so the caller can
+ * display all errors at once instead of one at a time.
+ *
+ * @param {Object}   values             - The raw assay configuration object.
+ * @param {string}   values.assayName   - Name / ID of the experiment.
+ * @param {string[]} values.genotypes   - Array of genotype labels.
+ * @param {number}   values.isi         - Inter-stimulus interval in seconds (> 0).
+ * @param {number}   values.stimCount   - Total number of stimuli per run (> 0).
+ * @param {number}   values.binSize     - Stimuli grouped per analysis bin (> 0).
+ * @param {number}   values.temperature - Room temperature in \u00b0C.
+ * @param {number}   values.humidity    - Relative humidity, 0\u2013100 %.
+ * @returns {{ isValid: boolean, errors: string[], warnings: string[] }}
+ *   isValid  \u2014 true only when the errors array is empty.
+ *   errors   \u2014 human-readable description of each failed validation check.
+ *   warnings \u2014 non-blocking advisories (e.g. very short ISI) that do not
+ *              prevent submission but are surfaced to the user as toasts.
+ */
 export function validateInputs(values) {
   const errors   = [];
   const warnings = [];
@@ -219,6 +219,22 @@ export function generateAutoID() {
   return `touch_${year}-${month}-${day}_${hours}${minutes}`;
 }
 
+/**
+ * Formats a timestamp as a locale-aware date + hour:minute string, deliberately
+ * omitting seconds — these labels are browsed routinely (Saved Assays list,
+ * export metadata) where second-level precision is noise, not information.
+ *
+ * @param {number|null|undefined} timestamp - Unix timestamp (ms), or null/undefined.
+ * @returns {string} Formatted date/time, or a fallback string if timestamp is missing.
+ */
+export function formatDateTime(timestamp) {
+  if (timestamp == null) return "Unknown date";
+  return new Date(timestamp).toLocaleString(undefined, {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit"
+  });
+}
+
 
 /* ==========================================================================
    2. Data Processing & Statistics
@@ -243,13 +259,13 @@ export function generateAutoID() {
  * @returns {number[]} Percentage per bin (0–100), ordered chronologically.
  */
 export function binRunValues(values, binSize) {
-  // Guard against null/undefined values (e.g. from a partially-written DB record)
+  // Guard against null/undefined values (e.g. from a partially-written DB record).
   if (!values || !Array.isArray(values)) return [];
 
   const totalValues = values.length;
   const remainder   = totalValues % binSize;
 
-  // Determine how many values can be cleanly binned
+  // Determine how many values can be cleanly binned.
   let usableCount = totalValues;
   if (remainder !== 0) {
     usableCount = totalValues - remainder;
@@ -265,7 +281,7 @@ export function binRunValues(values, binSize) {
   for (let i = 0; i < usableValues.length; i += binSize) {
     const bin        = usableValues.slice(i, i + binSize);
     const sum        = bin.reduce((acc, v) => acc + v, 0);
-    // Use bin.length (not binSize) so partial bins are handled correctly
+    // Use bin.length (not binSize) so partial bins are handled correctly.
     const percentage = (sum / bin.length) * 100;
     binnedPercentages.push(percentage);
   }
@@ -330,8 +346,6 @@ export function escapeHTML(str) {
     .replace(/"/g,  "&quot;")
     .replace(/'/g,  "&#39;");
 }
-
-
 
 /**
  * Flattens all runs from all trials in an assay into a single array,

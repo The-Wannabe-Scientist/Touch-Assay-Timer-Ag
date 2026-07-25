@@ -10,10 +10,9 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
-  <!-- Inter font for premium typography -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+  <!-- IBM Plex Sans / Mono are self-hosted (fonts/*.woff2, declared in styles.css)
+       rather than loaded from Google Fonts — keeps typography fully available
+       offline instead of silently falling back once the CDN is unreachable. -->
 
   <link rel="stylesheet" href="styles.css">
   <link rel="manifest" href="manifest.json">
@@ -93,7 +92,7 @@
     </div>
   </header>
 
-  <!-- #5: "Recording in progress" banner — shown only during active runs via CSS -->
+  <!-- "Recording in progress" banner — shown only during active runs via CSS -->
   <div id="runBanner" aria-live="assertive" aria-atomic="true">
     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
          stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
@@ -104,7 +103,7 @@
     Recording in progress — leaving or backgrounding this page will stop the current run.
   </div>
 
-  <!-- #9: Persistent storage-unavailable warning -->
+  <!-- Persistent storage-unavailable warning -->
   <div id="idbWarningBanner" hidden aria-live="assertive">
     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
          stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
@@ -136,7 +135,7 @@
           <!-- Hidden input keeps comma-list value; main.js reads this via .value.split(',') -->
           <!-- `required` here is picked up by formatRequiredLabels() to show the * asterisk;
                type="hidden" inputs are exempt from browser constraint validation so this
-               does NOT block form submission (HTML spec §4.10.18.5). (BUG-9 fix) -->
+               does NOT block form submission (HTML spec §4.10.18.5). -->
           <input type="hidden" id="genotypes" required>
 
           <div class="chip-input-wrapper" id="chipInputWrapper" role="group" aria-labelledby="genotypeInputLabel">
@@ -286,12 +285,12 @@
     <section id="exportScreen">
       <h2>Assay Export</h2>
 
-      <!-- #14: Per-trial summary card, populated by JS after finishTrial -->
+      <!-- Per-trial summary card, populated by JS after finishTrial -->
       <div id="trialSummaryCard" hidden></div>
 
       <p>Select datasets to include in the export.</p>
 
-      <!-- 3.4: Touch Index exclusion warning — populated by JS in populateExportDatasetList() -->
+      <!-- Touch Index exclusion warning — populated by JS in populateExportDatasetList() -->
       <p id="tiExclusionWarning" class="warning" hidden></p>
 
       <fieldset>
@@ -476,25 +475,33 @@
         <div class="voice-option-grid">
           <label class="voice-option-card" for="voiceTick">
             <input type="radio" id="voiceTick" name="voiceMode" value="tick" checked>
-            <span class="voice-option-icon" aria-hidden="true">🔔</span>
+            <span class="voice-option-icon" aria-hidden="true">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            </span>
             <span class="voice-option-title">Tick</span>
             <span class="voice-option-desc">A beep plays on every stimulus</span>
           </label>
           <label class="voice-option-card" for="voiceCount">
             <input type="radio" id="voiceCount" name="voiceMode" value="count">
-            <span class="voice-option-icon" aria-hidden="true">🔢</span>
+            <span class="voice-option-icon" aria-hidden="true">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
+            </span>
             <span class="voice-option-title">Count</span>
             <span class="voice-option-desc">Stimulus number spoken aloud every interval</span>
           </label>
           <label class="voice-option-card" for="voiceBins">
             <input type="radio" id="voiceBins" name="voiceMode" value="bins">
-            <span class="voice-option-icon" aria-hidden="true">📦</span>
+            <span class="voice-option-icon" aria-hidden="true">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4a2 2 0 0 0 1-1.73Z"/><path d="M3.3 7 12 12l8.7-5"/><path d="M12 22V12"/></svg>
+            </span>
             <span class="voice-option-title">Bins</span>
             <span class="voice-option-desc">Tick every stimulus; speak at bin boundaries</span>
           </label>
           <label class="voice-option-card" for="voiceTens">
             <input type="radio" id="voiceTens" name="voiceMode" value="tens">
-            <span class="voice-option-icon" aria-hidden="true">🔟</span>
+            <span class="voice-option-icon" aria-hidden="true">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+            </span>
             <span class="voice-option-title">Tens</span>
             <span class="voice-option-desc">Spoken every 10th stimulus; tick in between</span>
           </label>
@@ -980,9 +987,9 @@
   <script>
   // Chip / tag input for the Genotypes field.
   // Wraps the visible text input and hidden comma-list input so users can type
-  // Genotype labels one at a time. Each label becomes a removable chip tag.
+  // genotype labels one at a time. Each label becomes a removable chip tag.
   // The hidden `#genotypes` input always holds the canonical comma-separated list
-  // That main.js reads on form submit.
+  // that main.js reads on form submit.
   (function () {
     const wrapper    = document.getElementById('chipInputWrapper');
     const chipList   = document.getElementById('chipList');
@@ -1153,9 +1160,9 @@
         syncHidden();
         updateGenotypeMaxHint();
         // Notify main.js's scheduleDraftSave listener so the updated genotype list
-        // Is persisted to localStorage. Without this dispatch, removing a chip here
-        // Only updates the hidden input value in memory — the draft is never written,
-        // So the removed chip reappears on the next page load.
+        // is persisted to localStorage. Without this dispatch, removing a chip here
+        // only updates the hidden input value in memory — the draft is never written,
+        // so the removed chip reappears on the next page load.
         hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
       });
 
@@ -1242,15 +1249,13 @@
     });
 
     function getDragAfterElement(container, x, y) {
-      // BUG-4 fix: the previous algorithm used Math.abs(distanceY) < box.height to
-      // filter candidates, which silently excluded chips on a different flex-wrap row
-      // from the one the cursor was on. Cross-row drags therefore always fell through
-      // to appendChild (insert at end) instead of the correct insertion point.
-      //
-      // New strategy: a chip is a valid "insert before" candidate if:
+      // A chip is a valid "insert before" candidate if:
       //   (a) the cursor is on the same row as the chip AND to the left of its center, OR
       //   (b) the chip's row is entirely below the cursor (cursor is above this chip).
-      // Among all candidates, pick the nearest one by 2D distance.
+      // Among all candidates, pick the nearest one by 2D distance. (A simpler
+      // same-row-only check would silently exclude chips on a different
+      // flex-wrap row, making cross-row drags always fall through to
+      // appendChild instead of the correct insertion point.)
       const draggableElements = [...container.querySelectorAll('.chip:not(.dragging)')];
       let closest = { distance: Number.POSITIVE_INFINITY, element: null };
       for (const child of draggableElements) {
@@ -1268,10 +1273,10 @@
           }
         }
       }
-      return closest.element;  // null → append to end (BUG-U5 fix preserved)
+      return closest.element;  // null → append to end
     }
 
-    // BUG-J fix: Expose chip manipulation functions to main.js so restoreSetupDraft()
+    // Expose chip manipulation functions to main.js so restoreSetupDraft()
     // does not need to duplicate DOM creation and hidden input synchronization logic.
     window.ChipInput = {
       addChip,
@@ -1288,7 +1293,7 @@
   // Each button carries `data-target` (the ID of the linked <input>) and
   // `data-delta` (the signed amount to add on each click, e.g. +1 or -0.1).
   // After updating the value the handler fires both `input` and `change`
-  // Events so downstream listeners (e.g. bin-warning recalculation) respond.
+  // events so downstream listeners (e.g. bin-warning recalculation) respond.
   document.querySelectorAll('.stepper-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var target = document.getElementById(btn.dataset.target);
@@ -1306,7 +1311,7 @@
 
   // Theme toggle button in the header (quick-access light/dark switch).
   // Syncs with both the Settings-screen radio group and the OS prefers-color-scheme
-  // Media query on first load. Persists the choice to localStorage under the key
+  // media query on first load. Persists the choice to localStorage under the key
   // 'touchAssayTheme' — the same key main.js reads in initializeSettings().
   (function () {
     var btn      = document.getElementById('themeToggleBtn');
@@ -1337,9 +1342,9 @@
       // Use the same localStorage key as main.js
       try { localStorage.setItem('touchAssayTheme', next); } catch(e) {}
       // Do NOT dispatch a synthetic 'change' event on the radio here.
-      // ApplyTheme() already sets data-theme, meta theme-color, and radio.checked.
+      // applyTheme() already sets data-theme, meta theme-color, and radio.checked.
       // Dispatching 'change' would additionally trigger the main.js Settings radio
-      // Listener, causing duplicate localStorage writes and DOM mutations.
+      // listener, causing duplicate localStorage writes and DOM mutations.
     });
 
     // Keep icon in sync when Settings radios are changed by the user
@@ -1349,7 +1354,7 @@
       });
     });
 
-    // #29: On first load, fall back to OS prefers-color-scheme when no preference is saved
+    // On first load, fall back to OS prefers-color-scheme when no preference is saved
     var saved = (function() { try { return localStorage.getItem('touchAssayTheme'); } catch(e) { return null; } })();
     if (!saved && window.matchMedia) {
       saved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -1369,7 +1374,7 @@
               if (!newWorker) return;
               newWorker.addEventListener('statechange', () => {
                 if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                  // BUG-U4 fix: guard the reload action so it cannot fire mid-run.
+                  // Guard the reload action so it cannot fire mid-run.
                   // document.body carries the CSS state class (e.g. "state-running")
                   // set by setState() in main.js — no import needed here.
                   const reloadAction = () => {

@@ -14,6 +14,12 @@
  *
  * State-transition helpers mutate the passed object in place and are
  * guarded against operating on already-transitioned objects.
+ *
+ * Sections:
+ *   1. Internal Helpers
+ *   2. Model Factories
+ *   3. State Transition Helpers
+ *   4. Query Helpers
  */
 
 /**
@@ -23,7 +29,7 @@
  */
 
 /* ==========================================================================
-   Internal Helpers
+   1. Internal Helpers
    ========================================================================== */
 
 /**
@@ -39,14 +45,14 @@ function generateUniqueId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
     return crypto.randomUUID();
   }
-  // Fallback for older browsers without crypto.randomUUID
+  // Fallback for older browsers without crypto.randomUUID.
   const randomSuffix = Math.floor(Math.random() * 1_000_000_000);
   return `${Date.now()}_${randomSuffix}`;
 }
 
 
 /* ==========================================================================
-   Model Factories
+   2. Model Factories
    ========================================================================== */
 
 /**
@@ -75,7 +81,7 @@ export function createAssay({ assayName, isi, stimCount, binSize, temperature, h
     temperature,
     humidity,
     genotypes,
-    trials: []           // Populated progressively as trials are created
+    trials: []           // Populated progressively as trials are created.
   };
 }
 
@@ -91,11 +97,11 @@ export function createTrial(trialIndex) {
   return {
     trialId:         generateUniqueId(),
     trialIndex,
-    status:          "active",  // "active" | "completed" | "abandoned"
+    status:          "active",  // "active" | "completed" | "abandoned".
     abandonedReason: null,
     startedAt:       Date.now(),
     endedAt:         null,
-    runs:            []         // Populated as runs are started within this trial
+    runs:            []         // Populated as runs are started within this trial.
   };
 }
 
@@ -115,11 +121,11 @@ export function createRun({ genotype, animalIndex, expectedStimCount }) {
     genotype,
     animalIndex,
     expectedStimCount,
-    values:                    [],    // Filled during the run: 1 = responded, 0 = did not respond
-    status:                    "active",  // "active" | "completed" | "stoppedEarly" | "abandoned"
-    eligibleForAnalysis:       null,  // Effective eligibility — may be manually overridden (see below)
-    ineligibleReason:          null,  // Human-readable reason when eligibleForAnalysis is false
-    partialBinWarning:         null,  // Set if stimulus count is not an exact multiple of binSize
+    values:                    [],    // Filled during the run: 1 = responded, 0 = did not respond.
+    status:                    "active",  // "active" | "completed" | "stoppedEarly" | "abandoned".
+    eligibleForAnalysis:       null,  // Effective eligibility — may be manually overridden (see below).
+    ineligibleReason:          null,  // Human-readable reason when eligibleForAnalysis is false.
+    partialBinWarning:         null,  // Set if stimulus count is not an exact multiple of binSize.
     touchIndexExcluded:        false,
     touchIndexExclusionReason: null,
     // Snapshot of the AUTOMATIC eligibility determination, captured once when
@@ -129,7 +135,7 @@ export function createRun({ genotype, animalIndex, expectedStimCount }) {
     autoIneligibleReason:      null,
     // Manual override — set via the progress table's eligibility toggle.
     manuallyOverridden:        false,
-    overrideReason:            null,  // Optional free-text note from the user (not mandatory)
+    overrideReason:            null,  // Optional free-text note from the user (not mandatory).
     overrideAt:                null,
     startedAt:                 Date.now(),
     endedAt:                   null
@@ -138,7 +144,7 @@ export function createRun({ genotype, animalIndex, expectedStimCount }) {
 
 
 /* ==========================================================================
-   State Transition Helpers
+   3. State Transition Helpers
    ========================================================================== */
 
 /**
@@ -181,7 +187,7 @@ export function completeRun(run) {
 
 
 /* ==========================================================================
-   Query Helpers
+   4. Query Helpers
    ========================================================================== */
 
 /**

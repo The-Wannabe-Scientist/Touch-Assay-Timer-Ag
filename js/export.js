@@ -28,7 +28,8 @@ import {
   computeTouchIndexBins,
   collectPooledRuns,
   collectTouchIndexExclusions,
-  escapeHTML
+  escapeHTML,
+  formatDateTime
 } from "./utils.js";
 
 /**
@@ -80,16 +81,16 @@ export const RUN_STATUS_LABELS = {
  * @returns {Object.<string, Object[]>} Map of genotype → sorted run array.
  */
 function groupAndSortRuns(runs, genotypes, isPooled = false) {
-  // Initialise empty arrays for every declared genotype
+  // Initialise empty arrays for every declared genotype.
   const runsByGenotype = {};
   genotypes.forEach(g => { runsByGenotype[g] = []; });
 
-  // Assign each run to its genotype bucket
+  // Assign each run to its genotype bucket.
   runs.forEach(run => {
     if (runsByGenotype[run.genotype]) runsByGenotype[run.genotype].push(run);
   });
 
-  // Sort and (for pooled views) assign a sequential global animal index
+  // Sort and (for pooled views) assign a sequential global animal index.
   genotypes.forEach(g => {
     if (isPooled) {
       runsByGenotype[g].sort((a, b) =>
@@ -134,6 +135,20 @@ function formatOverrideNote(run) {
     : `auto: ${run.autoIneligibleReason ?? "ineligible"}`;
   const notePart = run.overrideReason ? ` — ${run.overrideReason}` : "";
   return `Manually marked ${run.eligibleForAnalysis ? "ELIGIBLE" : "INELIGIBLE"} (${autoPart})${notePart}`;
+}
+
+/**
+ * True if every cell after the row label is blank. Used to drop optional QC
+ * descriptor rows (Partial Bin Warning / Ineligible Reason / Manual Override)
+ * entirely when nothing in the trial/pool actually has one — otherwise they
+ * render as full header-styled rows with nothing in them in the common
+ * (no-issues) case, in every raw/binned/TI sheet and the preview modal.
+ *
+ * @param {any[]} row - A header/descriptor row, e.g. ["Manual Override", "", "", ...].
+ * @returns {boolean}
+ */
+function isDescriptorRowEmpty(row) {
+  return row.slice(1).every(cell => cell === "" || cell == null);
 }
 
 /**
@@ -229,8 +244,8 @@ export function buildMetadata2D(assay) {
   return [
     ["Parameter",                    "Value"],
     ["Experiment ID",                assay.assayName],
-    ["Date Created",                 new Date(assay.createdAt).toLocaleString()],
-    ["Last Modified",                assay.lastModifiedAt ? new Date(assay.lastModifiedAt).toLocaleString() : "N/A"],
+    ["Date Created",                 formatDateTime(assay.createdAt)],
+    ["Last Modified",                assay.lastModifiedAt ? formatDateTime(assay.lastModifiedAt) : "N/A"],
     ["Genotypes",                    assay.genotypes.join(", ")],
     ["Temperature",                  assay.temperature !== undefined ? `${assay.temperature} °C` : "N/A"],
     ["Humidity",                     assay.humidity    !== undefined ? `${assay.humidity} % RH`  : "N/A"],
@@ -276,8 +291,9 @@ export function buildHtmlTableFrom2D(title, data2D) {
 
     html += "<tr>";
     row.forEach(cell => {
-      const content      = (cell === null || cell === undefined || cell === "") ? "" : cell;
-      const displayValue = typeof content === "number"
+      const content  = (cell === null || cell === undefined || cell === "") ? "" : cell;
+      const isNumeric = typeof content === "number";
+      const displayValue = isNumeric
         // Numeric values are converted via String() before being placed
         // in innerHTML. Number-derived strings cannot contain HTML-injectable characters
         // (only digits, '.', '-', 'e') so this path is safe. The String() wrapper is
@@ -287,9 +303,13 @@ export function buildHtmlTableFrom2D(title, data2D) {
 
       // Header cells: first row, or rows starting with a known header/descriptor label
       const isHeaderRow = rowIndex === 0 || HTML_PREVIEW_HEADER_LABELS.has(row[0]);
+      // Numeric data (raw 0/1 grid, bin %, mean/SEM/N) gets the mono/tabular
+      // treatment and stays centered; text values (genotype names, dates,
+      // reasons) are left-aligned instead of centered — long strings like
+      // "N2, mec-4(u253), unc-13" or a full timestamp read oddly centered.
       html += isHeaderRow
         ? `<th>${displayValue}</th>`
-        : `<td>${displayValue}</td>`;
+        : `<td class="${isNumeric ? "cell-numeric" : "cell-text"}">${displayValue}</td>`;
     });
     html += "</tr>";
   });
@@ -386,7 +406,12 @@ export function buildTrialRaw2D(trial, assay) {
     rows.push(row);
   }
 
-  return [headerGenotype, headerAnimal, headerStatus, headerPartialBin, headerIneligible, headerOverride, ...rows];
+  // Drop the optional QC rows entirely when nothing in this trial actually
+  // has one — the common case — instead of rendering empty header-styled rows.
+  const optionalHeaders = [headerPartialBin, headerIneligible, headerOverride]
+    .filter(row => !isDescriptorRowEmpty(row));
+
+  return [headerGenotype, headerAnimal, headerStatus, ...optionalHeaders, ...rows];
 }
 
 /**
@@ -469,8 +494,12 @@ export function buildTrialBinned2D(trial, assay) {
   // detection sees a consistent row length.
   const _sep = Array(headerGenotype.length).fill("");
 
+  // Drop the Manual Override row entirely when nothing in this trial was
+  // overridden — the common case — instead of an empty header-styled row.
+  const optionalHeaders = [headerOverride].filter(row => !isDescriptorRowEmpty(row));
+
   return [
-    headerGenotype, headerAnimal, headerStatus, headerOverride,
+    headerGenotype, headerAnimal, headerStatus, ...optionalHeaders,
     ...rawRows,
     _sep, _sep, _sep,
     summaryHeader,
@@ -539,7 +568,8 @@ export function buildTrialTouchIndexBinned2D(trial, assay) {
     rows.push(row);
   }
 
-  return [headerGenotype, headerAnimal, headerOverride, ...rows];
+  const optionalHeaders = [headerOverride].filter(row => !isDescriptorRowEmpty(row));
+  return [headerGenotype, headerAnimal, ...optionalHeaders, ...rows];
 }
 
 /**
@@ -663,7 +693,8 @@ export function buildPooledRaw2D(assay, options = {}, _runs = null) {
     rows.push(row);
   }
 
-  return [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hPartialBin, hIneligible, hOverride, ...rows];
+  const optionalHeaders = [hPartialBin, hIneligible, hOverride].filter(row => !isDescriptorRowEmpty(row));
+  return [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, ...optionalHeaders, ...rows];
 }
 
 /**
@@ -756,8 +787,10 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
     summaryRows.push(sumRow);
   }
 
+  const optionalHeaders = [hOverride].filter(row => !isDescriptorRowEmpty(row));
+
   return [
-    hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hOverride,
+    hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, ...optionalHeaders,
     ...rawRows,
     // Separator rows must span the FULL header width (all run columns
     // plus the spacer columns between genotypes), not just the static header fields.
@@ -841,7 +874,8 @@ export function buildPooledTouchIndexBinned2D(assay, options = {}, _runs = null,
     rows.push(row);
   }
 
-  return [headerGenotype, headerAnimal, headerOverride, ...rows];
+  const optionalHeaders = [headerOverride].filter(row => !isDescriptorRowEmpty(row));
+  return [headerGenotype, headerAnimal, ...optionalHeaders, ...rows];
 }
 
 /**
@@ -971,7 +1005,7 @@ export function buildAllSections(assay, exportConfigs) {
       const xlSuffix = config.includeAbandoned ? "AllTrials"   : "CompletedTrials";
       const poolOpt  = { includeAbandoned: config.includeAbandoned };
 
-      // Collect runs once and build a shared binning cache for this config (#11)
+      // Collect runs once and build a shared binning cache for this config.
       const runs  = collectPooledRuns(assay, poolOpt);
       const cache = buildRunCache(runs, assay.binSize);
 
@@ -1107,7 +1141,7 @@ export function performCSVExport(currentAssay, exportConfigs) {
       });
     });
 
-    // Trigger file download — no DOM append/remove needed in modern browsers (#13)
+    // Trigger file download — no DOM append/remove needed in modern browsers.
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
