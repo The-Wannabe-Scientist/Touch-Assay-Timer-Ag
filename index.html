@@ -233,10 +233,35 @@
     </section>
     <section id="assayScreen">
       <header aria-label="Genotype selection">
+        <div id="genotypePicker" class="genotype-picker">
+          <!-- Segmented pills: only used on wide viewports when the assay has
+               few genotypes (see GENOTYPE_PILL_MAX in main.js). Hidden/empty
+               otherwise. -->
+          <div id="genotypePills" class="genotype-pills" role="group" aria-label="Select genotype" hidden></div>
+
+          <!-- Compact trigger: always used on narrow/touch viewports (any
+               genotype count), and on wide viewports once the count exceeds
+               GENOTYPE_PILL_MAX. Deliberately single-line/collapsed so it
+               never grows this header at the tap button's expense — see the
+               priority comment above #tapButton in styles.css. Opens
+               #genotypeOverlay on click. -->
+          <button id="genotypeTrigger" type="button" class="genotype-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="genotypeListbox" hidden>
+            <span id="genotypeTriggerDot" class="genotype-trigger-dot" aria-hidden="true" hidden></span>
+            <span id="genotypeTriggerLabel" class="genotype-trigger-label">Select Genotype</span>
+            <svg class="genotype-trigger-chevron" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+        </div>
+
+        <!-- Source of truth for the selected genotype; every other part of the
+             app reads/writes this element's value unchanged (see
+             renderGenotypePicker() in main.js). Removed from sight and from
+             the accessibility tree — #genotypePicker above is the control
+             users and screen readers actually interact with. -->
         <label for="genotypeSelect" class="visually-hidden">Select Genotype</label>
-        <select id="genotypeSelect" aria-required="true"> 
-          <option value="" disabled selected>Select Genotype</option>     
+        <select id="genotypeSelect" aria-required="true" aria-hidden="true" tabindex="-1" class="visually-hidden">
+          <option value="" disabled selected>Select Genotype</option>
         </select>
+
         <button id="toggleProgress" type="button" aria-pressed="true">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="toggle-progress-icon-eye"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="toggle-progress-icon-eye-off" hidden><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
@@ -245,7 +270,16 @@
           <span id="progressRunBadge" class="progress-run-badge" hidden></span>
         </button>
       </header>
-      
+
+      <!-- Genotype list overlay: renders as an anchored dropdown panel on wide
+           viewports, or a full-width bottom sheet on narrow viewports (mode
+           chosen in main.js, matching the app's existing 769px breakpoint).
+           Options wrap rather than truncate — see main.js/styles.css comments
+           on why end-truncation is unsafe for allele-style genotype names. -->
+      <div id="genotypeOverlay" class="genotype-overlay" hidden>
+        <div id="genotypeListbox" class="genotype-panel" role="menu" aria-label="Select genotype"></div>
+      </div>
+
       <div id="tapZone">
         <div id="liveProgress" class="live-progress">
           Stimulus: <span id="currentStimDisplay">0</span> / <span id="totalStimDisplay">100</span>

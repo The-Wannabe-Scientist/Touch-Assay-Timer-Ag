@@ -228,20 +228,6 @@ try {
   if (!isNaN(_stored)) speechLeadMs = Math.max(0, Math.min(490, _stored));
 } catch { /* Private browsing or sandboxed iframe — use default */ }
 
-/**
- * How many stimuli were recorded at the time of the last IDB batch save.
- * Used to decide when to flush: save when (currentIndex - lastSave) >= BATCH_SIZE.
- * @type {number}
- */
-let lastBatchSaveIndex = 0;
-
-/**
- * Number of stimuli between periodic IDB saves during a run.
- * Reduces write frequency from every tick to every N stimuli (~90% fewer writes).
- * @type {number}
- */
-const BATCH_SAVE_INTERVAL = 10;
-
 /** @type {number|null} requestAnimationFrame handle for the visual metronome bar. */
 let visualAnimationFrame = null;
 
@@ -432,6 +418,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       temperature:     document.getElementById("temperature"),
       humidity:        document.getElementById("humidity"),
       genotypeSelect:  document.getElementById("genotypeSelect"),
+      genotypePicker:      document.getElementById("genotypePicker"),
+      genotypePills:       document.getElementById("genotypePills"),
+      genotypeTrigger:     document.getElementById("genotypeTrigger"),
+      genotypeTriggerDot:  document.getElementById("genotypeTriggerDot"),
+      genotypeTriggerLabel: document.getElementById("genotypeTriggerLabel"),
+      genotypeOverlay:     document.getElementById("genotypeOverlay"),
+      genotypeListbox:     document.getElementById("genotypeListbox"),
       selectAllAssays:  document.getElementById("selectAllAssays"),
       exportSelectAll:  document.getElementById("exportSelectAll"),
       importBackupFile: document.getElementById("importBackupInput"),
@@ -517,6 +510,45 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   };
 
+  // Genotype picker constants — declared here (as `const`, not hoisted like
+  // the `function` declarations below) because setState(STATES.SETUP) in the
+  // initialisation sequence just below already calls into
+  // renderGenotypePicker() → assignGenotypeColors() on the very first paint.
+  // Declaring these after that call would throw a temporal-dead-zone
+  // ReferenceError before the app ever renders.
+
+  /** @type {number} Above this genotype count, pills give way to the trigger+panel even on wide viewports — keeps the common small-N case fast without letting a long list wrap into multiple header rows. */
+  const GENOTYPE_PILL_MAX = 5;
+
+  /**
+   * Matches the app's existing desktop breakpoint (see #tapButton in
+   * styles.css). Narrow (no match) always uses the collapsed trigger, per
+   * the #tapButton space-priority comment in styles.css — the picker must
+   * never grow the header at the tap button's expense.
+   * @type {MediaQueryList}
+   */
+  const GENOTYPE_WIDE_MQ = window.matchMedia("(min-width: 769px)");
+
+  /**
+   * Fixed categorical palette for genotype color accents. Order matters:
+   * assignGenotypeColors() walks this in order and only reaches for the
+   * adjacency-guard fallback when two consecutive genotypes would otherwise
+   * land on visually similar entries.
+   * @type {string[]}
+   */
+  const GENOTYPE_COLOR_PALETTE = [
+    "#2563eb", // blue
+    "#dc2626", // red
+    "#059669", // green
+    "#d97706", // amber
+    "#7c3aed", // violet
+    "#db2777", // pink
+    "#0891b2", // cyan
+    "#65a30d", // lime
+    "#9333ea", // purple
+    "#ea580c"  // orange
+  ];
+
 
   /* -----------------------------------------------------------------------
      Initialisation Sequence
@@ -585,6 +617,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Buttons.stopRun.disabled        = true;
         UI.Buttons.finishTrial.disabled    = true;
         UI.Inputs.genotypeSelect.innerHTML = "";
+        renderGenotypePicker([]);
         UI.Displays.tapLabel.textContent   = "Select Genotype to Start";
         break;
 
@@ -635,6 +668,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         // All controls remain as-is; export screen CSS handles visibility
         break;
     }
+
+    // Every branch above may have just changed #genotypeSelect.disabled;
+    // keep the custom picker's pills/trigger in sync without a full rebuild.
+    syncGenotypePickerEnabled();
   }
 
 
@@ -817,7 +854,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     tapTimestamps           = [];
     tapReadIndex            = 0;
     lastSchedulerTime       = 0;
-    lastBatchSaveIndex      = 0;
 
     const t0 = getAudioTime();
     const startTime = t0 + 0.5;  // 500ms warm-up delay
@@ -861,7 +897,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    *   Step 2: DATA RECORDING
    *     Fires at the closing of each stimulus window.
    *     Checks whether a tap occurred during that interval and records 0 or 1.
-   *     Batch-saves to IDB every BATCH_SAVE_INTERVAL stimuli.
+   *     No IDB write happens here — see the no-mid-run-save note below.
    *     Triggers run completion when all stimuli are recorded.
    *
    *   Step 3: AUDIO PRE-SCHEDULING
@@ -982,6 +1018,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Encoding:
       //   1 = animal responded (default — experimenter did NOT tap)
       //   0 = animal did not respond (experimenter tapped to record non-response)
+      //
+      // Intentionally binary: the touch-assay readout itself is a response/
+      // no-response call, not a reaction-time measurement, so the tap's exact
+      // timestamp (tapTimestamps[]) is only used to test window membership
+      // above and is discarded once consumed. It is never stored per-stimulus
+      // or exported — there is no "response latency" to capture here.
       run.values.push(tapOccurred ? 0 : 1);
 
       // Reset visual "bucket fulfilled" indicators for the next interval
@@ -994,19 +1036,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       currentStimulusIndex++;
       nextDataIntervalTime += runISI;
 
-      // Batch save: flush to IDB periodically to reduce transaction overhead.
-      // Index updated *after* increment so the count reflects stimuli fully recorded.
-      if (currentStimulusIndex - lastBatchSaveIndex >= BATCH_SAVE_INTERVAL) {
-        // guard against trial being null — getActiveTrial() can return null
-        // if the trial was completed or abandoned via another code path.
-        const trial = getActiveTrial(currentAssay);
-        if (trial) {
-          saveRun(currentAssay.assayId, trial.trialId, run).catch(err =>
-            console.error("Batch save failed:", err)
-          );
-          lastBatchSaveIndex = currentStimulusIndex;
-        }
-      }
+      // No IDB write here, by design: this loop runs on the AudioContext-clocked
+      // hot path and is the one place where timing precision matters most, so it
+      // must never risk a main-thread stall from a periodic write or the
+      // background-tab throttling IDB transactions can trigger. A run's values
+      // live only in memory until it ends (completeRunNormally / stopRunEarly),
+      // both of which persist immediately. The tradeoff: a hard crash mid-run
+      // (tab kill, OS crash, power loss — not a clean backgrounding, which the
+      // visibilitychange handler below already flushes) loses that one run's
+      // in-progress data. Accepted deliberately — a single animal is cheap to
+      // re-run, unlike a precision regression across every run.
 
       // Check if all stimuli for this run are recorded
       if (run.values.length === run.expectedStimCount) {
@@ -1370,6 +1409,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // ── Route the action ──────────────────────────────────────────────────
     if (currentState === STATES.RUNNING) {
+      // No "undo last tap" is offered by design: at typical ISIs (~1 Hz) a
+      // confirmation affordance would itself eat into the next stimulus
+      // window, and by the time a misfire is noticed the window it belongs
+      // to has usually already closed and been scored (see the data-recording
+      // pass below). Correcting a bad run means stopping/discarding it, not
+      // patching a single tap.
       // Record the tap's AudioContext timestamp for the data recording layer
       tapTimestamps.push(getAudioTime());
       armbandTap();  // mirror navigator.vibrate(50) on the armband
@@ -1828,12 +1873,99 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  /* -----------------------------------------------------------------------
+     Genotype Picker (custom UI over the hidden #genotypeSelect)
+
+     #genotypeSelect (the native <select>) remains the single source of truth
+     for the selected value — every other part of the app reads/writes it
+     exactly as before. Everything below is a purely visual/interaction layer
+     that mirrors it: renderGenotypePicker() rebuilds the on-screen control
+     from the same (genotypes, trial) data populateGenotypeSelect() already
+     computes, and selectGenotype() writes back to the hidden select and
+     dispatches a "change" event so existing listeners fire unchanged.
+
+     Two display modes (see the CSS comment above .genotype-pills):
+       - Pills:            wide viewport, genotype count <= GENOTYPE_PILL_MAX.
+       - Trigger + panel:  narrow viewport (always), or wide viewport beyond
+                            GENOTYPE_PILL_MAX. Panel renders as an anchored
+                            dropdown on wide viewports, a bottom sheet on
+                            narrow ones.
+  ----------------------------------------------------------------------- */
+
+  /**
+   * Euclidean distance between two "#rrggbb" colors in RGB space (0-441).
+   * Not a perceptual color-difference model (e.g. CIEDE2000) — a coarse
+   * heuristic is enough here since the goal is only to catch two colors
+   * that would obviously look alike side by side, not to guarantee
+   * colorblind-safe contrast (not a requirement for this app).
+   * @param {string} hexA
+   * @param {string} hexB
+   * @returns {number}
+   */
+  function colorDistance(hexA, hexB) {
+    const a = parseInt(hexA.slice(1), 16);
+    const b = parseInt(hexB.slice(1), 16);
+    const dr = ((a >> 16) & 0xff) - ((b >> 16) & 0xff);
+    const dg = ((a >> 8)  & 0xff) - ((b >> 8)  & 0xff);
+    const db = (a         & 0xff) - (b         & 0xff);
+    return Math.sqrt(dr * dr + dg * dg + db * db);
+  }
+
+  /**
+   * Assigns a stable color to each genotype, in entry order, with a greedy
+   * adjacency guard: if a genotype's default palette color would be too
+   * similar to its immediate neighbor's, swap in a palette color that is
+   * sufficiently distinct from both neighbors instead.
+   *
+   * Deterministic given the same genotypes array — since genotype order
+   * never changes mid-trial (only run counts do), this naturally stays
+   * stable across every re-render without needing an explicit cache.
+   *
+   * No index numbers are added alongside color — deliberately: genotype
+   * labels here are already dense (allele-style names), and a serial number
+   * would add clutter without meaningfully improving disambiguation.
+   *
+   * @param {string[]} genotypes
+   * @returns {Map<string, string>} genotype label -> "#rrggbb" color.
+   */
+  function assignGenotypeColors(genotypes) {
+    const MIN_DISTANCE = 90; // heuristic threshold, out of a max ~441
+    const palette  = GENOTYPE_COLOR_PALETTE;
+    const assigned = genotypes.map((_, i) => palette[i % palette.length]);
+
+    for (let i = 1; i < assigned.length; i++) {
+      const prev = assigned[i - 1];
+      if (colorDistance(assigned[i], prev) >= MIN_DISTANCE) continue;
+
+      const next = i + 1 < assigned.length ? assigned[i + 1] : null;
+      const candidate = palette.find(c =>
+        colorDistance(c, prev) >= MIN_DISTANCE &&
+        (next === null || colorDistance(c, next) >= MIN_DISTANCE)
+      );
+      // If the palette is too small relative to genotype count, no
+      // sufficiently-distinct candidate may exist — best-effort only, leave
+      // the original assignment rather than throwing.
+      if (candidate) assigned[i] = candidate;
+    }
+
+    const map = new Map();
+    genotypes.forEach((g, i) => map.set(g, assigned[i]));
+    return map;
+  }
+
   /**
    * Rebuilds the genotype selection dropdown with current run counts.
    * The count shows how many runs have been completed (non-active) for each genotype
    * in the current trial, giving the experimenter live feedback.
    *
    * Restores the previously selected value after rebuilding.
+   *
+   * Genotype labels are shown as entered and listed in entry order, by design:
+   * the experimenter must know which genotype/plate they are handling to place
+   * the animal under the probe correctly, so blinding the label during scoring
+   * isn't workable for this assay. Likewise, testing order is left as entered
+   * rather than auto-randomized, since plate/genotype handling order is
+   * constrained by the physical bench setup, not just data-quality concerns.
    *
    * @param {string[]} genotypes - Ordered list of genotype labels.
    */
@@ -1862,6 +1994,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (previousValue && options.some(o => o.value === previousValue)) {
       UI.Inputs.genotypeSelect.value = previousValue;
     }
+
+    renderGenotypePicker(genotypes);
   }
 
   /**
@@ -1871,6 +2005,160 @@ document.addEventListener("DOMContentLoaded", async () => {
   function refreshGenotypeDropdownCounts() {
     if (!currentAssay) return;
     populateGenotypeSelect(currentAssay.genotypes);
+  }
+
+  /**
+   * Writes the chosen genotype back to the hidden #genotypeSelect (the
+   * actual source of truth) and dispatches a "change" event so every
+   * existing listener on it fires exactly as if the user had picked the
+   * option natively. Then closes the panel (if open) and re-renders the
+   * picker to reflect the new selection.
+   *
+   * @param {string} genotype
+   */
+  function selectGenotype(genotype) {
+    UI.Inputs.genotypeSelect.value = genotype;
+    UI.Inputs.genotypeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    closeGenotypeOverlay();
+    if (currentAssay) renderGenotypePicker(currentAssay.genotypes);
+  }
+
+  /**
+   * Positions the dropdown-mode panel directly below the trigger button,
+   * clamped so it never overflows the right edge or bottom of the viewport.
+   * Bottom-sheet mode (narrow viewports) uses fixed CSS positioning instead
+   * and does not call this.
+   */
+  function positionGenotypePanel() {
+    const trigger = UI.Inputs.genotypeTrigger;
+    const panel   = UI.Inputs.genotypeListbox;
+    const rect    = trigger.getBoundingClientRect();
+    const width   = Math.max(rect.width, 280);
+
+    panel.style.width    = `${width}px`;
+    panel.style.left     = `${Math.min(rect.left, window.innerWidth - width - 8)}px`;
+    panel.style.top      = `${rect.bottom + 6}px`;
+    panel.style.maxHeight = `${Math.max(160, window.innerHeight - rect.bottom - 16)}px`;
+  }
+
+  /** Opens the genotype panel and moves focus to the current selection (or the first option). */
+  function openGenotypeOverlay() {
+    if (UI.Inputs.genotypeTrigger.disabled) return;
+    const isWide = GENOTYPE_WIDE_MQ.matches;
+    UI.Inputs.genotypeOverlay.classList.toggle("genotype-overlay--sheet", !isWide);
+    UI.Inputs.genotypeOverlay.hidden = false;
+    UI.Inputs.genotypeTrigger.setAttribute("aria-expanded", "true");
+    if (isWide) positionGenotypePanel();
+
+    const current = UI.Inputs.genotypeListbox.querySelector('[aria-selected="true"]')
+                 || UI.Inputs.genotypeListbox.firstElementChild;
+    if (current) current.focus();
+  }
+
+  /** Closes the genotype panel, if open. Safe to call unconditionally. */
+  function closeGenotypeOverlay() {
+    UI.Inputs.genotypeOverlay.hidden = true;
+    UI.Inputs.genotypeTrigger.setAttribute("aria-expanded", "false");
+  }
+
+  /**
+   * Mirrors #genotypeSelect.disabled onto the custom picker's pills and
+   * trigger. setState() toggles the hidden select's .disabled directly
+   * (unchanged legacy behavior) without rebuilding the picker, so this is
+   * called once after every state transition to keep the two in sync.
+   */
+  function syncGenotypePickerEnabled() {
+    const disabled = UI.Inputs.genotypeSelect.disabled;
+    UI.Inputs.genotypeTrigger.disabled = disabled;
+    UI.Inputs.genotypePills.querySelectorAll("button").forEach(btn => { btn.disabled = disabled; });
+    if (disabled) closeGenotypeOverlay();
+  }
+
+  /**
+   * Rebuilds the custom on-screen genotype picker (pills or trigger+panel)
+   * to mirror the current genotypes/selection/disabled state of the hidden
+   * #genotypeSelect. Called every time populateGenotypeSelect() runs, so it
+   * always reflects the same data (run counts included).
+   *
+   * @param {string[]} genotypes
+   */
+  function renderGenotypePicker(genotypes) {
+    const selected = UI.Inputs.genotypeSelect.value;
+    const disabled = UI.Inputs.genotypeSelect.disabled;
+    const trial    = currentAssay ? getActiveTrial(currentAssay) : null;
+    const colors   = assignGenotypeColors(genotypes);
+
+    const eligibleCount = g => trial
+      ? trial.runs.filter(r => r.genotype === g && r.status === "completed" && r.eligibleForAnalysis).length
+      : 0;
+
+    const usePills = genotypes.length > 0
+                   && genotypes.length <= GENOTYPE_PILL_MAX
+                   && GENOTYPE_WIDE_MQ.matches;
+
+    UI.Inputs.genotypePills.hidden   = !usePills;
+    UI.Inputs.genotypeTrigger.hidden = usePills || genotypes.length === 0;
+
+    if (genotypes.length === 0) {
+      closeGenotypeOverlay();
+      return;
+    }
+
+    if (usePills) {
+      UI.Inputs.genotypePills.innerHTML = "";
+      genotypes.forEach(g => {
+        const btn = document.createElement("button");
+        btn.type      = "button";
+        btn.className = "genotype-pill";
+        btn.disabled  = disabled;
+        btn.setAttribute("aria-pressed", String(g === selected));
+        btn.style.setProperty("--genotype-color", colors.get(g));
+
+        const count = eligibleCount(g);
+        btn.innerHTML =
+          `<span class="genotype-pill-dot" aria-hidden="true"></span>` +
+          `<span>${escapeHTML(g)}</span>` +
+          (count > 0 ? `<span class="genotype-pill-count">${count}</span>` : "");
+        btn.addEventListener("click", () => selectGenotype(g));
+        UI.Inputs.genotypePills.appendChild(btn);
+      });
+      return;
+    }
+
+    // Trigger + panel mode — trigger reflects the current selection.
+    UI.Inputs.genotypeTrigger.disabled = disabled;
+    if (selected) {
+      UI.Inputs.genotypeTriggerDot.style.background = colors.get(selected);
+      UI.Inputs.genotypeTriggerDot.hidden = false;
+      UI.Inputs.genotypeTriggerLabel.textContent = selected;
+    } else {
+      UI.Inputs.genotypeTriggerDot.hidden = true;
+      UI.Inputs.genotypeTriggerLabel.textContent = "Select Genotype";
+    }
+
+    UI.Inputs.genotypeListbox.innerHTML = "";
+    genotypes.forEach(g => {
+      const opt = document.createElement("button");
+      opt.type      = "button";
+      opt.className = "genotype-option";
+      opt.setAttribute("role", "menuitemradio");
+      opt.setAttribute("aria-selected", String(g === selected));
+      opt.style.setProperty("--genotype-color", colors.get(g));
+
+      const count = eligibleCount(g);
+      opt.innerHTML =
+        `<span class="genotype-option-dot" aria-hidden="true"></span>` +
+        `<span class="genotype-option-label">${escapeHTML(g)}</span>` +
+        (count > 0 ? `<span class="genotype-option-count">${count} eligible</span>` : "");
+      opt.addEventListener("click", () => selectGenotype(g));
+      UI.Inputs.genotypeListbox.appendChild(opt);
+    });
+
+    // If the panel is currently open, refresh its position/size — the
+    // trigger's own width can change slightly when its label text changes.
+    if (!UI.Inputs.genotypeOverlay.hidden && GENOTYPE_WIDE_MQ.matches) {
+      positionGenotypePanel();
+    }
   }
 
   /**
@@ -2414,7 +2702,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     tapTimestamps          = [];
     tapReadIndex           = 0;
     lastSchedulerTime      = 0;
-    lastBatchSaveIndex     = 0;
     nextAudioScheduleTime  = 0.0;
     nextSpeechTime         = 0.0;
     nextDataIntervalTime   = 0.0;
@@ -2736,6 +3023,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Space bar shortcut ──────────────────────────────────────────────────
   document.addEventListener("keydown", event => {
+    // While the genotype panel is open, let Space/Enter/Tab behave natively
+    // on its focused option (selects it, via the browser's own button
+    // activation) instead of being hijacked below for the tap shortcut —
+    // the "Space always taps" rule that follows only makes sense once the
+    // user isn't actively mid-selection. Escape still needs to fall through
+    // so the check further below can close the panel.
+    if (!UI.Inputs.genotypeOverlay.hidden && event.key !== "Escape") return;
+
     // Prevent Space from scrolling the page while on the trial screen,
     // even during key-repeat (held key). Do this before the repeat-guard
     // so that a held Space never triggers a browser scroll.
@@ -2756,15 +3051,17 @@ document.addEventListener("DOMContentLoaded", async () => {
       const now = Date.now();
       if (lastEscapeTime > 0 && now - lastEscapeTime <= 2000) {
         // Second press within window — stop propagation so toast.js's global
-        // Escape listener doesn't fire after us and instantly dismiss the
-        // "Run cancelled" toast that stopRunEarly() is about to show.
+        // Escape listener doesn't fire after us and immediately dismiss
+        // whichever toast is newest once stopRunEarly() posts its own below.
         event.stopImmediatePropagation();
         lastEscapeTime = 0;
-        // dismissLatestToast() must come AFTER stopRunEarly() so it clears the
-        // "Press Esc again…" warning toast, not the "Run cancelled" toast that
-        // stopRunEarly() is about to post.  Order matters here.
-        stopRunEarly("Run stopped early by user");
+        // dismissLatestToast() dismisses whatever toast is currently newest,
+        // so it must come BEFORE stopRunEarly(): at this point the newest
+        // toast is still the "Press Esc again…" warning, so this clears that
+        // one. Calling it after stopRunEarly() would instead dismiss the
+        // "Run cancelled" toast that stopRunEarly() just posted.
         dismissLatestToast();
+        stopRunEarly("Run stopped early by user");
       } else {
         // First press — arm the confirmation
         lastEscapeTime = now;
@@ -2825,6 +3122,11 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Escape key closes preview modal, overlay screens, and overflow menu.
     if (event.key === "Escape") {
+      // 0. Close the genotype picker panel if open
+      if (!UI.Inputs.genotypeOverlay.hidden) {
+        closeGenotypeOverlay();
+        return;
+      }
       // 1. Close preview modal if open
       if (!UI.Displays.previewModal.hidden) {
         UI.Displays.previewModal.hidden = true;
@@ -3469,6 +3771,57 @@ document.addEventListener("DOMContentLoaded", async () => {
       // also reset aria-expanded when closed via outside click.
       UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
     }
+  });
+
+  // ── Genotype picker: trigger toggle + outside click + arrow-key cycling ──
+  UI.Inputs.genotypeTrigger.addEventListener("click", e => {
+    e.stopPropagation();  // matches the overflow-menu pattern above
+    if (UI.Inputs.genotypeOverlay.hidden) openGenotypeOverlay();
+    else closeGenotypeOverlay();
+  });
+
+  document.addEventListener("click", e => {
+    if (!UI.Inputs.genotypeOverlay.hidden && !UI.Inputs.genotypeListbox.contains(e.target)
+        && e.target !== UI.Inputs.genotypeTrigger) {
+      closeGenotypeOverlay();
+    }
+  });
+
+  // Reposition (or switch dropdown<->sheet mode) if the viewport crosses the
+  // wide/narrow breakpoint while the app is open — e.g. a tablet rotation —
+  // and re-render so pills<->trigger mode stays correct for the new width.
+  GENOTYPE_WIDE_MQ.addEventListener("change", () => {
+    if (currentAssay) renderGenotypePicker(currentAssay.genotypes);
+  });
+  window.addEventListener("resize", () => {
+    if (!UI.Inputs.genotypeOverlay.hidden && GENOTYPE_WIDE_MQ.matches) positionGenotypePanel();
+  });
+
+  // Arrow-key cycling: mirrors the native <select>'s behavior of changing
+  // value on Up/Down while focused and closed, without opening any popup.
+  // This is the keyboard path for changing genotype on the assay screen,
+  // since Space/Enter are reserved for the tap action there (see the
+  // onAssayScreen block in the keydown handler below) and can't be used to
+  // open the trigger/activate a pill from the keyboard.
+  UI.Inputs.genotypePicker.addEventListener("keydown", e => {
+    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+    if (!currentAssay || !currentAssay.genotypes.length) return;
+    e.preventDefault();
+
+    const genotypes = currentAssay.genotypes;
+    const current    = UI.Inputs.genotypeSelect.value;
+    const currentIdx = genotypes.indexOf(current);
+    const dir        = (e.key === "ArrowUp" || e.key === "ArrowLeft") ? -1 : 1;
+    const nextIdx    = currentIdx === -1
+      ? 0
+      : (currentIdx + dir + genotypes.length) % genotypes.length;
+
+    selectGenotype(genotypes[nextIdx]);
+
+    // Keep focus on the pill that now represents the new selection, if pills
+    // are the active mode, so repeated arrow presses keep cycling in place.
+    const nextPill = UI.Inputs.genotypePills.children[nextIdx];
+    if (nextPill) nextPill.focus();
   });
 
   // ── Saved assays list — event delegation ───────────────────────────────

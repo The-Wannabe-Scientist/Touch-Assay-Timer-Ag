@@ -830,6 +830,12 @@ button.danger:active {
   min-height: 0;
 }
 
+/* Keep this header row compact on every screen size — it competes directly
+   with #tapButton for vertical space, and #tapButton's size/tappability wins
+   that tradeoff by design (see the comment above #tapButton). The genotype
+   selector living here must stay collapsed/single-line rather than expanding
+   into the tap zone, no matter how many genotypes or how long their names
+   are. */
 #assayScreen > header {
   padding: 0.65rem 0.75rem;
   display: flex;
@@ -837,9 +843,215 @@ button.danger:active {
   gap: 0.5rem;
 }
 
-#assayScreen > header select {
+/* ── Genotype picker (custom, replaces the native <select>) ──────────────
+   #genotypeSelect stays in the DOM as the single source of truth for the
+   selected value (see main.js) but is visually-hidden; everything below is
+   the actual on-screen control. Two display modes, chosen in main.js by
+   viewport width (same 769px breakpoint as the rest of the app) and
+   genotype count:
+     - Pills  (.genotype-pills):  wide viewport, small genotype count.
+     - Trigger (.genotype-trigger) + panel (.genotype-panel): narrow
+       viewport (always, regardless of count) or wide viewport with a large
+       genotype count.
+   Both modes must stay compact in the closed state — see the header comment
+   above and the one above #tapButton: this row must never grow at the tap
+   button's expense. */
+#genotypePicker {
   flex: 1;
   min-width: 0;
+  display: flex;
+}
+
+.genotype-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.genotype-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: 999px;
+  border: 2px solid var(--border-base);
+  background: var(--bg-input);
+  color: var(--text-main);
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.25;
+  cursor: pointer;
+  /* Wrap, never truncate: two similarly-long allele-style names must stay
+     distinguishable rather than both collapsing to the same clipped "…". */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  max-width: 100%;
+}
+.genotype-pill[aria-pressed="true"] {
+  border-color: var(--genotype-color, var(--color-primary));
+  background: color-mix(in srgb, var(--genotype-color, var(--color-primary)) 14%, var(--bg-input));
+}
+.genotype-pill:focus-visible {
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.genotype-pill:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.genotype-pill-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  min-width: 0.6rem;
+  border-radius: 50%;
+  background: var(--genotype-color, var(--text-muted));
+}
+.genotype-pill-count {
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+/* Compact trigger — closed-state control, single line, fills the header row
+   without ever wrapping onto a second line. */
+.genotype-trigger {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
+  border: 2px solid var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 5%, var(--bg-input));
+  color: var(--text-main);
+  font-weight: 600;
+  cursor: pointer;
+}
+.genotype-trigger:focus-visible {
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.genotype-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.genotype-trigger-dot {
+  width: 0.65rem;
+  height: 0.65rem;
+  min-width: 0.65rem;
+  border-radius: 50%;
+  background: var(--genotype-color, var(--text-muted));
+}
+.genotype-trigger-label {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Truncation is only acceptable here, in the CLOSED single-line trigger —
+     the full name is always available untruncated one tap away in the open
+     panel below. */
+}
+.genotype-trigger-chevron {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+/* Genotype panel overlay: a transparent full-viewport hit-target so a click
+   anywhere outside the panel closes it (mirrors .modal-overlay's
+   click-outside pattern used elsewhere in the app), not a dimmed backdrop —
+   this is a lightweight picker, not a full modal, on wide viewports. */
+.genotype-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: transparent;
+}
+
+.genotype-panel {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  overflow-y: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border-base);
+  border-radius: 14px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.25);
+  padding: 0.5rem;
+  /* top/left/width/max-height set inline by main.js, anchored to the trigger */
+}
+
+.genotype-option {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 0.95rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  /* Wrap, never truncate — same rationale as .genotype-pill above; the panel
+     has room to spare, so long names simply take a second line. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.genotype-option:hover,
+.genotype-option:focus-visible {
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+}
+.genotype-option:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+.genotype-option[aria-selected="true"] {
+  background: color-mix(in srgb, var(--genotype-color, var(--color-primary)) 12%, transparent);
+  font-weight: 700;
+}
+.genotype-option-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  min-width: 0.7rem;
+  border-radius: 50%;
+  background: var(--genotype-color, var(--text-muted));
+  margin-top: 0.15rem;
+  align-self: flex-start;
+}
+.genotype-option-label {
+  flex: 1;
+  min-width: 0;
+}
+.genotype-option-count {
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Mobile bottom-sheet variant — set on #genotypeOverlay by main.js on narrow
+   viewports, where the panel needs full width and room to wrap long names
+   rather than being squeezed into an anchored dropdown. */
+.genotype-overlay--sheet {
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: flex-end;
+}
+.genotype-overlay--sheet .genotype-panel {
+  position: static;
+  width: 100%;
+  max-height: 70vh;
+  border-radius: 16px 16px 0 0;
+  border-bottom: none;
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
 }
 
 #assayScreen > footer {
@@ -921,7 +1133,13 @@ body.state-warming-up #liveProgress {
   color: #fcd34d;
 }
 
-/* MASSIVE TAP BUTTON */
+/* MASSIVE TAP BUTTON
+   Design priority, not just a style choice: the experimenter is watching the
+   animal under the scope/dish while tapping, not looking at the device — so
+   this button must stay large and reliably hittable eyes-free at all times.
+   When adding or resizing any other #assayScreen chrome (genotype selector,
+   progress panel, etc.), that element must give way to keep this button's
+   footprint intact — never the reverse. */
 #tapButton {
   flex: 1;
   width: 100%;
@@ -1009,29 +1227,6 @@ body.state-warming-up #liveProgress {
 /* Don't dim when already in a fulfilled state — that green matters more */
 #tapButton.bucket-fulfilled.isi-waiting {
   opacity: 1;
-}
-
-/* Idle dial — the tap button reads as an instrument face even before a run
-   starts, instead of a blank gradient rectangle. Purely static (no animation,
-   no JS): a border ring plus two soft halo rings via box-shadow, painted once.
-   Explicitly scoped to the not-yet-started states only — warmup and running
-   already have their own (already-sufficient) feedback via the pop-in number,
-   the CSS countdown bar, and the pulsing ring below, so this never doubles up
-   with those or adds anything during the timing-critical running state. */
-body.state-configured #tapButton::before,
-body.state-poised #tapButton::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  margin: auto;
-  width: min(58%, 210px);
-  aspect-ratio: 1;
-  border-radius: 50%;
-  border: 2px solid color-mix(in srgb, var(--tap-text) 10%, transparent);
-  box-shadow: 0 0 0 14px color-mix(in srgb, var(--tap-text) 5%, transparent),
-              0 0 0 28px color-mix(in srgb, var(--tap-text) 2%, transparent);
-  pointer-events: none;
-  z-index: 0;
 }
 
 /* ── Warmup-countdown state: button stays visible, countdown renders inside it */
@@ -2858,13 +3053,9 @@ button.secondary.btn-loading::before {
     margin-bottom: 1rem;
   }
 
-  /* Assay header: ensure select fills the available width nicely */
+  /* Assay header: tighter padding on phones */
   #assayScreen > header {
     padding: 0.5rem 0.6rem;
-  }
-  #genotypeSelect {
-    font-size: 0.95rem;
-    padding: 0.5rem 2rem 0.5rem 0.6rem;
   }
 
   /* Toggle progress: compact pill style on phones */
@@ -3172,12 +3363,6 @@ body.state-running {
   .chip-input-wrapper:focus-within {
     box-shadow: 0 0 0 4px var(--focus-ring);
   }
-}
-
-/* ── Genotype select: always fills available width ─────────────────────── */
-#genotypeSelect {
-  width: 100%;
-  max-width: none;
 }
 
 /* ── Toggle progress: now inside assay header flex row ───────────────── */
@@ -3550,16 +3735,6 @@ body.state-running {
 #assayScreen > header {
   border-bottom: 1px solid var(--border-base);
   background: color-mix(in srgb, var(--color-primary) 4%, var(--bg-card));
-}
-#genotypeSelect {
-  font-weight: 600;
-  border-color: var(--color-primary);
-  border-width: 2px;
-  background-color: color-mix(in srgb, var(--color-primary) 5%, var(--bg-input));
-  color: var(--text-main);
-}
-#genotypeSelect:focus {
-  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 /* Instruction paragraph styled as info callout */
