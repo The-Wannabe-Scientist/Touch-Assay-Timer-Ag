@@ -1263,7 +1263,7 @@ body.state-running #openSavedAssays {
   display: none;
 }
 
-body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):not(#savedAssaysScreen) {
+body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):not(#savedAssaysScreen):not(#assayDefaultsScreen) {
   display: none !important;
 }
 
@@ -1331,10 +1331,11 @@ body.state-running #assayScreen {
   animation: screenSlideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* Overlay screens (settings, guidelines, saved assays) — gentle fade */
+/* Overlay screens (settings, guidelines, saved assays, assay defaults) — gentle slide */
 #settingsScreen:not([hidden]),
 #guidelinesScreen:not([hidden]),
-#savedAssaysScreen:not([hidden]) {
+#savedAssaysScreen:not([hidden]),
+#assayDefaultsScreen:not([hidden]) {
   animation: screenSlideUp 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -1734,6 +1735,30 @@ body.state-warming-up #visualMetronomeContainer {
   animation: badgePop 0.2s ease-out;
 }
 
+/* ── Editable badge: number input that looks like the pill badge ──── */
+input.settings-slider-input.settings-slider-badge {
+  border: none;
+  outline: none;
+  text-align: center;
+  width: 5rem;
+  cursor: text;
+  caret-color: #fff;
+  /* Remove native spinner arrows */
+  -moz-appearance: textfield;
+}
+input.settings-slider-input.settings-slider-badge::-webkit-inner-spin-button,
+input.settings-slider-input.settings-slider-badge::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input.settings-slider-input.settings-slider-badge:hover {
+  opacity: 0.88;
+}
+input.settings-slider-input.settings-slider-badge:focus {
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.45), 0 0 0 4px var(--color-primary);
+  border-radius: 20px;
+}
+
 .settings-slider-track-wrap {
   display: flex;
   align-items: center;
@@ -2020,6 +2045,118 @@ body.state-warming-up #visualMetronomeContainer {
   align-items: center;
   gap: 0.4rem;
   margin-top: 0.25rem;
+}
+
+/* ── Settings nav button (e.g. "Edit Assay Defaults →") ───────────── */
+.settings-nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  border: 1.5px solid var(--border);
+  color: var(--text-main);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  text-align: left;
+}
+
+.settings-nav-btn:hover {
+  background: var(--bg-card);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+[data-theme="dark"] .settings-nav-btn {
+  background: var(--bg-input);
+  border-color: var(--border);
+}
+
+[data-theme="dark"] .settings-nav-btn:hover {
+  border-color: var(--color-primary);
+}
+
+/* ── Value Constraints table (Assay Defaults screen) ──────────────── */
+
+/* Column widths — applied via colgroup so they're identical for every row */
+.clamp-col-field { width: 36%; }
+.clamp-col-range { width: 26%; }
+.clamp-col-notes { width: 38%; }
+
+.clamp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  table-layout: fixed; /* honours colgroup widths */
+}
+
+/* Single header row */
+.clamp-table thead th {
+  text-align: left;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  padding: 0.3rem 0.5rem 0.3rem 0.4rem;
+  border-bottom: 1.5px solid var(--border);
+}
+
+/* Section-divider rows (Assay Setup / Timing Settings / Audio Settings) */
+.clamp-table .clamp-section-row td {
+  font-size: 0.69rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  background: var(--bg-input);
+  padding: 0.35rem 0.4rem 0.25rem;
+  border-top: 1px solid var(--border);
+  border-bottom: none;
+}
+
+/* First section-divider has no top border (sits right under the header) */
+.clamp-table tbody:first-of-type .clamp-section-row td {
+  border-top: none;
+}
+
+/* Data cells */
+.clamp-table td {
+  text-align: left;
+  padding: 0.32rem 0.5rem 0.32rem 0.4rem;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+  line-height: 1.4;
+}
+
+/* Field column: bold */
+.clamp-table td:first-child {
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+/* Range / Notes columns: muted */
+.clamp-table td:not(:first-child) {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* No border on last row of each tbody section */
+.clamp-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Alternating row tint (skip section-divider rows) */
+.clamp-table tbody tr:not(.clamp-section-row):nth-child(even) {
+  background: rgba(0, 0, 0, 0.025);
+}
+
+[data-theme="dark"] .clamp-table tbody tr:not(.clamp-section-row):nth-child(even) {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 /* ── Dark-mode adjustments ─────────────────────────────────────────── */

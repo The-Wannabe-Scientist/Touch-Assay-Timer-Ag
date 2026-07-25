@@ -378,7 +378,9 @@
               </svg>
               Tick Pitch
             </label>
-            <span id="tickPitchDisplay" class="settings-slider-badge">900 Hz</span>
+            <input type="number" id="tickPitchDisplay" class="settings-slider-badge settings-slider-input"
+                   min="200" max="2000" step="50" value="900"
+                   aria-label="Tick pitch in Hz" inputmode="numeric">
           </div>
           <div class="settings-slider-track-wrap">
             <span class="slider-icon-min" aria-hidden="true" style="font-size:0.65rem;font-weight:700;letter-spacing:-0.05em;color:var(--text-muted);">Lo</span>
@@ -397,7 +399,9 @@
               </svg>
               Speech Lead
             </label>
-            <span id="speechLeadDisplay" class="settings-slider-badge">80 ms</span>
+            <input type="number" id="speechLeadDisplay" class="settings-slider-badge settings-slider-input"
+                   min="0" max="490" step="10" value="80"
+                   aria-label="Speech lead in milliseconds" inputmode="numeric">
           </div>
           <div class="settings-slider-track-wrap">
             <span class="slider-icon-min" aria-hidden="true" style="font-size:0.6rem;font-weight:700;color:var(--text-muted);">0</span>
@@ -479,6 +483,38 @@
 
       </fieldset>
 
+      <!-- ── Timing (Grace Period) ───────────────────────────────────────── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+          Timing
+        </legend>
+
+        <div class="settings-slider-group">
+          <div class="settings-slider-header">
+            <label class="settings-slider-label" for="gracePeriod">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+              </svg>
+              Human Reaction Grace Period
+            </label>
+            <input type="number" id="gracePeriodDisplay" class="settings-slider-badge settings-slider-input"
+                   min="0" max="500" step="10" value="250"
+                   aria-label="Grace period in milliseconds" inputmode="numeric">
+          </div>
+          <div class="settings-slider-track-wrap">
+            <span class="slider-icon-min" aria-hidden="true" style="font-size:0.6rem;font-weight:700;color:var(--text-muted);">0</span>
+            <input type="range" id="gracePeriod" min="0" max="500" step="10" value="250" class="settings-range">
+            <span class="slider-icon-max" aria-hidden="true" style="font-size:0.6rem;font-weight:700;color:var(--text-muted);">500</span>
+          </div>
+          <p class="settings-hint">Extends each stimulus window by this amount after it closes, accepting late taps as valid responses. 250 ms is the average human simple reaction time. Set to 0 to disable.</p>
+        </div>
+      </fieldset>
+
       <!-- ── Haptic Armband ──────────────────────────────────────────────── -->
       <fieldset class="settings-card armband-fieldset" hidden>
         <legend class="settings-legend">
@@ -513,6 +549,29 @@
         </div>
       </fieldset>
 
+      <!-- ── Assay Defaults ──────────────────────────────────────────────── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+          </svg>
+          Assay Setup Defaults
+        </legend>
+        <p class="settings-hint" style="margin-bottom:0.75rem;">Configure the default values that pre-populate the Assay Setup form for new experiments.</p>
+        <button id="openAssayDefaults" type="button" class="secondary settings-nav-btn">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+          </svg>
+          Edit Assay Defaults
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-left:auto;">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </button>
+      </fieldset>
+
       <button id="closeSettings" type="button" class="secondary settings-back-btn">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -520,6 +579,218 @@
         </svg>
         Back
       </button>
+    </section>
+
+    <!-- ── Assay Defaults Sub-page ───────────────────────────────────────── -->
+    <section id="assayDefaultsScreen" hidden>
+      <div class="settings-page-header">
+        <h2>
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+          </svg>
+          Assay Defaults
+        </h2>
+        <p style="font-size:0.85rem;color:var(--text-muted);margin-top:0.3rem;">Pre-populate the Setup form for new assays. Saved drafts and manually entered values always take priority.</p>
+      </div>
+
+      <!-- ── Environment (matches setup screen order: Environment first) ── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>
+          </svg>
+          Environment
+        </legend>
+        <div class="input-row">
+          <div class="input-group">
+            <label for="defaultTemperature">Temperature (°C)</label>
+            <div class="stepper-wrapper">
+              <button type="button" class="stepper-btn" data-target="defaultTemperature" data-delta="-1" aria-label="Decrease default temperature">−</button>
+              <input type="number" id="defaultTemperature" min="-10" max="60" value="20" inputmode="decimal">
+              <button type="button" class="stepper-btn" data-target="defaultTemperature" data-delta="1" aria-label="Increase default temperature">+</button>
+            </div>
+          </div>
+          <div class="input-group">
+            <label for="defaultHumidity">Humidity (% RH)</label>
+            <div class="stepper-wrapper">
+              <button type="button" class="stepper-btn" data-target="defaultHumidity" data-delta="-1" aria-label="Decrease default humidity">−</button>
+              <input type="number" id="defaultHumidity" min="0" max="100" value="60" inputmode="decimal">
+              <button type="button" class="stepper-btn" data-target="defaultHumidity" data-delta="1" aria-label="Increase default humidity">+</button>
+            </div>
+          </div>
+        </div>
+      </fieldset>
+
+      <!-- ── Stimulation (ISI + Stim Count side by side, matches setup screen) ── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+          </svg>
+          Stimulation
+        </legend>
+        <div class="input-row">
+          <div class="input-group">
+            <label for="defaultISI">Inter-stimulus Interval (s)</label>
+            <div class="stepper-wrapper">
+              <button type="button" class="stepper-btn" data-target="defaultISI" data-delta="-0.1" aria-label="Decrease default ISI">−</button>
+              <input type="number" id="defaultISI" min="0.1" step="0.1" value="1" inputmode="decimal">
+              <button type="button" class="stepper-btn" data-target="defaultISI" data-delta="0.1" aria-label="Increase default ISI">+</button>
+            </div>
+          </div>
+          <div class="input-group">
+            <label for="defaultStimCount">Total Number of Stimulations</label>
+            <div class="stepper-wrapper">
+              <button type="button" class="stepper-btn" data-target="defaultStimCount" data-delta="-1" aria-label="Decrease default stim count">−</button>
+              <input type="number" id="defaultStimCount" min="1" step="1" value="100" inputmode="numeric">
+              <button type="button" class="stepper-btn" data-target="defaultStimCount" data-delta="1" aria-label="Increase default stim count">+</button>
+            </div>
+          </div>
+        </div>
+      </fieldset>
+
+      <!-- ── Analysis (Bin Size alone, matches setup screen) ── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+          Analysis
+        </legend>
+        <div class="input-group">
+          <label for="defaultBinSize">Stimulations per bin (Bin Size)</label>
+          <div class="stepper-wrapper">
+            <button type="button" class="stepper-btn" data-target="defaultBinSize" data-delta="-1" aria-label="Decrease default bin size">−</button>
+            <input type="number" id="defaultBinSize" min="1" step="1" value="10" inputmode="numeric">
+            <button type="button" class="stepper-btn" data-target="defaultBinSize" data-delta="1" aria-label="Increase default bin size">+</button>
+          </div>
+        </div>
+      </fieldset>
+
+      <!-- ── Value Constraints — informational only ── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          Value Constraints
+        </legend>
+        <p class="settings-hint" style="margin:0 0 0.75rem;">Hard limits enforced across this app. These cannot be changed.</p>
+
+        <table class="clamp-table">
+          <!-- Fixed column widths shared across all rows -->
+          <colgroup>
+            <col class="clamp-col-field">
+            <col class="clamp-col-range">
+            <col class="clamp-col-notes">
+          </colgroup>
+          <thead>
+            <tr><th>Field</th><th>Range</th><th>Notes / Step</th></tr>
+          </thead>
+
+          <!-- ── Assay Setup ──────────────────────────────────────────── -->
+          <tbody>
+            <tr class="clamp-section-row">
+              <td colspan="3">Assay Setup</td>
+            </tr>
+            <tr>
+              <td>ISI</td>
+              <td>&gt; 0 s</td>
+              <td>Warning if &lt; 0.5 s</td>
+            </tr>
+            <tr>
+              <td>Total Stimulations</td>
+              <td>≥ 1</td>
+              <td>—</td>
+            </tr>
+            <tr>
+              <td>Bin Size</td>
+              <td>1 – stim count</td>
+              <td>Warning if stim count is not an exact multiple — remainder values dropped from analysis</td>
+            </tr>
+            <tr>
+              <td>Temperature</td>
+              <td>−10 – 60 °C</td>
+              <td>Optional</td>
+            </tr>
+            <tr>
+              <td>Humidity</td>
+              <td>0 – 100 %</td>
+              <td>Optional</td>
+            </tr>
+          </tbody>
+
+          <!-- ── Timing Settings ─────────────────────────────────────── -->
+          <tbody>
+            <tr class="clamp-section-row">
+              <td colspan="3">Timing Settings</td>
+            </tr>
+            <tr>
+              <td>Warmup Duration</td>
+              <td>1 – 60 s</td>
+              <td>1 s</td>
+            </tr>
+            <tr>
+              <td>Grace Period</td>
+              <td>0 – 500 ms</td>
+              <td>10 ms</td>
+            </tr>
+          </tbody>
+
+          <!-- ── Audio Settings ──────────────────────────────────────── -->
+          <tbody>
+            <tr class="clamp-section-row">
+              <td colspan="3">Audio Settings</td>
+            </tr>
+            <tr>
+              <td>Tick Pitch</td>
+              <td>200 – 2000 Hz</td>
+              <td>50 Hz</td>
+            </tr>
+            <tr>
+              <td>Speech Lead</td>
+              <td>0 – 490 ms</td>
+              <td>10 ms</td>
+            </tr>
+          </tbody>
+        </table>
+      </fieldset>
+
+      <p class="settings-hint" style="margin: 0.5rem 1rem 1rem;">Changes are saved automatically.</p>
+
+      <button id="closeAssayDefaults" type="button" class="secondary settings-back-btn">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="15 18 9 12 15 6"/>
+        </svg>
+        Back to Settings
+      </button>
+
+      <!-- Pre-populate defaults from localStorage as soon as the section is parsed -->
+      <script>
+        (function() {
+          try {
+            var fields = {
+              defaultTemperature: { key: 'touchAssayDefaultTemperature', fallback: '20' },
+              defaultHumidity:    { key: 'touchAssayDefaultHumidity',    fallback: '60' },
+              defaultISI:         { key: 'touchAssayDefaultISI',         fallback: '1'  },
+              defaultStimCount:   { key: 'touchAssayDefaultStimCount',   fallback: '100'},
+              defaultBinSize:     { key: 'touchAssayDefaultBinSize',     fallback: '10' },
+            };
+            Object.keys(fields).forEach(function(id) {
+              var el = document.getElementById(id);
+              if (!el) return;
+              var stored = localStorage.getItem(fields[id].key);
+              el.value = stored !== null ? stored : fields[id].fallback;
+            });
+          } catch(e) { /* localStorage unavailable — HTML default values stand */ }
+        })();
+      </script>
     </section>
 
 

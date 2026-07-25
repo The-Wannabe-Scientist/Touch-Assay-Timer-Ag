@@ -282,6 +282,27 @@ let warmupDuration = 3;
 try { warmupDuration = Math.min(60, Math.max(1, parseInt(localStorage.getItem("touchAssayWarmupDuration"), 10) || 3)); } catch { /* use default */ }
 
 /**
+ * Human reaction grace period in milliseconds.
+ * When > 0, a tap arriving up to this many ms after a stimulus window closes
+ * is still credited to that interval (compensates for natural human latency).
+ * 250 ms default = widely-cited average simple auditory reaction time.
+ * @type {number}
+ */
+let gracePeriodMs = 250;
+try {
+  const _gp = parseInt(localStorage.getItem("touchAssayGracePeriodMs"), 10);
+  if (!isNaN(_gp)) gracePeriodMs = Math.max(0, Math.min(500, _gp));
+} catch { /* use default */ }
+
+/**
+ * AudioContext timestamp of the last Escape keypress during RUNNING state.
+ * Used to implement double-Escape-to-stop-run: two presses within 1 second
+ * will call stopRunEarly(). 0 means no recent Escape press.
+ * @type {number}
+ */
+let lastEscapeTime = 0;
+
+/**
  * True while the warmup countdown is actively ticking.
  * Prevents re-entry if the tap button is pressed twice during warmup.
  * @type {boolean}
@@ -386,12 +407,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       exportSelectAll:  document.getElementById("exportSelectAll"),
     },
     Screens: {
-      setup:       document.getElementById("setupScreen"),
-      assay:       document.getElementById("assayScreen"),
-      export:      document.getElementById("exportScreen"),
-      settings:    document.getElementById("settingsScreen"),
-      guidelines:  document.getElementById("guidelinesScreen"),
-      savedAssays: document.getElementById("savedAssaysScreen"),
+      setup:         document.getElementById("setupScreen"),
+      assay:         document.getElementById("assayScreen"),
+      export:        document.getElementById("exportScreen"),
+      settings:      document.getElementById("settingsScreen"),
+      guidelines:    document.getElementById("guidelinesScreen"),
+      savedAssays:   document.getElementById("savedAssaysScreen"),
+      assayDefaults: document.getElementById("assayDefaultsScreen"),
     },
     Buttons: {
       tap:                  document.getElementById("tapButton"),
@@ -448,6 +470,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       tickPitchDisplay:         document.getElementById("tickPitchDisplay"),
       speechLead:               document.getElementById("speechLead"),
       speechLeadDisplay:        document.getElementById("speechLeadDisplay"),
+      gracePeriod:              document.getElementById("gracePeriod"),
+      gracePeriodDisplay:       document.getElementById("gracePeriodDisplay"),
+      // Assay Defaults sub-page inputs
+      defaultISI:               document.getElementById("defaultISI"),
+      defaultStimCount:         document.getElementById("defaultStimCount"),
+      defaultBinSize:           document.getElementById("defaultBinSize"),
+      defaultTemperature:       document.getElementById("defaultTemperature"),
+      defaultHumidity:          document.getElementById("defaultHumidity"),
     }
   };
 
@@ -577,9 +607,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.body.classList.add("state-overlay");
 
     // Collapse all overlay screens first to avoid stacking
-    UI.Screens.settings.hidden    = true;
-    UI.Screens.guidelines.hidden  = true;
-    UI.Screens.savedAssays.hidden = true;
+    UI.Screens.settings.hidden      = true;
+    UI.Screens.guidelines.hidden    = true;
+    UI.Screens.savedAssays.hidden   = true;
+    UI.Screens.assayDefaults.hidden = true;
 
     screenElement.hidden = false;
   }
@@ -831,6 +862,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     while (currentTime >= nextDataIntervalTime && currentStimulusIndex < runStimCount) {
       const intervalStart = nextDataIntervalTime - runISI;
       const intervalEnd   = nextDataIntervalTime;
+      // Grace period: extend acceptance window for taps that arrived up to
+      // gracePeriodMs ms after this interval closed. Cached in seconds for
+      // direct comparison against AudioContext timestamps.
+      const graceSec      = gracePeriodMs / 1000;
+      const graceEnd      = intervalEnd + graceSec;
 
       // Check if the experimenter tapped within this stimulus window.
       // Uses an index pointer (tapReadIndex) to scan only unconsumed entries,
@@ -839,7 +875,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       let tapOccurred = false;
       while (tapReadIndex < tapTimestamps.length) {
         const t = tapTimestamps[tapReadIndex];
-        if (t >= intervalEnd) break;            // belongs to a future window
+        // Stop scanning if the tap is beyond both the interval AND the grace window.
+        // If gracePeriodMs = 0 then graceEnd = intervalEnd and behaviour is unchanged.
+        if (t >= graceEnd) break;               // belongs to a future window (past grace)
         // guard against a tap that arrived after the second confirmation
         // press but before the first stimulus window opened (i.e. t < intervalStart
         // for stimulus 1).  The old code consumed these pre-run taps without counting
@@ -849,7 +887,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         // by using a half-open interval [intervalStart, intervalEnd) so that a tap
         // at exactly intervalStart is correctly attributed to stimulus 1 only when
         // it was genuinely within the window.
-        if (t >= intervalStart) tapOccurred = true;  // inside this window
+        if (t >= intervalStart) tapOccurred = true;  // inside window or within grace period
         tapReadIndex++;                         // consume (past or matched)
       }
 
@@ -1475,15 +1513,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (UI.Settings.tickPitch) {
       UI.Settings.tickPitch.value = initPitch;
       if (UI.Settings.tickPitchDisplay)
-        UI.Settings.tickPitchDisplay.textContent = initPitch + " Hz";
+        UI.Settings.tickPitchDisplay.value = initPitch;
     }
 
     // Speech lead time (ms) — compensates for TTS engine latency
     if (UI.Settings.speechLead) {
       UI.Settings.speechLead.value = speechLeadMs;
       if (UI.Settings.speechLeadDisplay)
-        UI.Settings.speechLeadDisplay.textContent = speechLeadMs + " ms";
+        UI.Settings.speechLeadDisplay.value = speechLeadMs;
     }
+
+    // Grace period
+    if (UI.Settings.gracePeriod) {
+      UI.Settings.gracePeriod.value = gracePeriodMs;
+      if (UI.Settings.gracePeriodDisplay)
+        UI.Settings.gracePeriodDisplay.value = gracePeriodMs;
+    }
+
+    // Assay Defaults — restore saved defaults into the sub-page inputs
+    _restoreAssayDefaultsToUI();
 
     // Restore progress-table visibility preference
     const progressPref = localStorage.getItem("touchAssayProgressVisible");
@@ -1492,6 +1540,44 @@ document.addEventListener("DOMContentLoaded", async () => {
     // the table is first shown (or kept hidden) according to preference.
     } catch {
       // H5: localStorage unavailable (e.g. Private Browsing with strict settings) — use defaults
+    }
+  }
+
+  /**
+   * Reads assay defaults from localStorage and populates the Assay Defaults
+   * sub-page stepper inputs with those values.
+   */
+  function _restoreAssayDefaultsToUI() {
+    const defaults = _loadAssayDefaults();
+    if (UI.Settings.defaultISI)         UI.Settings.defaultISI.value         = defaults.isi;
+    if (UI.Settings.defaultStimCount)   UI.Settings.defaultStimCount.value   = defaults.stimCount;
+    if (UI.Settings.defaultBinSize)     UI.Settings.defaultBinSize.value     = defaults.binSize;
+    if (UI.Settings.defaultTemperature) UI.Settings.defaultTemperature.value = defaults.temperature;
+    if (UI.Settings.defaultHumidity)    UI.Settings.defaultHumidity.value    = defaults.humidity;
+  }
+
+  /**
+   * Loads assay setup defaults from localStorage.
+   * Returns hardcoded fallback values when no defaults have been saved yet.
+   * @returns {{ isi: number, stimCount: number, binSize: number, temperature: number, humidity: number }}
+   */
+  function _loadAssayDefaults() {
+    try {
+      // Use explicit isNaN guards so that:
+      //   - Missing keys  → parseFloat/parseInt(null) = NaN → use fallback
+      //   - Valid 0 values (e.g. 0 °C, 0% RH) are NOT replaced by || fallback
+      //   - ?? would also fail: NaN ?? fallback still returns NaN (NaN ≠ null/undefined)
+      const _f = (key, fallback) => { const v = parseFloat(localStorage.getItem(key)); return isNaN(v) ? fallback : v; };
+      const _i = (key, fallback) => { const v = parseInt(localStorage.getItem(key), 10); return isNaN(v) ? fallback : v; };
+      return {
+        isi:         _f("touchAssayDefaultISI",         1),
+        stimCount:   _i("touchAssayDefaultStimCount",   100),
+        binSize:     _i("touchAssayDefaultBinSize",     10),
+        temperature: _f("touchAssayDefaultTemperature", 20),
+        humidity:    _f("touchAssayDefaultHumidity",    60),
+      };
+    } catch {
+      return { isi: 1, stimCount: 100, binSize: 10, temperature: 20, humidity: 60 };
     }
   }
 
@@ -1965,9 +2051,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Close any open overlay screen (settings, guidelines, saved assays).
     // resetToSetup() can be called from the header logo while an overlay is
     // open — without this, the overlay stays on top of the reset setup screen.
-    UI.Screens.settings.hidden    = true;
-    UI.Screens.guidelines.hidden  = true;
-    UI.Screens.savedAssays.hidden = true;
+    UI.Screens.settings.hidden      = true;
+    UI.Screens.guidelines.hidden    = true;
+    UI.Screens.savedAssays.hidden   = true;
+    UI.Screens.assayDefaults.hidden = true;
     document.body.classList.remove("state-overlay");
     // also remove state-warming-up so the amber countdown bar and live
     // counter don't remain visible when the user navigates home mid-warmup.
@@ -2111,10 +2198,21 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Only runs if there is a non-empty draft in localStorage.
    */
   function restoreSetupDraft() {
+    // Always apply assay defaults first so the form has reasonable values
+    // even when there is no saved draft. User-entered drafts below will
+    // overwrite these if a draft exists, so defaults are only visible on
+    // a truly fresh setup screen.
+    const defaults = _loadAssayDefaults();
+    UI.Inputs.isi.value         = defaults.isi;
+    UI.Inputs.stimCount.value   = defaults.stimCount;
+    UI.Inputs.binSize.value     = defaults.binSize;
+    UI.Inputs.temperature.value = defaults.temperature;
+    UI.Inputs.humidity.value    = defaults.humidity;
+
     let draft;
     try {
       const raw = localStorage.getItem("touchAssaySetupDraft");
-      if (!raw) return;
+      if (!raw) return;   // no draft — defaults applied above are sufficient
       draft = JSON.parse(raw);
     } catch { return; }
 
@@ -2277,6 +2375,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Ignore held-down keys (auto-repeat) for tap actions
     if (event.repeat) return;
 
+    // ── Double-Escape to stop an active run ─────────────────────────────
+    // First Escape press: show a confirmation toast. Second press within 1 s
+    // (after the first) calls stopRunEarly(). This prevents accidental stops.
+    if (event.key === "Escape" && currentState === STATES.RUNNING && !isWarmingUp) {
+      const now = Date.now();
+      if (lastEscapeTime > 0 && now - lastEscapeTime <= 1000) {
+        // Second press within window — stop the run
+        lastEscapeTime = 0;
+        stopRunEarly("Run stopped early by user");
+      } else {
+        // First press — arm the confirmation
+        lastEscapeTime = now;
+        showToast("Press Esc again within 1 s to stop the run.", "warning", 1500);
+      }
+      return;
+    }
+
+    // Reset the escape timer if any other key is pressed during RUNNING
+    if (currentState === STATES.RUNNING && event.key !== "Escape") {
+      lastEscapeTime = 0;
+    }
+
     // allow Escape to cancel a warmup countdown in progress.
     // Setting isWarmingUp = false causes the runWarmup() loop to exit on its
     // next iteration, but we also restore the UI immediately here so the user
@@ -2329,7 +2449,13 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Displays.previewModal.hidden = true;
         return;
       }
-      // 2. Close any open overlay screen (settings, guidelines, saved assays)
+      // 2a. Assay Defaults sub-page — go back to Settings (not main screen)
+      if (!UI.Screens.assayDefaults.hidden) {
+        UI.Screens.assayDefaults.hidden = true;
+        UI.Screens.settings.hidden      = false;
+        return;
+      }
+      // 2b. Close any open overlay screen (settings, guidelines, saved assays)
       if (!UI.Screens.settings.hidden) {
         hideScreenAndRestore(UI.Screens.settings);
         return;
@@ -2735,6 +2861,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   UI.Buttons.openGuidelines.addEventListener("click", () => showScreen(UI.Screens.guidelines));
   UI.Buttons.closeGuidelines.addEventListener("click",() => hideScreenAndRestore(UI.Screens.guidelines));
 
+  // Assay Defaults sub-page navigation (within settings overlay)
+  document.getElementById("openAssayDefaults").addEventListener("click", () => {
+    UI.Screens.settings.hidden      = true;
+    UI.Screens.assayDefaults.hidden = false;
+  });
+  document.getElementById("closeAssayDefaults").addEventListener("click", () => {
+    UI.Screens.assayDefaults.hidden = true;
+    UI.Screens.settings.hidden      = false;
+  });
+
   UI.Buttons.openSavedAssays.addEventListener("click", () => {
     showScreen(UI.Screens.savedAssays);
     // propagate async errors — previously the returned Promise was
@@ -3021,44 +3157,159 @@ document.addEventListener("DOMContentLoaded", async () => {
   let _pitchPreviewTimer;
 
   if (UI.Settings.tickPitch) {
+    // Slider → badge input
     UI.Settings.tickPitch.addEventListener("input", e => {
       const hz = parseInt(e.target.value, 10);
       setTickPitch(hz);
-      // wrap in try/catch for Private Browsing / QuotaExceededError.
       try { localStorage.setItem("touchAssayTickPitch", hz); } catch { /* storage unavailable */ }
       if (UI.Settings.tickPitchDisplay) {
-        UI.Settings.tickPitchDisplay.textContent = hz + " Hz";
+        UI.Settings.tickPitchDisplay.value = hz;
         _popBadge(UI.Settings.tickPitchDisplay);
       }
-      // Debounce the preview tick so rapid slider drags only fire once the
-      // user briefly pauses, preventing a rapid-fire buzz of overlapping tones.
       _pitchPreviewTimer = _previewTick(_pitchPreviewTimer, 120);
     });
+    // Badge input → slider
+    if (UI.Settings.tickPitchDisplay) {
+      const _syncTickPitchFromInput = () => {
+        let v = parseInt(UI.Settings.tickPitchDisplay.value, 10);
+        if (isNaN(v)) return;
+        v = Math.max(200, Math.min(2000, Math.round(v / 50) * 50));  // snap to step
+        UI.Settings.tickPitchDisplay.value = v;
+        UI.Settings.tickPitch.value        = v;
+        setTickPitch(v);
+        try { localStorage.setItem("touchAssayTickPitch", v); } catch { /* storage unavailable */ }
+        _pitchPreviewTimer = _previewTick(_pitchPreviewTimer, 300);
+      };
+      UI.Settings.tickPitchDisplay.addEventListener("change", _syncTickPitchFromInput);
+      UI.Settings.tickPitchDisplay.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); _syncTickPitchFromInput(); } });
+    }
   }
 
   // ── Settings: speech lead time ─────────────────────────────────────────
   if (UI.Settings.speechLead) {
+    // Slider → badge input
     UI.Settings.speechLead.addEventListener("input", e => {
-      // Apply the same [0, 490] clamp used at startup — values ≥ 500 ms would
-      // push nextSpeechTime before AudioContext t0, misfiring the first speech cue.
-      // parseInt of a non-numeric string returns NaN; Math.min/max with NaN
-      // propagates NaN, which would set speechLeadMs = NaN and silence all speech.
       const parsed = parseInt(e.target.value, 10);
-      if (isNaN(parsed)) return;  // ignore invalid input, keep previous value
+      if (isNaN(parsed)) return;
       speechLeadMs = Math.max(0, Math.min(490, parsed));
-      // wrap in try/catch for Private Browsing / QuotaExceededError.
       try { localStorage.setItem("touchAssaySpeechLeadMs", speechLeadMs); } catch { /* storage unavailable */ }
       if (UI.Settings.speechLeadDisplay) {
-        UI.Settings.speechLeadDisplay.textContent = speechLeadMs + " ms";
+        UI.Settings.speechLeadDisplay.value = speechLeadMs;
         _popBadge(UI.Settings.speechLeadDisplay);
       }
-      // speechLeadMs seeds nextSpeechTime only at startCueLoop() time,
-      // so changing it mid-run has no effect on the current run. Inform the user
-      // so they're not confused by the apparent lack of immediate response.
       if (currentState === STATES.RUNNING) {
         showToast("Speech lead will apply from the next run.", "info", 3000);
       }
     });
+    // Badge input → slider
+    if (UI.Settings.speechLeadDisplay) {
+      const _syncSpeechLeadFromInput = () => {
+        let v = parseInt(UI.Settings.speechLeadDisplay.value, 10);
+        if (isNaN(v)) return;
+        v = Math.max(0, Math.min(490, Math.round(v / 10) * 10));  // snap to step
+        speechLeadMs = v;
+        UI.Settings.speechLeadDisplay.value = v;
+        UI.Settings.speechLead.value        = v;
+        try { localStorage.setItem("touchAssaySpeechLeadMs", v); } catch { /* storage unavailable */ }
+        if (currentState === STATES.RUNNING) {
+          showToast("Speech lead will apply from the next run.", "info", 3000);
+        }
+      };
+      UI.Settings.speechLeadDisplay.addEventListener("change", _syncSpeechLeadFromInput);
+      UI.Settings.speechLeadDisplay.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); _syncSpeechLeadFromInput(); } });
+    }
+  }
+
+  // ── Settings: grace period ─────────────────────────────────────────────
+  if (UI.Settings.gracePeriod) {
+    // Slider → badge input
+    UI.Settings.gracePeriod.addEventListener("input", e => {
+      const parsed = parseInt(e.target.value, 10);
+      if (isNaN(parsed)) return;
+      gracePeriodMs = Math.max(0, Math.min(500, parsed));
+      try { localStorage.setItem("touchAssayGracePeriodMs", gracePeriodMs); } catch { /* storage unavailable */ }
+      if (UI.Settings.gracePeriodDisplay) {
+        UI.Settings.gracePeriodDisplay.value = gracePeriodMs;
+        _popBadge(UI.Settings.gracePeriodDisplay);
+      }
+    });
+    // Badge input → slider
+    if (UI.Settings.gracePeriodDisplay) {
+      const _syncGracePeriodFromInput = () => {
+        let v = parseInt(UI.Settings.gracePeriodDisplay.value, 10);
+        if (isNaN(v)) return;
+        v = Math.max(0, Math.min(500, Math.round(v / 10) * 10));  // snap to step
+        gracePeriodMs = v;
+        UI.Settings.gracePeriodDisplay.value = v;
+        UI.Settings.gracePeriod.value        = v;
+        try { localStorage.setItem("touchAssayGracePeriodMs", v); } catch { /* storage unavailable */ }
+      };
+      UI.Settings.gracePeriodDisplay.addEventListener("change", _syncGracePeriodFromInput);
+      UI.Settings.gracePeriodDisplay.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); _syncGracePeriodFromInput(); } });
+    }
+  }
+
+  // ── Assay Defaults sub-page: stepper buttons and input persistence ──────
+  {
+    /**
+     * Saves a single assay default field value to localStorage.
+     * @param {string} field - localStorage key suffix (e.g. "ISI").
+     * @param {string} value - String value to store.
+     */
+    function _saveAssayDefault(field, value) {
+      try { localStorage.setItem("touchAssayDefault" + field, value); } catch { /* storage unavailable */ }
+    }
+
+    /**
+     * Wires a stepper button pair (+/−) for an assay default input.
+     * On click: applies delta, clamps to input min/max, updates field, persists.
+     * @param {HTMLInputElement} input - The number input.
+     * @param {string}           storageField - Key suffix for localStorage.
+     */
+    function _wireDefaultStepper(input, storageField) {
+      if (!input) return;
+
+      // Persist on direct keyboard/spinner changes
+      input.addEventListener("change", () => {
+        // Clamp to HTML min/max attributes if present
+        const min = input.min !== "" ? parseFloat(input.min) : -Infinity;
+        const max = input.max !== "" ? parseFloat(input.max) :  Infinity;
+        let val = parseFloat(input.value);
+        if (isNaN(val)) val = parseFloat(input.defaultValue) || 0;
+        val = Math.max(min, Math.min(max, val));
+        // Round to step precision to avoid floating-point display noise
+        const step = parseFloat(input.step) || 1;
+        const decimals = (step.toString().split(".")[1] || "").length;
+        val = parseFloat(val.toFixed(decimals));
+        input.value = val;
+        _saveAssayDefault(storageField, val);
+      });
+
+      // Wire stepper buttons via event delegation on the wrapper
+      const wrapper = input.closest(".stepper-wrapper");
+      if (!wrapper) return;
+      wrapper.querySelectorAll(".stepper-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const delta   = parseFloat(btn.dataset.delta) || 0;
+          const min     = input.min !== "" ? parseFloat(input.min) : -Infinity;
+          const max     = input.max !== "" ? parseFloat(input.max) :  Infinity;
+          const step    = parseFloat(input.step) || 1;
+          const decimals = (step.toString().split(".")[1] || "").length;
+          let current = parseFloat(input.value);
+          if (isNaN(current)) current = parseFloat(input.defaultValue) || 0;
+          let next = parseFloat((current + delta).toFixed(decimals));
+          next = Math.max(min, Math.min(max, next));
+          input.value = next;
+          _saveAssayDefault(storageField, next);
+        });
+      });
+    }
+
+    _wireDefaultStepper(UI.Settings.defaultISI,         "ISI");
+    _wireDefaultStepper(UI.Settings.defaultStimCount,   "StimCount");
+    _wireDefaultStepper(UI.Settings.defaultBinSize,     "BinSize");
+    _wireDefaultStepper(UI.Settings.defaultTemperature, "Temperature");
+    _wireDefaultStepper(UI.Settings.defaultHumidity,    "Humidity");
   }
 
 
