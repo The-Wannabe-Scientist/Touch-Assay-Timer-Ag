@@ -401,6 +401,13 @@ Use **nRF Connect** (iOS/Android) or **LightBlue** (iOS):
 | `0x01` | Single tap (50 ms) |
 | `0x02` | Run complete (100 ms · pause · 200 ms) |
 
+Write a byte to the Heartbeat characteristic to test the watchdog:
+
+| Value | Effect |
+|---|---|
+| `0x03` | Heartbeat keepalive (resets the 3 s watchdog timer) |
+| `0x04` | Heartbeat stop (disarms the watchdog — sent automatically when a run ends normally) |
+
 ---
 
 ## 🐛 Troubleshooting

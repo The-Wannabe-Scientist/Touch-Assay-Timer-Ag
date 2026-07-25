@@ -76,6 +76,11 @@ export function setVoiceMode(mode) {
   voiceMode = mode;
 }
 
+/** @returns {"tick"|"count"|"tens"|"bins"} The currently active voice/cue mode. */
+export function getVoiceMode() {
+  return voiceMode;
+}
+
 /**
  * Sets the bin-boundary interval used by "bins" voice mode.
  * Call this at the start of each run with the active assay's binSize so

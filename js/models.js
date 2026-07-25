@@ -16,6 +16,12 @@
  * guarded against operating on already-transitioned objects.
  */
 
+/**
+ * @typedef {import('./utils.js').Assay} Assay
+ * @typedef {import('./utils.js').Trial} Trial
+ * @typedef {import('./utils.js').Run} Run
+ */
+
 /* ==========================================================================
    Internal Helpers
    ========================================================================== */
@@ -111,11 +117,20 @@ export function createRun({ genotype, animalIndex, expectedStimCount }) {
     expectedStimCount,
     values:                    [],    // Filled during the run: 1 = responded, 0 = did not respond
     status:                    "active",  // "active" | "completed" | "stoppedEarly" | "abandoned"
-    eligibleForAnalysis:       null,  // Set to true/false on run completion
+    eligibleForAnalysis:       null,  // Effective eligibility — may be manually overridden (see below)
     ineligibleReason:          null,  // Human-readable reason when eligibleForAnalysis is false
     partialBinWarning:         null,  // Set if stimulus count is not an exact multiple of binSize
     touchIndexExcluded:        false,
     touchIndexExclusionReason: null,
+    // Snapshot of the AUTOMATIC eligibility determination, captured once when
+    // the run completes/stops and never changed afterward — preserves what
+    // the system originally decided even if a human later overrides it.
+    autoEligibleForAnalysis:   null,
+    autoIneligibleReason:      null,
+    // Manual override — set via the progress table's eligibility toggle.
+    manuallyOverridden:        false,
+    overrideReason:            null,  // Optional free-text note from the user (not mandatory)
+    overrideAt:                null,
     startedAt:                 Date.now(),
     endedAt:                   null
   };

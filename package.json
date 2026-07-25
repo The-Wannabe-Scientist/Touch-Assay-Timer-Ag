@@ -1,0 +1,10 @@
+{
+  "name": "touch-assay-timer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Precision stimulus-response assay timer for C. elegans touch sensitivity experiments.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

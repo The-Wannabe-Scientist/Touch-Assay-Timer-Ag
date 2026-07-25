@@ -31,6 +31,12 @@ import {
   escapeHTML
 } from "./utils.js";
 
+/**
+ * @typedef {import('./utils.js').Assay} Assay
+ * @typedef {import('./utils.js').Trial} Trial
+ * @typedef {import('./utils.js').Run} Run
+ */
+
 
 /* ==========================================================================
    Constants
@@ -92,10 +98,42 @@ function groupAndSortRuns(runs, genotypes, isPooled = false) {
       runsByGenotype[g].forEach((run, i) => { run.globalAnimalIndex = i + 1; });
     } else {
       runsByGenotype[g].sort((a, b) => a.animalIndex - b.animalIndex);
+      // A failed attempt and its successful retry share the same animalIndex
+      // by design (see startRun() — only completed && eligibleForAnalysis
+      // runs advance the counter), so both would otherwise render as
+      // identical "Animal N" columns in the per-trial raw/binned exports,
+      // distinguishable only by cross-referencing the Run Status row.
+      // Tag every run after the first with the same index so callers can
+      // append a disambiguating "(retry N)" suffix to the label.
+      const seenCount = new Map();
+      runsByGenotype[g].forEach(run => {
+        const count = (seenCount.get(run.animalIndex) ?? 0) + 1;
+        seenCount.set(run.animalIndex, count);
+        run.animalLabelSuffix = count > 1 ? ` (retry ${count - 1})` : "";
+      });
     }
   });
 
   return runsByGenotype;
+}
+
+/**
+ * Formats the "Manual Override" cell for a run — empty string if the run's
+ * eligibility was never manually overridden, otherwise a note documenting
+ * the effective decision, the original automatic determination, and any
+ * free-text reason the user entered.
+ *
+ * @param {Object} run - A run object (may have manuallyOverridden/overrideReason/
+ *   autoEligibleForAnalysis/autoIneligibleReason fields).
+ * @returns {string}
+ */
+function formatOverrideNote(run) {
+  if (!run.manuallyOverridden) return "";
+  const autoPart = run.autoEligibleForAnalysis
+    ? "auto: eligible"
+    : `auto: ${run.autoIneligibleReason ?? "ineligible"}`;
+  const notePart = run.overrideReason ? ` — ${run.overrideReason}` : "";
+  return `Manually marked ${run.eligibleForAnalysis ? "ELIGIBLE" : "INELIGIBLE"} (${autoPart})${notePart}`;
 }
 
 /**
@@ -202,10 +240,18 @@ export function buildMetadata2D(assay) {
   ];
 }
 
+// First-cell labels that mark a row as a header/descriptor row in the preview
+// table — covers every row type produced by buildTrialRaw2D/buildTrialBinned2D
+// /buildTrialTouchIndexBinned2D and their pooled equivalents.
+const HTML_PREVIEW_HEADER_LABELS = new Set([
+  "Bin", "Genotype", "Animal", "Trial", "Trial Animal", "Run Status",
+  "Partial Bin Warning", "Ineligible Reason", "Manual Override"
+]);
+
 /**
  * Renders a 2D data array as an HTML table for the preview modal.
- * The first row and any row whose first cell is "Bin" or "Genotype" are
- * rendered as <th> header cells.
+ * The first row and any row whose first cell is a known header/descriptor
+ * label (see HTML_PREVIEW_HEADER_LABELS) are rendered as <th> header cells.
  *
  * @param {string}  title  - Section heading displayed above the table.
  * @param {any[][]} data2D - The 2D array to render.
@@ -239,8 +285,8 @@ export function buildHtmlTableFrom2D(title, data2D) {
         ? String(Number.isInteger(content) ? content : content.toFixed(2))
         : escapeHTML(content);  // Escape user-supplied strings to prevent XSS
 
-      // Header cells: first row, or rows that start with "Bin" / "Genotype"
-      const isHeaderRow = rowIndex === 0 || row[0] === "Bin" || row[0] === "Genotype";
+      // Header cells: first row, or rows starting with a known header/descriptor label
+      const isHeaderRow = rowIndex === 0 || HTML_PREVIEW_HEADER_LABELS.has(row[0]);
       html += isHeaderRow
         ? `<th>${displayValue}</th>`
         : `<td>${displayValue}</td>`;
@@ -300,25 +346,27 @@ export function buildTrialRaw2D(trial, assay) {
   const { stimCount, genotypes } = assay;
   const runsByGenotype = groupAndSortRuns(trial.runs, genotypes, false);
 
-  // Build the five header rows
+  // Build the six header rows
   const headerGenotype   = ["Genotype"];
   const headerAnimal     = ["Animal"];
   const headerStatus     = ["Run Status"];
   const headerPartialBin = ["Partial Bin Warning"];
   const headerIneligible = ["Ineligible Reason"];
+  const headerOverride   = ["Manual Override"];
 
   genotypes.forEach((g, gi) => {
     runsByGenotype[g].forEach(run => {
       headerGenotype.push(g);
-      headerAnimal.push(`Animal ${run.animalIndex}`);
+      headerAnimal.push(`Animal ${run.animalIndex}${run.animalLabelSuffix ?? ""}`);
       headerStatus.push(RUN_STATUS_LABELS[run.status] ?? run.status);
       headerPartialBin.push(run.partialBinWarning ?? "");
       headerIneligible.push(run.ineligibleReason  ?? "");
+      headerOverride.push(formatOverrideNote(run));
     });
     // Blank spacer column between genotypes (not after the last one)
     if (gi < genotypes.length - 1) {
       headerGenotype.push(""); headerAnimal.push(""); headerStatus.push("");
-      headerPartialBin.push(""); headerIneligible.push("");
+      headerPartialBin.push(""); headerIneligible.push(""); headerOverride.push("");
     }
   });
 
@@ -338,7 +386,7 @@ export function buildTrialRaw2D(trial, assay) {
     rows.push(row);
   }
 
-  return [headerGenotype, headerAnimal, headerStatus, headerPartialBin, headerIneligible, ...rows];
+  return [headerGenotype, headerAnimal, headerStatus, headerPartialBin, headerIneligible, headerOverride, ...rows];
 }
 
 /**
@@ -357,15 +405,17 @@ export function buildTrialBinned2D(trial, assay) {
   const headerGenotype = ["Genotype"];
   const headerAnimal   = ["Animal"];
   const headerStatus   = ["Run Status"];
+  const headerOverride = ["Manual Override"];
 
   genotypes.forEach((g, gi) => {
     runsByGenotype[g].forEach(run => {
       headerGenotype.push(g);
-      headerAnimal.push(`Animal ${run.animalIndex}`);
+      headerAnimal.push(`Animal ${run.animalIndex}${run.animalLabelSuffix ?? ""}`);
       headerStatus.push(RUN_STATUS_LABELS[run.status] ?? run.status);
+      headerOverride.push(formatOverrideNote(run));
     });
     if (gi < genotypes.length - 1) {
-      headerGenotype.push(""); headerAnimal.push(""); headerStatus.push("");
+      headerGenotype.push(""); headerAnimal.push(""); headerStatus.push(""); headerOverride.push("");
     }
   });
 
@@ -402,6 +452,7 @@ export function buildTrialBinned2D(trial, assay) {
     rawRows.push(rawRow);
 
     // Summary (mean ± SEM ± N) row
+    /** @type {(string|number)[]} */
     const sumRow = [binLabel];
     genotypes.forEach(g => {
       const values = runsByGenotype[g]
@@ -419,7 +470,7 @@ export function buildTrialBinned2D(trial, assay) {
   const _sep = Array(headerGenotype.length).fill("");
 
   return [
-    headerGenotype, headerAnimal, headerStatus,
+    headerGenotype, headerAnimal, headerStatus, headerOverride,
     ...rawRows,
     _sep, _sep, _sep,
     summaryHeader,
@@ -441,14 +492,16 @@ export function buildTrialTouchIndexBinned2D(trial, assay) {
 
   const headerGenotype = ["Genotype"];
   const headerAnimal   = ["Animal"];
+  const headerOverride = ["Manual Override"];
 
   genotypes.forEach((g, gi) => {
     runsByGenotype[g].forEach(run => {
       headerGenotype.push(g);
-      headerAnimal.push(`Animal ${run.animalIndex}`);
+      headerAnimal.push(`Animal ${run.animalIndex}${run.animalLabelSuffix ?? ""}`);
+      headerOverride.push(formatOverrideNote(run));
     });
     if (gi < genotypes.length - 1) {
-      headerGenotype.push(""); headerAnimal.push("");
+      headerGenotype.push(""); headerAnimal.push(""); headerOverride.push("");
     }
   });
 
@@ -486,7 +539,7 @@ export function buildTrialTouchIndexBinned2D(trial, assay) {
     rows.push(row);
   }
 
-  return [headerGenotype, headerAnimal, ...rows];
+  return [headerGenotype, headerAnimal, headerOverride, ...rows];
 }
 
 /**
@@ -530,6 +583,7 @@ export function buildTrialTouchIndexAnalysed2D(trial, assay) {
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
     const start = binIndex * binSize + 1;
     const end   = start + binSize - 1;
+    /** @type {(string|number)[]} */
     const row   = [`Bin ${binIndex + 1} (${start}–${end})`];
 
     genotypes.forEach(g => {
@@ -568,7 +622,7 @@ export function buildPooledRaw2D(assay, options = {}, _runs = null) {
   const runs           = _runs || collectPooledRuns(assay, options);
   const runsByGenotype = groupAndSortRuns(runs, genotypes, true);
 
-  // Seven header rows for pooled view
+  // Eight header rows for pooled view
   const hGenotype    = ["Genotype"];
   const hAnimal      = ["Animal"];
   const hTrial       = ["Trial"];
@@ -576,6 +630,7 @@ export function buildPooledRaw2D(assay, options = {}, _runs = null) {
   const hStatus      = ["Run Status"];
   const hPartialBin  = ["Partial Bin Warning"];
   const hIneligible  = ["Ineligible Reason"];
+  const hOverride    = ["Manual Override"];
 
   genotypes.forEach((g, gi) => {
     runsByGenotype[g].forEach(run => {
@@ -586,9 +641,10 @@ export function buildPooledRaw2D(assay, options = {}, _runs = null) {
       hStatus.push(RUN_STATUS_LABELS[run.status] ?? run.status);
       hPartialBin.push(run.partialBinWarning ?? "");
       hIneligible.push(run.ineligibleReason  ?? "");
+      hOverride.push(formatOverrideNote(run));
     });
     if (gi < genotypes.length - 1) {
-      [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hPartialBin, hIneligible]
+      [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hPartialBin, hIneligible, hOverride]
         .forEach(h => h.push(""));
     }
   });
@@ -607,7 +663,7 @@ export function buildPooledRaw2D(assay, options = {}, _runs = null) {
     rows.push(row);
   }
 
-  return [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hPartialBin, hIneligible, ...rows];
+  return [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hPartialBin, hIneligible, hOverride, ...rows];
 }
 
 /**
@@ -632,6 +688,7 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
   const hTrial       = ["Trial"];
   const hTrialAnimal = ["Trial Animal"];
   const hStatus      = ["Run Status"];
+  const hOverride    = ["Manual Override"];
 
   genotypes.forEach((g, gi) => {
     runsByGenotype[g].forEach(run => {
@@ -640,9 +697,10 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
       hTrial.push(`Trial ${run.trialIndex}`);
       hTrialAnimal.push(`Animal ${run.animalIndex}`);
       hStatus.push(RUN_STATUS_LABELS[run.status] ?? run.status);
+      hOverride.push(formatOverrideNote(run));
     });
     if (gi < genotypes.length - 1) {
-      [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus].forEach(h => h.push(""));
+      [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hOverride].forEach(h => h.push(""));
     }
   });
 
@@ -685,6 +743,7 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
     rawRows.push(rawRow);
 
     // Summary row
+    /** @type {(string|number)[]} */
     const sumRow = [binLabel];
     genotypes.forEach(g => {
       const values = runsByGenotype[g]
@@ -698,11 +757,11 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
   }
 
   return [
-    hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus,
+    hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hOverride,
     ...rawRows,
     // Separator rows must span the FULL header width (all run columns
-    // plus the spacer columns between genotypes), not just the 5 static header fields.
-    // The old hardcoded 5-cell arrays caused SheetJS to detect fewer columns than the
+    // plus the spacer columns between genotypes), not just the static header fields.
+    // The old hardcoded fixed-width arrays caused SheetJS to detect fewer columns than the
     // data rows had, producing inconsistent column widths in the Excel preview for any
     // experiment with more than one run per genotype.
     ...Array(3).fill(Array(hGenotype.length).fill("")),
@@ -730,14 +789,16 @@ export function buildPooledTouchIndexBinned2D(assay, options = {}, _runs = null,
 
   const headerGenotype = ["Genotype"];
   const headerAnimal   = ["Animal"];
+  const headerOverride = ["Manual Override"];
 
   genotypes.forEach((g, gi) => {
     runsByGenotype[g].forEach(run => {
       headerGenotype.push(g);
       headerAnimal.push(`Animal ${run.globalAnimalIndex}`);
+      headerOverride.push(formatOverrideNote(run));
     });
     if (gi < genotypes.length - 1) {
-      headerGenotype.push(""); headerAnimal.push("");
+      headerGenotype.push(""); headerAnimal.push(""); headerOverride.push("");
     }
   });
 
@@ -780,7 +841,7 @@ export function buildPooledTouchIndexBinned2D(assay, options = {}, _runs = null,
     rows.push(row);
   }
 
-  return [headerGenotype, headerAnimal, ...rows];
+  return [headerGenotype, headerAnimal, headerOverride, ...rows];
 }
 
 /**
@@ -835,6 +896,7 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}, _runs = nul
   for (let binIndex = 0; binIndex < maxBinCount; binIndex++) {
     const start = binIndex * binSize + 1;
     const end   = start + binSize - 1;
+    /** @type {(string|number)[]} */
     const row   = [`Bin ${binIndex + 1} (${start}–${end})`];
 
     genotypes.forEach(g => {

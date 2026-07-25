@@ -101,7 +101,7 @@
       <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
       <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
     </svg>
-    Recording in progress — do not leave this page.
+    Recording in progress — leaving or backgrounding this page will stop the current run.
   </div>
 
   <!-- #9: Persistent storage-unavailable warning -->
@@ -154,6 +154,8 @@
               enterkeyhint="done"
             >
           </div>
+          <!-- Max genotype count hint — shown by JS when limit is reached -->
+          <p id="genotypeMaxHint" class="warning" hidden>Maximum of 10 genotypes reached.</p>
         </fieldset>
 
         <fieldset>
@@ -191,6 +193,8 @@
                 <input type="number" id="ISI" min="0.1" step="0.1" value="1" required inputmode="decimal">
                 <button type="button" class="stepper-btn" data-target="ISI" data-delta="0.1" aria-label="Increase ISI">+</button>
               </div>
+              <!-- Grace period × ISI conflict warning — shown by JS when grace > halfISI -->
+              <p id="graceIsiWarning" class="warning" hidden></p>
             </div>
           
             <div class="input-group">
@@ -218,13 +222,11 @@
           <p id="binWarning" class="warning" hidden></p>
         </fieldset>
         
-        <p class="instruction">
-          Please ensure your assay setup is ready before beginning.
-        </p>
-        
-        <button type="submit" class="primary" id="beginBtn">
-          Begin Assay
-        </button>
+        <!-- Sticky begin-bar: keeps the button visible without scrolling on small screens -->
+        <div class="begin-bar">
+          <p class="instruction">Please ensure your assay setup is ready before beginning.</p>
+          <button type="submit" class="primary" id="beginBtn">Begin Assay</button>
+        </div>
       </form>
       <footer class="setup-footer">
         <p>Adapted by <a href="https://github.com/The-Wannabe-Scientist" target="_blank" rel="noopener">Ag</a>  from <a href="https://github.com/dv-welp/touch-assay-timer" target="_blank" rel="noopener">touch-assay-timer</a> by <a href="https://github.com/dv-welp/" target="_blank" rel="noopener">DV</a></p>
@@ -240,6 +242,8 @@
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="toggle-progress-icon-eye"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="toggle-progress-icon-eye-off" hidden><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
           <span class="toggle-progress-label">Hide Progress</span>
+          <!-- Run count badge — updated by JS after each run completes -->
+          <span id="progressRunBadge" class="progress-run-badge" hidden></span>
         </button>
       </header>
       
@@ -247,6 +251,13 @@
         <div id="liveProgress" class="live-progress">
           Stimulus: <span id="currentStimDisplay">0</span> / <span id="totalStimDisplay">100</span>
         </div>
+
+        <!-- Periodic progress announcement for screen-reader users in "Tick" voice
+             mode, where the app otherwise gives no spoken/announced feedback during
+             a run. Deliberately NOT on #liveProgress itself — that updates every
+             stimulus, which would spam an aria-live region at typical ISIs. Updated
+             only every 10th stimulus from the scheduler (see main.js). -->
+        <div id="stimulusProgressAnnouncer" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
 
         <div id="visualMetronomeContainer">
           <div id="visualMetronomeBar"></div>
@@ -280,6 +291,8 @@
 
       <p>Select datasets to include in the export.</p>
 
+      <!-- 3.4: Touch Index exclusion warning — populated by JS in populateExportDatasetList() -->
+      <p id="tiExclusionWarning" class="warning" hidden></p>
 
       <fieldset>
         <legend>Datasets</legend>
@@ -291,10 +304,22 @@
       </fieldset>
       
       <div class="export-actions">
-        <button id="exportExcel" class="primary export-primary-btn">Export to Excel</button>
+        <button id="exportExcel" class="primary export-primary-btn">
+          <!-- Table/spreadsheet icon -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
+          Export to Excel
+        </button>
         <div class="export-secondary-row">
-          <button id="previewExcel" class="secondary">Preview Results</button>
-          <button id="exportCSV" class="secondary" title="Export comma-separated values (works offline)">Export CSV</button>
+          <button id="previewExcel" class="secondary">
+            <!-- Eye/preview icon -->
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            Preview Results
+          </button>
+          <button id="exportCSV" class="secondary" title="Export comma-separated values (works offline)">
+            <!-- Document icon -->
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            Export CSV
+          </button>
         </div>
       </div>
 
@@ -409,6 +434,32 @@
             <span class="slider-icon-max" aria-hidden="true" style="font-size:0.6rem;font-weight:700;color:var(--text-muted);">490</span>
           </div>
           <p class="settings-hint">Compensates for Bluetooth or system audio latency by triggering the spoken cue slightly early. Increase this if the voice counts seem delayed. (Typical: 60–150 ms).</p>
+        </div>
+      </fieldset>
+
+      <!-- ── Test Rig ──────────────────────────────────────────────────── -->
+      <fieldset class="settings-card">
+        <legend class="settings-legend">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/>
+          </svg>
+          Test Rig
+        </legend>
+        <p class="settings-hint" style="margin-bottom:0.75rem;">
+          Loops a tick tone and a visual flash once per second — and pings your armband too,
+          if connected — so you can verify timing and haptics feel right before mounting an
+          animal. Nothing is saved and no assay is required.
+        </p>
+        <div class="test-rig-row">
+          <button id="testRigBtn" type="button" class="secondary test-rig-btn" aria-pressed="false">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/>
+            </svg>
+            <span id="testRigBtnLabel">Start Test Rig</span>
+          </button>
+          <span id="testRigPulse" class="test-rig-pulse" aria-hidden="true"></span>
         </div>
       </fieldset>
 
@@ -700,28 +751,28 @@
             </tr>
             <tr>
               <td>ISI</td>
-              <td>&gt; 0 s</td>
+              <td><span class="clamp-range">&gt; 0 s</span></td>
               <td>Warning if &lt; 0.5 s</td>
             </tr>
             <tr>
               <td>Total Stimulations</td>
-              <td>≥ 1</td>
-              <td>—</td>
+              <td><span class="clamp-range">≥ 1</span></td>
+              <td data-empty>—</td>
             </tr>
             <tr>
               <td>Bin Size</td>
-              <td>1 – stim count</td>
-              <td>Warning if stim count is not an exact multiple — remainder values dropped from analysis</td>
+              <td><span class="clamp-range">1 – stim count</span></td>
+              <td>Warning if not an exact multiple — remainder dropped from analysis</td>
             </tr>
             <tr>
               <td>Temperature</td>
-              <td>−10 – 60 °C</td>
-              <td>Optional</td>
+              <td><span class="clamp-range">−10 – 60 °C</span></td>
+              <td>Optional field</td>
             </tr>
             <tr>
               <td>Humidity</td>
-              <td>0 – 100 %</td>
-              <td>Optional</td>
+              <td><span class="clamp-range">0 – 100 %</span></td>
+              <td>Optional field</td>
             </tr>
           </tbody>
 
@@ -732,13 +783,13 @@
             </tr>
             <tr>
               <td>Warmup Duration</td>
-              <td>1 – 60 s</td>
-              <td>1 s</td>
+              <td><span class="clamp-range">1 – 60 s</span></td>
+              <td>1 s step</td>
             </tr>
             <tr>
               <td>Grace Period</td>
-              <td>0 – 400 ms</td>
-              <td>10 ms</td>
+              <td><span class="clamp-range">0 – 400 ms</span></td>
+              <td>10 ms step</td>
             </tr>
           </tbody>
 
@@ -749,13 +800,13 @@
             </tr>
             <tr>
               <td>Tick Pitch</td>
-              <td>200 – 2000 Hz</td>
-              <td>50 Hz</td>
+              <td><span class="clamp-range">200 – 2000 Hz</span></td>
+              <td>50 Hz step</td>
             </tr>
             <tr>
               <td>Speech Lead</td>
-              <td>0 – 490 ms</td>
-              <td>10 ms</td>
+              <td><span class="clamp-range">0 – 490 ms</span></td>
+              <td>10 ms step</td>
             </tr>
           </tbody>
         </table>
@@ -806,13 +857,13 @@
           <span class="guideline-icon" aria-hidden="true">
              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           </span>
-          <span><strong>Recording Responses:</strong> Tap the large recording button (or press Spacebar) to register a response.</span>
+          <span><strong>Recording Non-Responses:</strong> Tap the large button (or press Spacebar) to record that the animal <em>did not respond</em> to the stimulus. No tap = the animal responded (recorded as 1); tap = no response (recorded as 0). This inverted convention is intentional.</span>
         </div>
         <div class="guideline-card">
           <span class="guideline-icon" aria-hidden="true">
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           </span>
-          <span><strong>Interval Scoring:</strong> Taps are recorded per interval, not by exact reaction time. Multiple taps within the same interval are treated as a single positive response.</span>
+          <span><strong>Interval Scoring:</strong> Taps are recorded per interval, not by exact reaction time. Multiple taps within the same interval are treated as a single non-response.</span>
         </div>
         <div class="guideline-card">
           <span class="guideline-icon" aria-hidden="true">
@@ -872,7 +923,26 @@
 
   <section id="savedAssaysScreen" hidden>
       <h2>Saved Assays</h2>
-      
+
+      <!-- Full-data backup/restore — a safety net beyond the analysis Excel/CSV
+           export, since all data here is local-only with no cloud sync. -->
+      <div class="backup-actions">
+        <button id="exportBackupBtn" type="button" class="secondary">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Export Full Backup
+        </button>
+        <button id="importBackupBtn" type="button" class="secondary">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Import Backup
+        </button>
+        <input type="file" id="importBackupInput" accept="application/json,.json" hidden>
+      </div>
+      <p class="settings-hint backup-hint">
+        Backs up every assay, trial, and run — not just analysis output — so a browser
+        storage wipe or device change isn't catastrophic. Importing only adds/updates
+        data; nothing already on this device is deleted.
+      </p>
+
       <div class="bulk-actions">
         <label class="toggle-label bulk-select-label">
           <input type="checkbox" id="selectAllAssays"> Select All
@@ -999,9 +1069,46 @@
       });
     }
 
+    // Genotype count limits:
+    //   Soft warning at ≥16 genotypes (rare in practice, users typically have ≤5)
+    //   Hard cap at 20 — prevents accidentally very wide exports / select menus.
+    // (Raised from the original 10/8 — that cap was arbitrary and too tight for
+    // larger mutant/RNAi screening panels.)
+    const MAX_GENOTYPES = 20;
+    const WARN_GENOTYPES = 16;
+
+    /** Shows or hides the max-genotype hint based on current count. */
+    function updateGenotypeMaxHint() {
+      const hint = document.getElementById('genotypeMaxHint');
+      if (!hint) return;
+      const count = chipList.querySelectorAll('.chip').length;
+      if (count >= MAX_GENOTYPES) {
+        hint.textContent = `Maximum of ${MAX_GENOTYPES} genotypes reached. Remove one to add another.`;
+        hint.hidden = false;
+        // Disable further text input so the browser doesn't ignore the cap
+        textInput.disabled = true;
+        textInput.placeholder = `Max ${MAX_GENOTYPES} genotypes`;
+      } else if (count >= WARN_GENOTYPES) {
+        hint.textContent = `${count} genotypes added — genotype counts rarely exceed 5. Double-check your setup.`;
+        hint.hidden = false;
+        textInput.disabled = false;
+        textInput.placeholder = 'Type & press Enter or comma…';
+      } else {
+        hint.hidden = true;
+        textInput.disabled = false;
+        textInput.placeholder = 'Type & press Enter or comma…';
+      }
+    }
+
     function addChip(raw) {
       const val = raw.replace(/,/g, '').trim();
       if (!val) return;
+
+      // Hard cap: refuse to add if we're already at the maximum.
+      if (chipList.querySelectorAll('.chip').length >= MAX_GENOTYPES) {
+        updateGenotypeMaxHint();
+        return;
+      }
 
       // Fuzzy duplicate check: ignore case, whitespace, hyphens and punctuation.
       const normVal = normaliseGenotype(val);
@@ -1044,6 +1151,7 @@
       removeBtn.addEventListener('click', function () {
         chip.remove();
         syncHidden();
+        updateGenotypeMaxHint();
         // Notify main.js's scheduleDraftSave listener so the updated genotype list
         // Is persisted to localStorage. Without this dispatch, removing a chip here
         // Only updates the hidden input value in memory — the draft is never written,
@@ -1055,6 +1163,7 @@
       chip.appendChild(removeBtn);
       chipList.appendChild(chip);
       syncHidden();
+      updateGenotypeMaxHint();
     }
 
     textInput.addEventListener('keydown', function (e) {
@@ -1081,6 +1190,30 @@
         const pending = parts.pop();
         parts.forEach(function (p) { addChip(p); });
         textInput.value = pending;
+      }
+    });
+
+    // Paste handler: split pasted text on commas, newlines, and carriage returns,
+    // then add each non-empty token as a chip.  Splitting on \n / \r handles
+    // the common case of pasting a column from a spreadsheet (Excel, Sheets),
+    // where cells are separated by newlines rather than commas.
+    // Shows a brief count toast when ≥2 chips are added in one paste action,
+    // and an advisory toast when nothing was added (all duplicates or cap hit).
+    textInput.addEventListener('paste', function (e) {
+      e.preventDefault();
+      const raw = (e.clipboardData || window.clipboardData).getData('text');
+      if (!raw) return;
+      const countBefore = chipList.querySelectorAll('.chip').length;
+      raw.split(/[,\n\r]+/).forEach(function (p) { addChip(p); });
+      const countAfter = chipList.querySelectorAll('.chip').length;
+      const added = countAfter - countBefore;
+      if (typeof window.showToast === 'function') {
+        if (added >= 2) {
+          window.showToast(`${added} genotypes added from paste.`, 'info', 2500);
+        } else if (added === 0) {
+          window.showToast('No new genotypes added — all were duplicates or the maximum is reached.', 'info', 3000);
+        }
+        // added === 1: single chip added, no toast needed (chip itself is clear feedback)
       }
     });
 
@@ -1142,9 +1275,11 @@
     // does not need to duplicate DOM creation and hidden input synchronization logic.
     window.ChipInput = {
       addChip,
+      updateGenotypeMaxHint,
       clearChips: () => {
         chipList.innerHTML = "";
         syncHidden();
+        updateGenotypeMaxHint();
       }
     };
   })();

@@ -44,9 +44,16 @@
  * @property {number}      expectedStimCount        - Target number of stimuli to record.
  * @property {number[]}    values                   - 1 = responded, 0 = did not respond (one per stimulus).
  * @property {"active"|"completed"|"stoppedEarly"|"abandoned"} status
- * @property {boolean|null} eligibleForAnalysis     - Set to true/false on run completion.
+ * @property {boolean|null} eligibleForAnalysis     - Effective eligibility (may be manually overridden).
  * @property {string|null} ineligibleReason         - Human-readable reason when ineligible.
  * @property {string|null} partialBinWarning        - Set when stimulus count is not a multiple of binSize.
+ * @property {boolean}     touchIndexExcluded       - Set true when Touch Index cannot be computed (zero baseline).
+ * @property {string|null} touchIndexExclusionReason - Human-readable reason for the TI exclusion.
+ * @property {boolean|null} autoEligibleForAnalysis - Snapshot of the automatic determination, immutable once set.
+ * @property {string|null} autoIneligibleReason     - Snapshot of the automatic reason, immutable once set.
+ * @property {boolean}     manuallyOverridden       - True if a human has overridden the automatic eligibility.
+ * @property {string|null} overrideReason           - Optional free-text note for the override.
+ * @property {number|null} overrideAt               - Unix timestamp (ms) of the override, or null.
  * @property {number}      startedAt                - Unix timestamp (ms).
  * @property {number|null} endedAt                  - Unix timestamp (ms), null while active.
  */
@@ -127,14 +134,30 @@ export function validateInputs(values) {
       `ISI of ${values.isi}s is very short — timing accuracy may be reduced on this device. ` +
       `Consider using ≥0.5s for reliable results.`
     );
+  } else if (values.isi > 60) {
+    // Symmetric advisory for the opposite typo direction — an ISI this long is
+    // implausible for a habituation assay and usually means an extra digit.
+    warnings.push(
+      `ISI of ${values.isi}s is unusually long for a touch assay. Double-check this is intended.`
+    );
   }
 
   if (values.stimCount <= 0) {
     errors.push("Stimulus count must be greater than zero.");
+  } else if (values.stimCount > 500) {
+    // Non-blocking advisory — catches an accidental extra digit (e.g. 1000
+    // instead of 100) that would otherwise silently create a very long run.
+    warnings.push(
+      `Stimulus count of ${values.stimCount} is unusually large. Double-check this is intended.`
+    );
   }
 
   if (values.binSize <= 0) {
     errors.push("Bin size must be greater than zero.");
+  } else if (values.binSize > 100) {
+    warnings.push(
+      `Bin size of ${values.binSize} is unusually large. Double-check this is intended.`
+    );
   }
 
   // If binSize > stimCount, binRunValues() produces an empty array
@@ -142,6 +165,20 @@ export function validateInputs(values) {
   // columns in the export with no user-facing explanation.
   if (values.binSize > 0 && values.stimCount > 0 && values.binSize > values.stimCount) {
     errors.push(`Bin size (${values.binSize}) cannot be larger than the total stimulus count (${values.stimCount}).`);
+  }
+
+  // Total run duration sanity check — catches typos in either field that only
+  // become obvious when combined (e.g. ISI and stimCount both individually
+  // plausible, but multiplying out to a multi-hour run per animal).
+  if (values.isi > 0 && values.stimCount > 0) {
+    const totalSeconds = values.isi * values.stimCount;
+    if (totalSeconds > 3600) {
+      const minutes = Math.round(totalSeconds / 60);
+      warnings.push(
+        `This run will take approximately ${minutes} minutes per animal (ISI × stimulus count). ` +
+        `Double-check this is intended.`
+      );
+    }
   }
 
   // Temperature and humidity are optional — main.js maps an empty field to null,
@@ -196,20 +233,16 @@ export function generateAutoID() {
  *   0 = animal did not respond (experimenter tapped to record non-response)
  * Therefore, a higher bin percentage means a more responsive animal.
  *
- * If the total number of values is not an exact multiple of binSize and
- * allowPartialBin is false (the default), trailing values that do not fill
- * a complete bin are silently dropped and a console warning is emitted.
+ * If the total number of values is not an exact multiple of binSize, trailing
+ * values that do not fill a complete bin are dropped and a console warning is
+ * emitted (this is surfaced to the user separately as run.partialBinWarning —
+ * see completeRunNormally() in main.js).
  *
- * @param {number[]} values               - Raw stimulus values (0s and 1s).
- * @param {number}   binSize              - Number of values per bin.
- * @param {Object}   [options]            - Optional behaviour overrides.
- * @param {boolean}  [options.allowPartialBin=false] - Keep the last partial bin.
- * @param {boolean}  [options.warnOnDrop=true]       - Log a warning when values are dropped.
+ * @param {number[]} values  - Raw stimulus values (0s and 1s).
+ * @param {number}   binSize - Number of values per bin.
  * @returns {number[]} Percentage per bin (0–100), ordered chronologically.
  */
-export function binRunValues(values, binSize, options = {}) {
-  const { allowPartialBin = false, warnOnDrop = true } = options;
-
+export function binRunValues(values, binSize) {
   // Guard against null/undefined values (e.g. from a partially-written DB record)
   if (!values || !Array.isArray(values)) return [];
 
@@ -218,14 +251,12 @@ export function binRunValues(values, binSize, options = {}) {
 
   // Determine how many values can be cleanly binned
   let usableCount = totalValues;
-  if (remainder !== 0 && !allowPartialBin) {
+  if (remainder !== 0) {
     usableCount = totalValues - remainder;
-    if (warnOnDrop) {
-      console.warn(
-        `[Data Truncated] Dropped ${remainder} trailing value(s) that do not ` +
-        `form a complete bin of size ${binSize}.`
-      );
-    }
+    console.warn(
+      `[Data Truncated] Dropped ${remainder} trailing value(s) that do not ` +
+      `form a complete bin of size ${binSize}.`
+    );
   }
 
   const usableValues     = values.slice(0, usableCount);
@@ -338,7 +369,7 @@ export function collectPooledRuns(assay, options = {}) {
  * whether preview, export, or CSV functions have been called beforehand.
  *
  * @param {Assay} assay - The full assay object (needs assay.binSize).
- * @returns {Array<[number, string, number, string]>}
+ * @returns {Array<[number, string, number|string, string]>}
  *   Each row: [trialIndex, genotype, animalIndex, exclusionReason]
  */
 export function collectTouchIndexExclusions(assay) {

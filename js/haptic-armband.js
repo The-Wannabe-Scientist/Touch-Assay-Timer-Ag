@@ -36,6 +36,7 @@ const BATT_LEVEL_UUID   = 0x2A19;
 const CMD_TAP          = new Uint8Array([0x01]);  // Mirrors vibrate(50)
 const CMD_RUN_COMPLETE = new Uint8Array([0x02]);  // Mirrors vibrate([100,50,200])
 const CMD_HEARTBEAT    = new Uint8Array([0x03]);  // Must differ from CMD_TAP (0x01)
+const CMD_HEARTBEAT_STOP = new Uint8Array([0x04]); // Tells firmware the run ended on purpose, so it doesn't fire a false "connection lost" alert 3s later
 
 // Module-level connection state
 let _device             = null;
@@ -158,8 +159,13 @@ export function armbandStartHeartbeat() {
  * Stops the heartbeat writer.
  * Call inside stopCueLoop() so the armband watchdog is not left running
  * between runs when the worker is idle.
+ *
+ * Also tells the firmware the stop is intentional (CMD_HEARTBEAT_STOP) so its
+ * watchdog disarms immediately instead of timing out ~3 s later and firing a
+ * false "connection lost" stutter warning after every single run.
  */
 export function armbandStopHeartbeat() {
+  _write(_hbChar, CMD_HEARTBEAT_STOP);
   _stopHeartbeat();
 }
 
@@ -206,11 +212,66 @@ async function _subscribeBattery(server) {
 /**
  * Handler for BLE Battery Level notifications.
  * Fires whenever the armband ADC reading drops by ≥1%.
- * @param {Event} e  BluetoothCharacteristicValueChangedEvent
+ * @param {Event & { target: BluetoothRemoteGATTCharacteristic }} e
  */
 function _handleBatteryUpdate(e) {
   const level = e.target.value.getUint8(0); // 0–100
   _onBatteryUpdateCb?.(level);
+}
+
+// Reconnect retry schedule after a disconnect — a single 1s attempt missed
+// any BLE dropout longer than a second (walking near a bench, a brief radio
+// hiccup), permanently disconnecting and forcing a manual re-pair through the
+// Web Bluetooth device picker mid-experiment. Three attempts with backoff
+// cover more of those transient cases before giving up.
+const RECONNECT_DELAYS_MS = [1000, 3000, 6000];
+
+function _delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Attempts to reconnect to `_device`, retrying with backoff per
+ * RECONNECT_DELAYS_MS. Stops early if the device reference is gone (explicit
+ * disconnect) or a connection is already established (e.g. reconnected via
+ * some other path) by the time a delay elapses.
+ * @param {number} [attempt=0] Index into RECONNECT_DELAYS_MS for this try.
+ */
+async function _attemptReconnect(attempt = 0) {
+  if (!_device || _connected) return;
+  await _delay(RECONNECT_DELAYS_MS[attempt]);
+  if (!_device || _connected) return;  // gave up or reconnected while waiting
+
+  try {
+    const server  = await _device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    _hapticChar   = await service.getCharacteristic(HAPTIC_UUID);
+    _hbChar       = await service.getCharacteristic(HEARTBEAT_UUID);
+    await _subscribeBattery(server);  // Re-subscribe after reconnect
+    _connected    = true;
+    // Restart heartbeat if it was running before the dropout.
+    // Without this, a brief BLE disconnect during an active run stops
+    // The heartbeat permanently → firmware watchdog fires stutter
+    // Warnings every 3 s for the rest of the run.
+    if (_hbWasActive) {
+      _hbWasActive = false;
+      armbandStartHeartbeat();
+    }
+    console.log(`[HapticArmband] Auto-reconnected (attempt ${attempt + 1}).`);
+    // Notify the UI so it can restore the "connected" appearance.
+    _onReconnectCb?.();
+  } catch (err) {
+    const nextAttempt = attempt + 1;
+    if (nextAttempt < RECONNECT_DELAYS_MS.length) {
+      console.warn(
+        `[HapticArmband] Reconnect attempt ${attempt + 1} failed — retrying in ` +
+        `${RECONNECT_DELAYS_MS[nextAttempt]}ms.`, err.message
+      );
+      _attemptReconnect(nextAttempt);
+    } else {
+      console.warn("[HapticArmband] Auto-reconnect failed after all retries — user must reconnect manually.");
+    }
+  }
 }
 
 function _handleDisconnect() {
@@ -219,30 +280,5 @@ function _handleDisconnect() {
   _stopHeartbeat();
   _battChar = null;  // GATT handles are invalid after disconnect
   _onDisconnectCb?.();
-
-  // Attempt a single automatic reconnect after 1 s.
-  setTimeout(async () => {
-    if (!_device || _connected) return;
-    try {
-      const server  = await _device.gatt.connect();
-      const service = await server.getPrimaryService(SERVICE_UUID);
-      _hapticChar   = await service.getCharacteristic(HAPTIC_UUID);
-      _hbChar       = await service.getCharacteristic(HEARTBEAT_UUID);
-      await _subscribeBattery(server);  // Re-subscribe after reconnect
-      _connected    = true;
-      // Restart heartbeat if it was running before the dropout.
-      // Without this, a brief BLE disconnect during an active run stops
-      // The heartbeat permanently → firmware watchdog fires stutter
-      // Warnings every 3 s for the rest of the run.
-      if (_hbWasActive) {
-        _hbWasActive = false;
-        armbandStartHeartbeat();
-      }
-      console.log("[HapticArmband] Auto-reconnected.");
-      // Notify the UI so it can restore the "connected" appearance.
-      _onReconnectCb?.();
-    } catch {
-      console.warn("[HapticArmband] Auto-reconnect failed — user must reconnect manually.");
-    }
-  }, 1000);
+  _attemptReconnect(0);
 }

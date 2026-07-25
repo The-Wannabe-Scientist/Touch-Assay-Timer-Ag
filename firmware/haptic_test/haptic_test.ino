@@ -237,30 +237,27 @@ void setup() {
 
   dumpRegisters("AFTER begin(), BEFORE manual init");
 
-  // ── ERM open-loop setup — explicit, step by step ─────────────
-  Serial.println("\n--- Configuring ERM open-loop ---");
-
-  drv.selectLibrary(1);                    // Library 1 = ERM
-  drv.useERM();                            // clear N_ERM_LRA bit
-
-  uint8_t c3 = drv.readRegister8(0x1D);
-  c3 |= 0x20;                              // set ERM_OPEN_LOOP bit5
-  drv.writeRegister8(0x1D, c3);
-
-  drv.writeRegister8(0x16, 0x90);          // RATED_VOLTAGE ~3.0 V
-  drv.writeRegister8(0x17, 0x96);          // OD_CLAMP ~3.3 V
-
-  // Explicitly clear STANDBY (bit6) and set MODE=0 (INTTRIG)
-  uint8_t modeReg = drv.readRegister8(0x01);
-  modeReg &= ~0x40;  // clear STANDBY
-  modeReg &= ~0x07;  // MODE = 0 (INTTRIG)
-  drv.writeRegister8(0x01, modeReg);
+  // Applies the LRA or ERM register/voltage/calibration sequence selected by
+  // the MOTOR_LRA / MOTOR_ERM switch at the top of this file. Previously this
+  // was hardcoded to the ERM sequence regardless of the switch, so testing an
+  // LRA motor silently applied the wrong (ERM) drive voltage and registers.
+  Serial.println();
+#ifdef MOTOR_LRA
+  Serial.println("--- Configuring LRA closed-loop ---");
+#else
+  Serial.println("--- Configuring ERM open-loop ---");
+#endif
+  initMotor();
 
   dumpRegisters("AFTER manual init");
 
   // ── Switch to RTP and hold ON for 10 s ───────────────────────
   Serial.println("\n>>> OUTPUT ON — measure OUT+ to GND now.");
+#ifdef MOTOR_LRA
+  Serial.println(">>> Expect ~1.8 V RMS and motor vibrating.");
+#else
   Serial.println(">>> Expect ~3.0 to 3.3 V and motor vibrating.");
+#endif
   Serial.println();
 
   drv.setMode(DRV2605_MODE_REALTIME);  // 0x05 = RTP mode

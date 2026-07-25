@@ -85,7 +85,11 @@ export function openDB() {
     // Each `if (event.oldVersion < N)` block is idempotent and only runs
     // When migrating from an older version, ensuring safe incremental upgrades.
     req.onupgradeneeded = event => {
-      const db  = event.target.result;
+      // Use req.result/req.transaction (not event.target.result) — event.target
+      // is the same IDBOpenDBRequest as req for a handler attached directly to
+      // it, and req is already correctly typed, unlike the generic EventTarget
+      // that event.target carries.
+      const db  = req.result;
       const oldV = event.oldVersion;  // 0 = fresh install
 
       // ── Version 1–3 stores (create on fresh install or old upgrade) ────
@@ -109,7 +113,7 @@ export function openDB() {
       // ── Version 4: add "status" index to runs store ──────────────────
       // Enables efficient orphan-run scanning on startup without a full table scan.
       if (oldV < 4 && db.objectStoreNames.contains(STORES.RUNS)) {
-        const runStore = event.target.transaction.objectStore(STORES.RUNS);
+        const runStore = req.transaction.objectStore(STORES.RUNS);
         if (!runStore.indexNames.contains("status")) {
           runStore.createIndex("status", "status", { unique: false });
         }
@@ -188,6 +192,10 @@ export async function hydrateAssay(assayId) {
   const db = await openDB();
 
   // Step 1: Load the top-level assay record
+  // Typed string|number (not just string) — older DB records can have a
+  // numeric key (see the fallback branch below), so trueAssayId may be
+  // reassigned to a number after the initial string lookup misses.
+  /** @type {string|number} */
   let trueAssayId = assayId;
   let assay = await new Promise((resolve, reject) => {
     const tx  = db.transaction(STORES.ASSAYS, "readonly");
@@ -267,6 +275,8 @@ export async function deleteAssay(assayId) {
   // own transactions at different points. A shared async helper would require an
   // extra round-trip to IDB and could open a transaction in a context where
   // auto-commit has already fired in the caller.
+  // Typed string|number — see the matching comment in hydrateAssay() above.
+  /** @type {string|number} */
   let trueAssayId = assayId;
   const assayExists = await new Promise((resolve, reject) => {
     const tx = db.transaction(STORES.ASSAYS, "readonly");
@@ -517,6 +527,11 @@ export async function abandonAllActiveTrialsInDB() {
         run.endedAt              = Date.now();
         run.eligibleForAnalysis  = false;
         run.ineligibleReason     = "App closed unexpectedly";
+        // Snapshot the automatic determination (see main.js completeRunNormally
+        // for why) so this run can still be manually overridden later with a
+        // record of the original reason preserved.
+        run.autoEligibleForAnalysis = false;
+        run.autoIneligibleReason    = "App closed unexpectedly";
         runUpdates.push(run);
       });
   }
@@ -602,6 +617,9 @@ export async function markOrphanRunsStopped() {
       run.endedAt             = Date.now();
       run.eligibleForAnalysis = false;
       run.ineligibleReason    = "App restarted unexpectedly";
+      // Snapshot the automatic determination — see main.js completeRunNormally.
+      run.autoEligibleForAnalysis = false;
+      run.autoIneligibleReason    = "App restarted unexpectedly";
       store.put(run);
     });
   });
@@ -662,4 +680,88 @@ export async function recoverCrashGuard() {
   } catch {
     // sessionStorage or IDB unavailable (e.g. Private Browsing) — silent no-op
   }
+}
+
+
+/* ==========================================================================
+   Full Data Backup / Restore
+   ========================================================================== */
+
+/**
+ * Dumps every record from all three object stores, verbatim, for a full
+ * offline backup. Structurally flat (not nested like hydrateAssay) — trials
+ * reference their parent assayId and runs reference their parent trialId,
+ * exactly as stored, so importAllDataFromJSON() can restore them as-is.
+ *
+ * Unlike the Excel/CSV export (which produces derived, one-directional
+ * analysis output), this captures the raw data needed to fully restore the
+ * app's state — the only real safety net against a browser storage wipe,
+ * since all data here is local-only with no server/cloud sync.
+ *
+ * @returns {Promise<{version:number, exportedAt:number, assays:Object[], trials:Object[], runs:Object[]}>}
+ */
+export async function exportAllDataAsJSON() {
+  const db = await openDB();
+
+  const getAllFrom = (storeName) => new Promise((resolve, reject) => {
+    const tx  = db.transaction(storeName, "readonly");
+    const req = tx.objectStore(storeName).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror   = () => reject(req.error);
+  });
+
+  const [assays, trials, runs] = await Promise.all([
+    getAllFrom(STORES.ASSAYS),
+    getAllFrom(STORES.TRIALS),
+    getAllFrom(STORES.RUNS)
+  ]);
+
+  return {
+    version:    DB_VERSION,
+    exportedAt: Date.now(),
+    assays, trials, runs
+  };
+}
+
+/**
+ * Restores assays/trials/runs from a backup object produced by
+ * exportAllDataAsJSON(). Uses put() (upsert) per record — existing records
+ * with the same ID are overwritten with the backup's version, records not
+ * already present are added. Deliberately non-destructive: nothing already
+ * in the database that ISN'T in the backup is ever touched or deleted, so
+ * restoring a backup can only add/update data, never lose it.
+ *
+ * @param {Object} data - A backup object with assays/trials/runs arrays.
+ * @returns {Promise<{assays:number, trials:number, runs:number}>} Record counts written per store.
+ * @throws {Error} If `data` doesn't look like a valid backup.
+ */
+export async function importAllDataFromJSON(data) {
+  if (
+    !data ||
+    !Array.isArray(data.assays) ||
+    !Array.isArray(data.trials) ||
+    !Array.isArray(data.runs)
+  ) {
+    throw new Error("This file doesn't look like a valid Touch Assay Timer backup.");
+  }
+
+  const db = await openDB();
+
+  const putAllInto = (storeName, records) => new Promise((resolve, reject) => {
+    if (records.length === 0) { resolve(); return; }
+    const tx    = db.transaction(storeName, "readwrite");
+    const store = tx.objectStore(storeName);
+    records.forEach(r => store.put(r));
+    tx.oncomplete = resolve;
+    tx.onerror    = () => reject(tx.error);
+  });
+
+  // Sequential, one store per transaction — matches the file's existing
+  // transaction strategy (see header comment) rather than combining stores
+  // into one transaction or racing them with Promise.all.
+  await putAllInto(STORES.ASSAYS, data.assays);
+  await putAllInto(STORES.TRIALS, data.trials);
+  await putAllInto(STORES.RUNS,   data.runs);
+
+  return { assays: data.assays.length, trials: data.trials.length, runs: data.runs.length };
 }

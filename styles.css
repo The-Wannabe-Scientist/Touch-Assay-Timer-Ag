@@ -1010,6 +1010,61 @@ th {
   color: var(--text-main);
 }
 
+/* ── Per-run detail list & eligibility override (assay progress) ────── */
+.run-history-genotype {
+  margin-top: 0.6rem;
+  font-size: 0.82rem;
+}
+
+.run-history-genotype summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 0.35rem 0.1rem;
+}
+
+.run-history-table {
+  font-size: 0.78rem;
+  margin-top: 0.3rem;
+}
+
+.run-history-table th,
+.run-history-table td {
+  padding: 0.35rem 0.4rem;
+}
+
+.override-badge {
+  color: var(--color-primary);
+  font-weight: 600;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.run-override-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.override-reason-input {
+  min-width: 0;
+  width: 7.5rem;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border-base);
+  background: var(--bg-card);
+  color: var(--text-main);
+}
+
+.override-toggle-btn {
+  font-size: 0.72rem;
+  padding: 0.25rem 0.55rem;
+  white-space: nowrap;
+}
+
 /* =====================================================================
    9. MODALS & EXPORT PREVIEWS
    ===================================================================== */
@@ -2082,82 +2137,144 @@ input.settings-slider-input.settings-slider-badge:focus {
 
 /* ── Value Constraints table (Assay Defaults screen) ──────────────── */
 
-/* Column widths — applied via colgroup so they're identical for every row */
-.clamp-col-field { width: 36%; }
-.clamp-col-range { width: 28%; }
-.clamp-col-notes { width: 36%; }
+/* Column widths */
+.clamp-col-field { width: 32%; }
+.clamp-col-range { width: 24%; }
+.clamp-col-notes { width: 44%; }
 
 .clamp-table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   font-size: 0.82rem;
-  table-layout: fixed; /* honours colgroup widths */
+  table-layout: fixed;
   border: 1px solid var(--border-base);
   border-radius: 12px;
   overflow: hidden;
   background: var(--bg-card);
 }
 
-/* Single header row */
+/* ── Header ── */
 .clamp-table thead th {
   text-align: left;
-  font-size: 0.72rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-  padding: 0.6rem 0.75rem;
-  background: var(--bg-input);
-  border-bottom: 1px solid var(--border-base);
-}
-
-/* Section-divider rows (Assay Setup / Timing Settings / Audio Settings) */
-.clamp-table .clamp-section-row td {
   font-size: 0.7rem;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-main);
-  background: rgba(0, 0, 0, 0.02);
-  padding: 0.8rem 0.75rem 0.4rem;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  padding: 0.55rem 0.85rem;
+  background: var(--bg-input);
+  border-bottom: 2px solid var(--border-base);
+}
+
+/* ── Section divider rows ── */
+.clamp-table .clamp-section-row td {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+  padding: 0.45rem 0.85rem;
   border-top: 1px solid var(--border-base);
   border-bottom: 1px solid var(--border-base);
+  /* Left accent stripe */
+  box-shadow: inset 3px 0 0 var(--color-primary);
 }
 
 [data-theme="dark"] .clamp-table .clamp-section-row td {
-  background: rgba(255, 255, 255, 0.02);
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
 }
 
-/* First section-divider has no top border (sits right under the header) */
+/* First section header sits directly under the header — no top border */
 .clamp-table tbody:first-of-type .clamp-section-row td {
   border-top: none;
 }
 
-/* Data cells */
+/* ── Data rows ── */
+.clamp-table tbody tr:not(.clamp-section-row) {
+  transition: background 0.12s ease;
+}
+
+/* Alternating row tint */
+.clamp-table tbody tr:not(.clamp-section-row):nth-child(even) {
+  background: color-mix(in srgb, var(--bg-input) 60%, transparent);
+}
+
+.clamp-table tbody tr:not(.clamp-section-row):hover {
+  background: color-mix(in srgb, var(--color-primary) 5%, var(--bg-card));
+}
+
+/* ── Data cells ── */
 .clamp-table td {
   text-align: left;
-  padding: 0.5rem 0.75rem;
-  vertical-align: top;
+  padding: 0.5rem 0.85rem;
+  vertical-align: middle;
   border-bottom: 1px solid var(--border-base);
   line-height: 1.45;
 }
 
-/* Field column: bold */
+/* Field column — bold */
 .clamp-table td:first-child {
   font-weight: 600;
   color: var(--text-main);
 }
 
-/* Range / Notes columns: muted */
-.clamp-table td:not(:first-child) {
-  color: var(--text-muted);
+/* Range column — monospace pill badge */
+.clamp-table td:nth-child(2) {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
+  color: var(--text-main);
 }
 
-/* No border on very last row */
+.clamp-table td:nth-child(2):not(:empty)::after {
+  content: "";
+}
+
+/* Wrap range text in a pill — pill styling is applied via the .clamp-range span wrapper */
+.clamp-table tbody tr:not(.clamp-section-row) td:nth-child(2) {
+  padding-top: 0.4rem;
+  padding-bottom: 0.4rem;
+}
+
+/* Notes column — muted, italic for short step values */
+.clamp-table td:nth-child(3) {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+/* Em-dash "—" cells get extra dimming */
+.clamp-table td:nth-child(3):empty,
+.clamp-table td[data-empty] {
+  opacity: 0.4;
+}
+
+/* No bottom border on very last data row */
 .clamp-table tbody:last-of-type tr:last-child td {
   border-bottom: none;
+}
+
+/* Range pill badge */
+.clamp-range {
+  display: inline-block;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  padding: 0.2em 0.55em;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  color: var(--color-primary);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 22%, transparent);
+  letter-spacing: 0;
+}
+
+[data-theme="dark"] .clamp-range {
+  background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary) 30%, transparent);
 }
 
 /* ── Dark-mode adjustments ─────────────────────────────────────────── */
@@ -2817,6 +2934,23 @@ body.state-running {
 }
 
 /* ── Saved assays bulk-actions: proper layout ─────────────────────────── */
+.backup-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.backup-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.backup-hint {
+  margin-bottom: 1rem;
+}
+
 .bulk-actions {
   display: flex;
   justify-content: space-between;
@@ -3028,6 +3162,42 @@ body.state-running {
   font-size: 0.78rem;
   color: var(--text-muted);
   line-height: 1.4;
+}
+
+/* ── Test Rig ─────────────────────────────────────────────────────── */
+.test-rig-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.test-rig-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.test-rig-btn.active {
+  background: var(--color-primary);
+  color: #fff;
+  border-color: var(--color-primary);
+}
+
+/* Small dot that flashes once per tick while the Test Rig is running.
+   Static (barely visible) at rest; briefly scales/brightens on each pulse
+   via the .pulse class, toggled from JS in sync with the tick and haptic. */
+.test-rig-pulse {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--border-base);
+  flex-shrink: 0;
+  transition: background 0.1s ease, transform 0.1s ease;
+}
+
+.test-rig-pulse.pulse {
+  background: var(--color-primary);
+  transform: scale(1.4);
 }
 
 /* ── Header icon — connected state ──────────────────────────────────── */
@@ -3330,4 +3500,105 @@ p.instruction {
   border-color: var(--color-danger, #ef4444) !important;
   box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.20) !important;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* =====================================================================
+   23. NEW IMPROVEMENTS (checkpoint 2 batch)
+   ===================================================================== */
+
+/* ── 1.7: Sticky Begin Bar ────────────────────────────────────────────
+   Keeps the "Begin Assay" CTA visible at the bottom of the setup form
+   without the user needing to scroll. On large screens it just sits in
+   normal flow (no sticky, which would be weird on a page that doesn't scroll). */
+.begin-bar {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg-body);
+  padding: 0.75rem 0 calc(0.75rem + env(safe-area-inset-bottom, 0px));
+  /* Subtle top shadow to signal that content scrolls behind it */
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.06);
+  /* Keep the p.instruction margin-bottom in sync */
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  /* Negative side-margins pull it edge-to-edge inside the section padding */
+  margin-left: -1rem;
+  margin-right: -1rem;
+  padding-left: 1rem;
+  padding-right: 1rem;
+  z-index: 5;
+}
+/* On desktop the form doesn't overflow the viewport so sticky is irrelevant;
+   remove the shadow to avoid a visual seam on tall viewports. */
+@media (min-height: 700px) {
+  .begin-bar {
+    position: static;
+    box-shadow: none;
+    padding-left: 0;
+    padding-right: 0;
+    margin-left: 0;
+    margin-right: 0;
+  }
+}
+
+/* ── 1.4: Progress run badge ──────────────────────────────────────────
+   Small numeric pill shown inside the #toggleProgress button to surface
+   the run count without opening the progress table. */
+.progress-run-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--color-primary);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  /* Animate in when it first appears */
+  animation: badgePop 0.22s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+@keyframes badgePop {
+  from { transform: scale(0.5); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+
+/* ── 1.8: Export button icon alignment ───────────────────────────────
+   Export buttons now contain an SVG icon + text. Use flex to align them. */
+#exportExcel,
+#previewExcel,
+#exportCSV {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+}
+
+/* ── 2.7 / 3.1: Inline warning paragraphs ────────────────────────────
+   Strengthen the existing .warning style to include a border + background
+   for inline-form warnings (grace×ISI, genotype max, bin mismatch). */
+.warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 8px;
+  background: var(--bg-warning);
+  border: 1px solid var(--border-warning);
+  color: var(--text-warning);
+  font-size: 0.83rem;
+  font-weight: 500;
+  line-height: 1.4;
+  animation: chipIn 0.18s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+
+/* ── 3.4: Touch-index exclusion warning on export screen ─────────────
+   Re-uses .warning; just ensure it sits between the intro <p> and fieldset. */
+#tiExclusionWarning {
+  margin-top: 0;
+  margin-bottom: 0.5rem;
 }

@@ -577,9 +577,17 @@ void loop() {
       // BUG-A fix: validate the written value is 0x03 (the heartbeat byte
       // used by js/haptic-armband.js since the CMD_HEARTBEAT collision fix).
       // Any other value is a stray write and must not suppress a real dropout.
-      if (heartbeatChar.written() && heartbeatChar.value() == 0x03) {
-        lastHeartbeatMs = now;
-        heartbeatActive = true;
+      if (heartbeatChar.written()) {
+        uint8_t hbCmd = heartbeatChar.value();
+        if (hbCmd == 0x03) {
+          lastHeartbeatMs = now;
+          heartbeatActive = true;
+        } else if (hbCmd == 0x04) {
+          // CMD_HEARTBEAT_STOP: the run ended intentionally (armbandStopHeartbeat()
+          // in js/haptic-armband.js). Disarm the watchdog now instead of waiting
+          // for it to time out and fire a false "connection lost" alert.
+          heartbeatActive = false;
+        }
       }
       if (heartbeatActive && (now - lastHeartbeatMs > HB_TIMEOUT_MS)) {
         Serial.println("Heartbeat lost! Stutter warning.");

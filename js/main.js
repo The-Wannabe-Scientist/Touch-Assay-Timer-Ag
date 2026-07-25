@@ -44,17 +44,17 @@ import {
   saveAssay, loadAllAssays, hydrateAssay, deleteAssay,
   saveTrial, markTrialCompleted, markTrialAbandoned,
   saveRun, abandonAllActiveTrialsInDB, markOrphanRunsStopped, getIdbAvailable,
-  recoverCrashGuard
+  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON
 }                                                      from "./db.js";
 import {
-  isAudioReady, setVoiceMode, loadVoices, speak, stopSpeech,
+  isAudioReady, setVoiceMode, getVoiceMode, loadVoices, speak, stopSpeech,
   warmUpAudio, playWarmupTone, scheduleWebAudioTick,
   triggerImmediateSpeech, getAudioTime, playCompletionTone,
   setTickPitch, getTickPitch, primeSpeechEngine, setBinSpeak,
   playTick
 }                                                      from "./audio.js";
 import {
-  performExcelExport, performCSVExport, generatePreviewHTML
+  performExcelExport, performCSVExport, generatePreviewHTML, RUN_STATUS_LABELS
 }                                                      from "./export.js";
 import { showToast, dismissLatestToast }                from "./toast.js";
 import {
@@ -307,7 +307,7 @@ try {
 
 /**
  * AudioContext timestamp of the last Escape keypress during RUNNING state.
- * Used to implement double-Escape-to-stop-run: two presses within 1 second
+ * Used to implement double-Escape-to-stop-run: two presses within 2 seconds
  * will call stopRunEarly(). 0 means no recent Escape press.
  * @type {number}
  */
@@ -359,11 +359,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     const downloadBtn = document.getElementById('downloadRecoveryBtn');
     if (downloadBtn) {
       downloadBtn.onclick = () => {
-        // include activeRun so in-flight values not yet flushed
-        // to IDB are preserved in the recovery download.
+        // Deep-clone both objects before serialising so that mutations that
+        // triggered the fatal error cannot corrupt the recovery snapshot.
+        // structuredClone is available in all modern browsers (Chrome 98+, FF 94+, Safari 15.4+).
+        let safeAssay   = null;
+        let safeRun     = null;
+        try { safeAssay = structuredClone(currentAssay ?? {}); } catch { safeAssay = currentAssay ?? {}; }
+        try { safeRun   = structuredClone(activeRun ?? null);  } catch { safeRun   = activeRun   ?? null; }
         const recoveryData = {
-          assay:     currentAssay || {},
-          activeRun: activeRun   || null,
+          assay:     safeAssay,
+          activeRun: safeRun,
           timestamp: Date.now(),
         };
         const dataStr = "data:text/json;charset=utf-8," +
@@ -416,6 +421,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       genotypeSelect:  document.getElementById("genotypeSelect"),
       selectAllAssays:  document.getElementById("selectAllAssays"),
       exportSelectAll:  document.getElementById("exportSelectAll"),
+      importBackupFile: document.getElementById("importBackupInput"),
     },
     Screens: {
       setup:         document.getElementById("setupScreen"),
@@ -443,6 +449,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       closeGuidelines:      document.getElementById("closeGuidelines"),
       openSavedAssays:      document.getElementById("openSavedAssays"),
       closeSavedAssays:     document.getElementById("closeSavedAssays"),
+      exportBackup:         document.getElementById("exportBackupBtn"),
+      importBackup:         document.getElementById("importBackupBtn"),
       overflowMenu:         document.getElementById("overflowMenuButton"),
 
       deleteSelectedAssays: document.getElementById("deleteSelectedAssays"),
@@ -451,12 +459,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       connectArmband:       document.getElementById("connectArmband"),
       disconnectArmband:    document.getElementById("disconnectArmband"),
       testArmband:          document.getElementById("testArmband"),
+      testRigBtn:           document.getElementById("testRigBtn"),
     },
     Displays: {
       tapLabel:         document.getElementById("tapButtonLabel"),
       liveProgress:     document.getElementById("liveProgress"),
       currentStim:      document.getElementById("currentStimDisplay"),
       totalStim:        document.getElementById("totalStimDisplay"),
+      stimulusProgressAnnouncer: document.getElementById("stimulusProgressAnnouncer"),
+      testRigBtnLabel:  document.getElementById("testRigBtnLabel"),
+      testRigPulse:     document.getElementById("testRigPulse"),
       warmup:           document.getElementById("warmupDisplay"),
       warmupNumber:     document.getElementById("warmupNumber"),
       binWarning:       document.getElementById("binWarning"),
@@ -504,13 +516,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   setState(STATES.SETUP);                    // Render the initial state
 
   // Clean up orphan sessions from previous crashes, then check IDB availability.
-  // Merged into one Promise.allSettled so the two cleanup functions are not called
-  // twice (previously a fire-and-forget pair ran alongside this block, causing
-  // parallel IDB transactions that could silently abort each other).
+  // These three all read/write the same orphaned run record, so they must run
+  // sequentially rather than concurrently — running them in parallel let
+  // whichever transaction committed last silently overwrite the others'
+  // status/values. Order matters: recoverCrashGuard() merges any last-second
+  // values into the run while it's still "active"; abandonAllActiveTrialsInDB()
+  // is the primary cleanup; markOrphanRunsStopped() is a superset safety net
+  // that must run last so it doesn't race the primary cleanup's writes.
+  async function runStartupCleanup() {
+    await recoverCrashGuard();
+    await abandonAllActiveTrialsInDB();
+    await markOrphanRunsStopped();
+  }
+
   Promise.allSettled([
-    abandonAllActiveTrialsInDB(),
-    markOrphanRunsStopped(),
-    recoverCrashGuard()      // C4: merge sessionStorage snapshot into IDB on startup
+    runStartupCleanup()
   ]).then(() => {
     if (!getIdbAvailable()) {
       const banner = document.getElementById("idbWarningBanner");
@@ -634,6 +654,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   function hideScreenAndRestore(screenElement) {
     screenElement.hidden = true;
     document.body.classList.remove("state-overlay");
+    // Stop any running Test Rig loop so it never keeps ticking/vibrating in
+    // the background after Settings is closed. No-ops if it wasn't running.
+    stopTestRig();
   }
 
 
@@ -685,6 +708,11 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   async function startRun() {
     if (!currentAssay) return;
+
+    // Defensive: the Settings screen shouldn't be reachable while a real run
+    // starts, but guard anyway so a Test Rig loop can never keep ticking
+    // underneath an actual assay run.
+    stopTestRig();
 
     const activeTrial = getActiveTrial(currentAssay);
     if (!activeTrial) return;
@@ -747,7 +775,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Bug 1 fix: if gracePeriodMs >= ISI the grace window of interval N overlaps
     // the real window of interval N+1, making tap attribution semantically undefined.
     // Clamp to at most half the ISI (in ms) so grace never bleeds into the next window.
-    const _maxGrace = Math.floor((runISI * 1000) / 2);
+    // Math.round (not Math.floor) avoids an off-by-one that would give 0 for
+    // ISIs just under 2 ms and produce imprecise results for short ISIs generally.
+    const _maxGrace = Math.round((runISI * 1000) / 2);
     if (gracePeriodMs > _maxGrace) {
       console.warn(
         `Grace period (${gracePeriodMs} ms) ≥ half ISI (${_maxGrace} ms). ` +
@@ -868,6 +898,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 
         // Always update the counter — it must reflect the latest stimulus
         UI.Displays.currentStim.textContent = displayIndex;
+
+        // Periodic screen-reader progress announcement. Only in "tick" mode —
+        // "count"/"tens"/"bins" already speak stimulus numbers via
+        // triggerImmediateSpeech() below, so an aria-live update here would be
+        // redundant. Gated to every 10th stimulus (not every one) so it doesn't
+        // spam assistive tech at typical ISIs.
+        if (
+          UI.Displays.stimulusProgressAnnouncer &&
+          getVoiceMode() === "tick" &&
+          (displayIndex === 1 || displayIndex % 10 === 0)
+        ) {
+          UI.Displays.stimulusProgressAnnouncer.textContent =
+            `Stimulus ${displayIndex} of ${runStimCount}`;
+        }
 
         // Only fire speech on the last iteration of this catch-up loop.
         // Peek ahead: if the *next* beat is also due, skip speech for this one.
@@ -1037,10 +1081,17 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     if (!run.eligibleForAnalysis) {
       run.ineligibleReason = "Incomplete stimulus count";
-    } else {
-      // Pre-compute and cache binned percentages on the run object
-      run.binnedPercentages = binRunValues(run.values, currentAssay.binSize);
     }
+
+    // Snapshot the automatic determination — immutable record of what the
+    // system originally decided, preserved even if a human later overrides
+    // eligibleForAnalysis via the progress table's override toggle.
+    run.autoEligibleForAnalysis = run.eligibleForAnalysis;
+    run.autoIneligibleReason    = run.ineligibleReason;
+    // NOTE: run.binnedPercentages is intentionally NOT cached here.
+    // export.js always recomputes binned percentages fresh from raw `run.values`
+    // via buildRunCache() → binRunValues(), so a stale cached value would be ignored
+    // anyway. Caching here also caused staleness if binSize changed between trials.
 
     // Warn if the stimulus count is not an exact multiple of binSize —
     // trailing values will be silently dropped during analysis
@@ -1070,6 +1121,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // label correctly — no need to pre-set them here (that would override the pref).
     updateProgressTable();
     refreshGenotypeDropdownCounts();
+    updateProgressBadge();
     releaseWakeLock();
     // Respect the user's saved visibility preference for the progress table
     // (set via the "Hide/Show Progress" toggle in the assay screen).
@@ -1084,11 +1136,27 @@ document.addEventListener("DOMContentLoaded", async () => {
    *
    * @param {string} [reason="Run stopped early by user"] - Explanation for the stop.
    */
+  // Re-entrancy guard — prevents a rapid double-press on "Stop Run" (or a
+  // timing-gap auto-stop racing with the button) from calling stopRunEarly()
+  // twice on the same run.
+  //
+  // Uses a per-run Promise chain so the guard stays locked until ALL async
+  // IDB writes (saveRun + saveAssay) have settled, not just until the
+  // synchronous portion of the function returns.  Without this, a Worker
+  // tick arriving after the function returns but before the IDB writes
+  // complete could call stopRunEarly() a second time on the same run.
+  let _stopRunPromise = null;
+
   function stopRunEarly(reason = "Run stopped early by user") {
-    // Bug 5 fix: clear the double-Escape timer so the first Esc press in a new
-    // run can never skip the confirmation toast due to a stale timestamp from
-    // a prior run's Escape press that didn't complete within the window.
+    // Clear the double-Escape timer unconditionally — BEFORE the re-entrancy
+    // guard — so a blocked second call still resets the stale timestamp.
+    // Placing this after the guard meant a rapid double-stop that hit the guard
+    // on the second call could leave lastEscapeTime armed into the next run.
     lastEscapeTime = 0;
+
+    // Guard: if a stop sequence is already in flight, do nothing.
+    if (_stopRunPromise) return;
+
     isWarmingUp = false;
     // if warmup was in progress, clear the overlay and ring class so
     // the UI doesn't get stuck in an unresponsive state after an external stop.
@@ -1125,32 +1193,40 @@ document.addEventListener("DOMContentLoaded", async () => {
     run.eligibleForAnalysis  = false;
     run.ineligibleReason     = reason;
 
-    // activeTrial can be null if the trial was already completed/abandoned
-    // by another code path (e.g. crash recovery). Without this guard, .trialId
-    // throws TypeError and the run's data is silently lost.
-    if (!activeTrial) {
-      console.error("stopRunEarly: no active trial — run may not be saved to IDB");
-    } else {
-      saveRun(currentAssay.assayId, activeTrial.trialId, run).catch(err =>
-        console.error("Failed to save stopped run:", err)
-      );
-    }
+    // Snapshot the automatic determination (see completeRunNormally for why).
+    run.autoEligibleForAnalysis = false;
+    run.autoIneligibleReason    = reason;
+
+    // Build a Promise that covers both IDB writes so the guard stays locked
+    // until all async persistence is complete.
+    const saveRunPromise = (activeTrial)
+      ? saveRun(currentAssay.assayId, activeTrial.trialId, run).catch(err =>
+          console.error("Failed to save stopped run:", err)
+        )
+      : (console.error("stopRunEarly: no active trial — run may not be saved to IDB"), Promise.resolve());
 
     // Update last-modified timestamp so metadata exports reflect the latest activity
     currentAssay.lastModifiedAt = Date.now();
-    saveAssay(currentAssay).catch(err => console.error("Failed to update assay metadata:", err));
+    const saveAssayPromise = saveAssay(currentAssay).catch(err =>
+      console.error("Failed to update assay metadata:", err)
+    );
+
+    // Hold the guard until both writes settle, then clear it.
+    _stopRunPromise = Promise.all([saveRunPromise, saveAssayPromise])
+      .finally(() => { _stopRunPromise = null; });
 
     // Update UI and return to POISED state.
     // applyProgressVisibilityPreference() handles both .hidden and the label.
     updateProgressTable();
     refreshGenotypeDropdownCounts();
+    updateProgressBadge();
     releaseWakeLock();
     // Respect the user's saved visibility preference for the progress table.
     applyProgressVisibilityPreference();
     setState(STATES.POISED);
     showToast(
       reason === "Run stopped early by user"
-        ? "Run stopped \u2014 marked ineligible for analysis."
+        ? "Run cancelled — marked ineligible for analysis."
         : `Run interrupted: ${reason}`,
       "warning",
       5000
@@ -1177,6 +1253,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   async function executeTapAction() {
     // Block taps on the export screen entirely
     if (currentState === STATES.EXPORT) return;
+
+    // Warmup countdown keeps currentState at CONFIGURED/POISED (it isn't its
+    // own STATES value), and CSS-only pointer-events blocking doesn't cover
+    // the Space-bar path. Without this guard a stray press during warmup
+    // re-arms pendingStart, letting the *next* run start with zero confirmation.
+    if (isWarmingUp) return;
 
     // ── Hardware debounce ─────────────────────────────────────────────────
     const now = Date.now();
@@ -1516,19 +1598,36 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Called once during initialisation.
    */
   function initializeSettings() {
+    // Read all localStorage values first, guarded by try/catch because
+    // localStorage can throw SecurityError in Private Browsing / sandboxed iframes.
+    // DOM writes are intentionally OUTSIDE the try block so programming errors
+    // (e.g. a null UI element) are not silently swallowed.
+    let savedTheme, savedVoiceMode, savedPitch, progressPref;
     try {
-    // Warmup settings
+      savedTheme    = localStorage.getItem("touchAssayTheme") ||
+        (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      savedVoiceMode = localStorage.getItem("touchAssayVoiceMode") || "tick";
+      savedPitch    = parseInt(localStorage.getItem("touchAssayTickPitch"), 10);
+      progressPref  = localStorage.getItem("touchAssayProgressVisible");
+    } catch {
+      // H5: localStorage unavailable — fall back to in-memory defaults already
+      // set by the module-level variable initialisers (speechLeadMs, gracePeriodMs, etc.)
+      savedTheme     = window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      savedVoiceMode = "tick";
+      savedPitch     = NaN;   // triggers isNaN fallback to 900 below
+      progressPref   = null;
+    }
+
+    // ── Warmup settings ──
     UI.Settings.warmupToggle.checked              = isWarmupEnabled;
     UI.Settings.warmupDurationInput.value         = warmupDuration;
     UI.Settings.warmupDurationContainer.style.display = isWarmupEnabled ? "flex" : "none";
 
-    // Theme
-    // Mirror the inline script's OS-preference fallback: if no theme has ever been saved,
-    // use prefers-color-scheme rather than hardcoding "light". Without this,
-    // initializeSettings() would overwrite the dark theme the inline script just applied
-    // (via the same OS-preference check) back to "light" on first load.
-    const savedTheme = localStorage.getItem("touchAssayTheme") ||
-      (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    // ── Theme ──
+    // Mirror the inline script's OS-preference fallback: if no theme has ever been
+    // saved, use prefers-color-scheme rather than hardcoding "light". Without this,
+    // initializeSettings() would overwrite the dark theme the inline script just
+    // applied (via the same OS-preference check) back to "light" on first load.
     document.documentElement.setAttribute("data-theme", savedTheme);
     const metaThemeColor = document.querySelector('meta[name="theme-color"]');
     if (metaThemeColor) metaThemeColor.setAttribute('content', savedTheme === 'dark' ? '#0f172a' : '#f1f5f9');
@@ -1536,16 +1635,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (input.value === savedTheme) input.checked = true;
     });
 
-    // Voice mode
-    const savedVoiceMode = localStorage.getItem("touchAssayVoiceMode") || "tick";
+    // ── Voice mode ──
     setVoiceMode(savedVoiceMode);
     document.querySelectorAll('input[name="voiceMode"]').forEach(input => {
       if (input.value === savedVoiceMode) input.checked = true;
     });
 
-    // Tick pitch
-    const savedPitch = parseInt(localStorage.getItem("touchAssayTickPitch"), 10);
-    const initPitch  = isNaN(savedPitch) ? 900 : savedPitch;
+    // ── Tick pitch ──
+    const initPitch = isNaN(savedPitch) ? 900 : savedPitch;
     setTickPitch(initPitch);
     if (UI.Settings.tickPitch) {
       UI.Settings.tickPitch.value = initPitch;
@@ -1553,31 +1650,28 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Settings.tickPitchDisplay.value = initPitch;
     }
 
-    // Speech lead time (ms) — compensates for TTS engine latency
+    // ── Speech lead time (ms) — compensates for TTS engine latency ──
     if (UI.Settings.speechLead) {
       UI.Settings.speechLead.value = speechLeadMs;
       if (UI.Settings.speechLeadDisplay)
         UI.Settings.speechLeadDisplay.value = speechLeadMs;
     }
 
-    // Grace period
+    // ── Grace period ──
     if (UI.Settings.gracePeriod) {
       UI.Settings.gracePeriod.value = gracePeriodMs;
       if (UI.Settings.gracePeriodDisplay)
         UI.Settings.gracePeriodDisplay.value = gracePeriodMs;
     }
 
-    // Assay Defaults — restore saved defaults into the sub-page inputs
+    // ── Assay Defaults — restore saved defaults into the sub-page inputs ──
     _restoreAssayDefaultsToUI();
 
-    // Restore progress-table visibility preference
-    const progressPref = localStorage.getItem("touchAssayProgressVisible");
+    // Restore progress-table visibility preference.
     // We don't apply it here at startup because there's no data yet;
     // it gets applied in completeRunNormally() / stopRunEarly() when
     // the table is first shown (or kept hidden) according to preference.
-    } catch {
-      // H5: localStorage unavailable (e.g. Private Browsing with strict settings) — use defaults
-    }
+    void progressPref;  // variable read during localStorage phase; consumed later
   }
 
   /**
@@ -1658,11 +1752,59 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    const usable = stimCount - (stimCount % binSize);
+    const remainder = stimCount % binSize;
+    const usable    = stimCount - remainder;
     UI.Displays.binWarning.textContent =
-      `Total stimulations (${stimCount}) are not an exact multiple of bin size (${binSize}). ` +
-      `Binned analysis will include the first ${usable} stimulations.`;
+      `The last ${remainder} stimulus/stimuli will be excluded from bin analysis — ` +
+      `they don't fill a complete bin of size ${binSize}. ` +
+      `Only the first ${usable} stimulations will be used.`;
     UI.Displays.binWarning.hidden = false;
+  }
+
+  /**
+   * Shows an inline warning below the ISI field when the current grace period
+   * setting would exceed half the ISI (and would therefore be clamped on run start).
+   * Called whenever the ISI input changes.
+   *
+   * NOTE: ETA display was intentionally omitted per experimenter preference.
+   */
+  function updateGraceIsiWarning() {
+    const isiEl  = document.getElementById("graceIsiWarning");
+    if (!isiEl) return;
+    const isiMs  = Number(UI.Inputs.isi.value) * 1000;
+    if (!isiMs || isiMs <= 0) { isiEl.hidden = true; return; }
+    const halfMs = Math.floor(isiMs / 2);
+    if (gracePeriodMs > halfMs) {
+      isiEl.textContent =
+        `⚠ Grace period (${gracePeriodMs} ms) exceeds half the ISI (${halfMs} ms). ` +
+        `It will be clamped to ${halfMs} ms when the run starts.`;
+      isiEl.hidden = false;
+    } else {
+      isiEl.hidden = true;
+    }
+  }
+
+  /**
+   * Updates the numeric run-count badge inside the #toggleProgress button.
+   * Shows the total number of completed+stopped runs in the current trial.
+   * Called after every run ends (normal or early stop).
+   */
+  function updateProgressBadge() {
+    const badge = document.getElementById("progressRunBadge");
+    if (!badge || !currentAssay) { if (badge) badge.hidden = true; return; }
+    const trial = getActiveTrial(currentAssay);
+    if (!trial) { badge.hidden = true; return; }
+    // Count only eligible completed runs — consistent with the genotype-dropdown
+    // counter and what the experimenter actually cares about (usable data points).
+    // stoppedEarly runs are intentionally excluded so the badge isn't inflated
+    // by cancelled or interrupted recordings.
+    const count = trial.runs.filter(r => r.status === "completed" && r.eligibleForAnalysis).length;
+    if (count === 0) {
+      badge.hidden = true;
+    } else {
+      badge.textContent = count;
+      badge.hidden = false;
+    }
   }
 
   /**
@@ -1712,7 +1854,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Rebuilds the in-assay progress summary table showing total, eligible,
-   * and ineligible run counts per genotype for the current trial.
+   * and ineligible run counts per genotype for the current trial (excluding
+   * in-progress runs), plus a collapsible per-genotype run list with a
+   * manual eligibility override control on each row.
    */
   function updateProgressTable() {
     const container = document.getElementById("assayProgress");
@@ -1727,7 +1871,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Initialise counters for every declared genotype
     currentAssay.genotypes.forEach(g => {
-      summary[g] = { total: 0, eligible: 0, ineligible: 0 };
+      summary[g] = { total: 0, eligible: 0, ineligible: 0, runs: [] };
     });
 
     // Tally runs into the appropriate bucket (skip active/in-progress runs)
@@ -1741,6 +1885,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         } else {
           summary[r.genotype].ineligible++;
         }
+        summary[r.genotype].runs.push(r);
       });
     }
 
@@ -1758,7 +1903,98 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     html += `</tbody></table>`;
+
+    // Per-run detail list with manual eligibility override, one collapsible
+    // section per genotype. Collapsed by default so the quick-glance summary
+    // table above stays the primary view during a live assay.
+    currentAssay.genotypes.forEach(g => {
+      const runs = summary[g].runs;
+      if (runs.length === 0) return;
+
+      html += `<details class="run-history-genotype">` +
+              `<summary>${escapeHTML(g)} — run details</summary>` +
+              `<table class="run-history-table"><thead><tr>` +
+              `<th>Animal</th><th>Status</th><th>Eligible</th><th>Override</th>` +
+              `</tr></thead><tbody>`;
+
+      runs.forEach(r => {
+        const statusLabel = RUN_STATUS_LABELS[r.status] ?? r.status;
+        const eligibleLabel = r.eligibleForAnalysis ? "✓ Eligible" : "✕ Ineligible";
+        const manualTag = r.manuallyOverridden
+          ? ` <span class="override-badge" title="Manually ${r.eligibleForAnalysis ? "included" : "excluded"}${r.overrideReason ? `: ${escapeHTML(r.overrideReason)}` : ""}">(manual)</span>`
+          : "";
+        const toggleLabel = r.eligibleForAnalysis ? "Mark Ineligible" : "Mark Eligible";
+
+        html += `<tr data-run-id="${escapeHTML(r.runId)}">` +
+                `<td>${escapeHTML(String(r.animalIndex))}</td>` +
+                `<td>${escapeHTML(statusLabel)}</td>` +
+                `<td>${eligibleLabel}${manualTag}</td>` +
+                `<td class="run-override-cell">` +
+                `<input type="text" class="override-reason-input" placeholder="Optional reason" ` +
+                `aria-label="Reason for overriding ${escapeHTML(g)} animal ${escapeHTML(String(r.animalIndex))}" ` +
+                `value="${escapeHTML(r.overrideReason || "")}">` +
+                `<button type="button" class="override-toggle-btn secondary" data-run-id="${escapeHTML(r.runId)}">` +
+                `${toggleLabel}</button>` +
+                `</td></tr>`;
+      });
+
+      html += `</tbody></table></details>`;
+    });
+
     container.innerHTML = html;
+  }
+
+  /**
+   * Manually overrides a completed/stopped run's effective eligibility for
+   * analysis. The automatic determination is preserved separately in
+   * autoEligibleForAnalysis/autoIneligibleReason (set once, never changed),
+   * so the override is always traceable back to what the system originally
+   * decided — surfaced in exports via the "Manual Override" row.
+   *
+   * @param {Object}  run          - The run object to mutate.
+   * @param {boolean} newEligible  - The new effective eligibleForAnalysis value.
+   * @param {string}  [reasonText] - Optional free-text note (not mandatory).
+   */
+  async function toggleRunEligibilityOverride(run, newEligible, reasonText = "") {
+    const activeTrial = getActiveTrial(currentAssay);
+    if (!activeTrial) return;
+
+    run.eligibleForAnalysis = newEligible;
+    run.manuallyOverridden  = true;
+    run.overrideReason      = reasonText.trim() || null;
+    run.overrideAt          = Date.now();
+    // Effective ineligible reason: cleared when now-eligible, otherwise the
+    // user's note (or a default) — the original auto reason lives on in
+    // autoIneligibleReason regardless of what happens here.
+    run.ineligibleReason    = newEligible ? null : (run.overrideReason || "Manually marked ineligible");
+
+    await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+    currentAssay.lastModifiedAt = Date.now();
+    saveAssay(currentAssay).catch(err => console.error("Failed to update assay metadata:", err));
+
+    updateProgressTable();
+    refreshGenotypeDropdownCounts();
+    updateProgressBadge();
+    showToast(`Run manually marked ${newEligible ? "eligible" : "ineligible"}.`, "info", 3000);
+  }
+
+  // Event delegation on the stable container element — updateProgressTable()
+  // rebuilds its innerHTML on every call, so a listener bound to individual
+  // buttons would be lost on each rebuild. Bound once here instead.
+  {
+    const progressContainer = document.getElementById("assayProgress");
+    if (progressContainer) {
+      progressContainer.addEventListener("click", e => {
+        const btn = e.target.closest(".override-toggle-btn");
+        if (!btn) return;
+        const runId = btn.dataset.runId;
+        const trial = currentAssay ? getActiveTrial(currentAssay) : null;
+        const run   = trial?.runs.find(r => r.runId === runId);
+        if (!run) return;
+        const reasonInput = btn.closest("tr")?.querySelector(".override-reason-input");
+        toggleRunEligibilityOverride(run, !run.eligibleForAnalysis, reasonInput?.value ?? "");
+      });
+    }
   }
 
   /**
@@ -1820,6 +2056,43 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Single assignment — all trial rows are parsed in one pass
     container.innerHTML = html;
 
+    // ── 3.4: Touch-Index exclusion advisory ─────────────────────────────────
+    // Warn the experimenter if any eligible run has a stimCount that is not an
+    // exact multiple of binSize — those trailing stimuli are dropped in the
+    // Touch Index calculation, which can subtly skew per-animal summaries.
+    //
+    // NOTE: r.values is the definitive record of recorded stimuli for a run.
+    // stimCount is not stored on individual run objects — only on the assay.
+    // r.values.length is therefore the correct canonical source for the
+    // per-run stimulus count.  If the data model ever changes so that values
+    // is trimmed or normalised separately from the recorded stimulus count,
+    // this check should be updated to use a dedicated run.stimCount field.
+    const tiWarn = document.getElementById("tiExclusionWarning");
+    if (tiWarn) {
+      if (assay.binSize) {
+        const affectedTrials = assay.trials.filter(trial =>
+          trial.runs.some(r =>
+            r.eligibleForAnalysis &&
+            r.values &&
+            r.values.length % assay.binSize !== 0
+          )
+        );
+        if (affectedTrials.length > 0) {
+          tiWarn.textContent =
+            `⚠ ${affectedTrials.length} trial(s) contain runs whose stimulus count ` +
+            `is not a multiple of bin size (${assay.binSize}). ` +
+            `Trailing stimuli will be excluded from binned analysis.`;
+          tiWarn.hidden = false;
+        } else {
+          tiWarn.hidden = true;
+        }
+      } else {
+        // binSize is falsy (0, missing, or legacy data) — always hide to avoid
+        // a stale warning from a previous assay persisting on screen.
+        tiWarn.hidden = true;
+      }
+    }
+
     // Sync select-all state and button enabled state after rebuilding the list
     syncExportSelectAll();
     refreshExportButtonState();
@@ -1872,7 +2145,24 @@ document.addEventListener("DOMContentLoaded", async () => {
    * and action buttons (Start New Trial, Export, Delete).
    */
   async function populateSavedAssaysList() {
-    const assays = await loadAllAssays();
+    // Show a loading indicator while IDB is read
+    UI.Displays.savedAssaysList.innerHTML = `<p class="saved-assays-loading">Loading\u2026</p>`;
+
+    let assays;
+    try {
+      assays = await loadAllAssays();
+    } catch (err) {
+      console.error("populateSavedAssaysList: IDB read failed:", err);
+      UI.Displays.savedAssaysList.innerHTML = `
+        <div class="saved-assays-empty">
+          <p><strong>Could not load saved assays.</strong><br>
+          There was a problem reading from storage (${err?.message ?? "unknown error"}).</p>
+          <button class="secondary" id="retryLoadAssays" style="margin-top:0.75rem;">Retry</button>
+        </div>`;
+      document.getElementById("retryLoadAssays")?.addEventListener("click", populateSavedAssaysList);
+      return;
+    }
+
     UI.Displays.savedAssaysList.innerHTML = "";
 
     if (assays.length === 0) {
@@ -1949,6 +2239,10 @@ document.addEventListener("DOMContentLoaded", async () => {
    * because Wake Locks are released automatically when the page is hidden.
    */
   document.addEventListener("visibilitychange", async () => {
+    // Stop any running Test Rig loop when the app is backgrounded — it has no
+    // reason to keep ticking/vibrating while the tab isn't visible.
+    if (document.visibilityState === "hidden") stopTestRig();
+
     if (document.visibilityState === "hidden" && currentState === STATES.RUNNING && currentAssay) {
       // Emergency flush: persist whatever is recorded so far before the browser suspends us.
       // Do NOT call stopRunEarly() here — the scheduler's gap check (Step 0) will stop the
@@ -2151,9 +2445,12 @@ document.addEventListener("DOMContentLoaded", async () => {
    * @param {string} title      Bold heading shown at the top of the dialog.
    * @param {string} body       Descriptive sentence shown below the heading.
    * @param {string} [okLabel]  Label for the confirm button (default "Confirm").
+   * @param {string} [okClass]  CSS class for the confirm button — "danger" (default,
+   *   for destructive actions like delete) or "primary" (for benign actions like
+   *   offering an alternate export format).
    * @returns {Promise<boolean>} Resolves true on confirm, false on cancel.
    */
-  function showConfirmModal(title, body, okLabel = "Confirm") {
+  function showConfirmModal(title, body, okLabel = "Confirm", okClass = "danger") {
     return new Promise(resolve => {
       const overlay = document.createElement("div");
       overlay.className = "modal-overlay";
@@ -2169,7 +2466,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           `<div style="padding:1.1rem 1.25rem;font-size:0.92rem;line-height:1.55;color:var(--text-muted)" data-modal-body></div>` +
           `<div class="modal-actions" style="gap:0.75rem;justify-content:flex-end">` +
             `<button type="button" class="secondary" data-modal-cancel>Cancel</button>` +
-            `<button type="button" class="danger"    data-modal-ok></button>` +
+            `<button type="button" data-modal-ok></button>` +
           `</div>` +
         `</div>`;
 
@@ -2180,6 +2477,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       overlay.querySelector("[data-modal-title]").textContent = title;
       overlay.querySelector("[data-modal-body]").textContent  = body;
       overlay.querySelector("[data-modal-ok]").textContent    = okLabel;
+      overlay.querySelector("[data-modal-ok]").classList.add(okClass);
 
       document.body.appendChild(overlay);
 
@@ -2261,48 +2559,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (draft.temperature != null && draft.temperature !== "") UI.Inputs.temperature.value  = draft.temperature;
     if (draft.humidity    != null && draft.humidity    !== "") UI.Inputs.humidity.value     = draft.humidity;
 
-    // Restore genotype chips via the hidden input + chip script
-    // Trigger the same addChip logic by setting the hidden input value
-    // and populating chips through the existing chip-input infrastructure.
-    if (draft.genotypes) {
-      UI.Inputs.genotypes.value = draft.genotypes;
-      const chipList = document.getElementById("chipList");
-      if (chipList) {
-        // Clear any existing chips first
-        chipList.innerHTML = "";
-        const genArr = draft.genotypes.split(",").map(g => g.trim()).filter(Boolean);
-        genArr.forEach(val => {
-          // Manually create chips matching the inline chip script's format
-          const chip = document.createElement("span");
-          chip.className    = "chip";
-          chip.dataset.value = val;
-          const label       = document.createElement("span");
-          label.className   = "chip-label";
-          label.textContent = val;
-          const removeBtn   = document.createElement("button");
-          removeBtn.type    = "button";
-          removeBtn.className = "chip-remove";
-          removeBtn.setAttribute("aria-label", "Remove " + val);
-          removeBtn.textContent = "✕";
-          removeBtn.addEventListener("click", () => {
-            chip.remove();
-            // Mirror syncHidden() from the inline chip-input script in index.html.
-            // That function is private to its IIFE scope so we replicate the logic here.
-            // If syncHidden() changes in the inline script, update this block to match.
-            UI.Inputs.genotypes.value = Array.from(
-              document.querySelectorAll("#chipList .chip")
-            ).map(c => c.dataset.value).join(",");
-            scheduleDraftSave();  // Bug 6: persist the updated genotype list after chip removal
-          });
-          chip.appendChild(label);
-          chip.appendChild(removeBtn);
-          chipList.appendChild(chip);
-        });
-      }
+    // Restore genotype chips through the shared chip-input infrastructure
+    // (window.ChipInput, exposed by index.html) so restored chips get the same
+    // fuzzy-dedup check, 10-genotype cap, drag-to-reorder support, and max-hint
+    // updates as chips added interactively — instead of a hand-rolled DOM block
+    // that silently skipped all of that.
+    if (draft.genotypes && window.ChipInput) {
+      window.ChipInput.clearChips();
+      const genArr = draft.genotypes.split(",").map(g => g.trim()).filter(Boolean);
+      genArr.forEach(val => window.ChipInput.addChip(val));
     }
 
     // Trigger bin warning recalculation after restoring values
     updateBinWarning();
+    // Re-evaluate genotype max hint after restoring chips
+    if (window.ChipInput?.updateGenotypeMaxHint) {
+      window.ChipInput.updateGenotypeMaxHint();
+    }
+    // Re-evaluate grace×ISI warning after restoring ISI value
+    updateGraceIsiWarning();
   }
 
   /** Clears the setup draft from localStorage. Called after a successful Begin. */
@@ -2380,6 +2655,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   UI.Inputs.stimCount.addEventListener("input", updateBinWarning);
   UI.Inputs.binSize.addEventListener("input",   updateBinWarning);
 
+  // ── Grace × ISI conflict warning (setup screen, live) ──────────────────
+  // Fires whenever the ISI changes so the experimenter sees the conflict
+  // before clicking Begin, not just at run-start.
+  UI.Inputs.isi.addEventListener("input", updateGraceIsiWarning);
+  // The gracePeriod slider listener (registered later in initializeSettings)
+  // already updates gracePeriodMs and calls updateGraceIsiWarning() from
+  // within the canonical settings listener — no second listener needed here.
+
   // feature-detect PointerEvent so only one event fires per touch.
   // On modern iOS/Android *both* pointerdown and touchstart fire for the same
   // physical touch — using both creates a double-fire risk when the 80ms
@@ -2413,18 +2696,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (event.repeat) return;
 
     // ── Double-Escape to stop an active run ─────────────────────────────
-    // First Escape press: show a confirmation toast. Second press within 1 s
+    // First Escape press: show a confirmation toast. Second press within 2 s
     // (after the first) calls stopRunEarly(). This prevents accidental stops.
     if (event.key === "Escape" && currentState === STATES.RUNNING && !isWarmingUp) {
       const now = Date.now();
-      if (lastEscapeTime > 0 && now - lastEscapeTime <= 1000) {
-        // Second press within window — stop the run
+      if (lastEscapeTime > 0 && now - lastEscapeTime <= 2000) {
+        // Second press within window — stop propagation so toast.js's global
+        // Escape listener doesn't fire after us and instantly dismiss the
+        // "Run cancelled" toast that stopRunEarly() is about to show.
+        event.stopImmediatePropagation();
         lastEscapeTime = 0;
+        // dismissLatestToast() must come AFTER stopRunEarly() so it clears the
+        // "Press Esc again…" warning toast, not the "Run cancelled" toast that
+        // stopRunEarly() is about to post.  Order matters here.
         stopRunEarly("Run stopped early by user");
+        dismissLatestToast();
       } else {
         // First press — arm the confirmation
         lastEscapeTime = now;
-        showToast("Press Esc again within 1 s to stop the run.", "warning", 1500);
+        showToast("Press Esc again within 2 s to stop the run.", "warning", 2500);
       }
       return;
     }
@@ -2763,6 +3053,88 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  /* -----------------------------------------------------------------------
+     Test Rig — audio/visual/haptic dry run
+  ----------------------------------------------------------------------- */
+
+  /**
+   * setInterval handle for the running Test Rig loop, or null when stopped.
+   * @type {number|null}
+   */
+  let testRigInterval = null;
+
+  /**
+   * Starts a 1 Hz loop that plays a tick tone, flashes a visual indicator,
+   * and (if the armband is connected) sends a test haptic pulse — all in
+   * sync — so the rig can be sanity-checked end-to-end before mounting an
+   * animal. Registered unconditionally (not gated behind Bluetooth support):
+   * armbandTest()/isArmbandConnected() are safe no-ops when the armband
+   * isn't available, so audio/visual testing still works without it.
+   * Writes nothing to IDB and requires no assay/genotype selection.
+   */
+  async function startTestRig() {
+    if (testRigInterval !== null) return;  // already running
+
+    if (currentState === STATES.RUNNING) {
+      showToast("Stop the current run before using the Test Rig.", "info", 3000);
+      return;
+    }
+
+    // Test Rig is started by a real user gesture (button click), so this is a
+    // valid place to resume the AudioContext if it isn't already.
+    try {
+      await warmUpAudio();
+    } catch {
+      showToast(
+        "Audio could not start — check your browser's autoplay/audio settings and try again.",
+        "error",
+        5000
+      );
+      return;
+    }
+
+    const pulse = () => {
+      playTick();
+      if (UI.Displays.testRigPulse) {
+        UI.Displays.testRigPulse.classList.add("pulse");
+        setTimeout(() => UI.Displays.testRigPulse?.classList.remove("pulse"), 150);
+      }
+      if (isArmbandConnected()) armbandTest();
+    };
+
+    pulse();  // immediate first pulse so feedback isn't delayed a full second
+    testRigInterval = setInterval(pulse, 1000);
+
+    UI.Buttons.testRigBtn.classList.add("active");
+    UI.Buttons.testRigBtn.setAttribute("aria-pressed", "true");
+    if (UI.Displays.testRigBtnLabel) UI.Displays.testRigBtnLabel.textContent = "Stop Test Rig";
+  }
+
+  /**
+   * Stops the Test Rig loop. Safe to call even if it isn't running (no-op),
+   * so callers can invoke it defensively from screen-close / backgrounding /
+   * run-start paths without checking state first.
+   */
+  function stopTestRig() {
+    if (testRigInterval === null) return;
+    clearInterval(testRigInterval);
+    testRigInterval = null;
+
+    if (UI.Buttons.testRigBtn) {
+      UI.Buttons.testRigBtn.classList.remove("active");
+      UI.Buttons.testRigBtn.setAttribute("aria-pressed", "false");
+    }
+    if (UI.Displays.testRigBtnLabel) UI.Displays.testRigBtnLabel.textContent = "Start Test Rig";
+    if (UI.Displays.testRigPulse) UI.Displays.testRigPulse.classList.remove("pulse");
+  }
+
+  if (UI.Buttons.testRigBtn) {
+    UI.Buttons.testRigBtn.addEventListener("click", () => {
+      if (testRigInterval === null) startTestRig();
+      else stopTestRig();
+    });
+  }
+
   // ── Finish trial button ─────────────────────────────────────────────────
   UI.Buttons.finishTrial.addEventListener("click", async () => {
     // replace browser-native confirm() (which is blocking, cannot be
@@ -2900,17 +3272,25 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Assay Defaults sub-page navigation (within settings overlay)
   document.getElementById("openAssayDefaults").addEventListener("click", () => {
-    // Bug 2 fix: mirror what showScreen() does — collapse overflow menu and reset
-    // its aria-expanded so it isn't left open behind the sub-page.
+    // Mirror showScreen() fully: collapse the overflow menu, reset aria-expanded,
+    // and add state-overlay so CSS dimming is consistent with other overlays.
+    // Previously state-overlay was only set when Settings was first opened via
+    // showScreen() — navigating into Assay Defaults from Settings didn't change
+    // it, which is fine in practice (it was already set), but for correctness we
+    // explicitly add it here so the sub-page works even if entered independently.
     UI.Displays.overflowMenu.hidden = true;
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
+    document.body.classList.add("state-overlay");
     UI.Screens.settings.hidden      = true;
     UI.Screens.assayDefaults.hidden = false;
   });
   document.getElementById("closeAssayDefaults").addEventListener("click", () => {
-    // Bug 2 fix: same guard when returning to settings.
+    // Mirror hideScreenAndRestore(): collapse overflow menu and keep state-overlay
+    // set (Settings is still open underneath), but don't remove it — Settings
+    // will remove it when it is itself closed via closeSettings.
     UI.Displays.overflowMenu.hidden = true;
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
+    document.body.classList.add("state-overlay");  // ensure it's set if navigated to directly
     UI.Screens.assayDefaults.hidden = true;
     UI.Screens.settings.hidden      = false;
   });
@@ -2927,6 +3307,96 @@ document.addEventListener("DOMContentLoaded", async () => {
   UI.Buttons.closeSavedAssays.addEventListener("click", () =>
     hideScreenAndRestore(UI.Screens.savedAssays)
   );
+
+  // ── Full data backup / restore ───────────────────────────────────────────
+  // A safety net beyond the analysis Excel/CSV export (which is derived and
+  // one-directional) — this captures the raw assay/trial/run records so a
+  // browser storage wipe or device change isn't catastrophic, per the
+  // README's own "export regularly" warning (there is no server/cloud sync).
+  if (UI.Buttons.exportBackup) {
+    UI.Buttons.exportBackup.addEventListener("click", async () => {
+      const btn = UI.Buttons.exportBackup;
+      const original = btn.textContent;
+      try {
+        btn.disabled = true;
+        const data = await exportAllDataAsJSON();
+        const json = JSON.stringify(data, null, 2);
+        const blob = new Blob([json], { type: "application/json" });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement("a");
+        const now  = new Date();
+        const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-` +
+                      `${String(now.getDate()).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}` +
+                      `${String(now.getMinutes()).padStart(2, "0")}`;
+        a.href     = url;
+        a.download = `touch-assay-backup_${stamp}.json`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showToast(
+          `Backup exported: ${data.assays.length} assay(s), ${data.trials.length} trial(s), ${data.runs.length} run(s).`,
+          "success", 4000
+        );
+      } catch (err) {
+        console.error("Backup export failed:", err);
+        showToast("Backup export failed: " + err.message, "error", 6000);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+    });
+  }
+
+  if (UI.Buttons.importBackup && UI.Inputs.importBackupFile) {
+    UI.Buttons.importBackup.addEventListener("click", () => {
+      UI.Inputs.importBackupFile.click();
+    });
+
+    UI.Inputs.importBackupFile.addEventListener("change", async e => {
+      const file = e.target.files?.[0];
+      // Reset immediately so selecting the same file again still fires "change".
+      e.target.value = "";
+      if (!file) return;
+
+      let data;
+      try {
+        const text = await file.text();
+        data = JSON.parse(text);
+      } catch (err) {
+        showToast("Could not read that file as JSON: " + err.message, "error", 5000);
+        return;
+      }
+
+      if (!data || !Array.isArray(data.assays) || !Array.isArray(data.trials) || !Array.isArray(data.runs)) {
+        showToast("This file doesn't look like a valid Touch Assay Timer backup.", "error", 5000);
+        return;
+      }
+
+      const confirmed = await showConfirmModal(
+        "Import backup?",
+        `This file contains ${data.assays.length} assay(s), ${data.trials.length} trial(s), and ` +
+        `${data.runs.length} run(s). Importing will add/update matching records on this device — ` +
+        `nothing already here will be deleted. Continue?`,
+        "Import",
+        "primary"
+      );
+      if (!confirmed) return;
+
+      try {
+        const counts = await importAllDataFromJSON(data);
+        showToast(
+          `Backup imported: ${counts.assays} assay(s), ${counts.trials} trial(s), ${counts.runs} run(s).`,
+          "success", 4000
+        );
+        // Refresh the list if it's currently open so the imported assays appear immediately.
+        if (!UI.Screens.savedAssays.hidden) {
+          populateSavedAssaysList().catch(err => console.error("Failed to refresh saved assays list:", err));
+        }
+      } catch (err) {
+        console.error("Backup import failed:", err);
+        showToast("Backup import failed: " + err.message, "error", 6000);
+      }
+    });
+  }
 
   // ── Overflow menu toggle ────────────────────────────────────────────────
   UI.Buttons.overflowMenu.addEventListener("click", e => {
@@ -3276,6 +3746,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Settings.gracePeriodDisplay.value = gracePeriodMs;
         _popBadge(UI.Settings.gracePeriodDisplay);
       }
+      // Re-evaluate the grace×ISI warning on the setup screen whenever the
+      // slider moves — gracePeriodMs is now up-to-date so updateGraceIsiWarning()
+      // will reflect the correct effective value. This is the single canonical
+      // place to trigger the warning; the duplicate listener that previously
+      // existed near the ISI input wiring has been removed.
+      updateGraceIsiWarning();
     });
     // Badge input → slider
     if (UI.Settings.gracePeriodDisplay) {
@@ -3287,6 +3763,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Settings.gracePeriodDisplay.value = v;
         UI.Settings.gracePeriod.value        = v;
         try { localStorage.setItem("touchAssayGracePeriodMs", v); } catch { /* storage unavailable */ }
+        // Keep the setup screen's grace×ISI warning in sync when the value is
+        // typed directly instead of dragged on the slider (which already
+        // calls this via its own "input" listener).
+        updateGraceIsiWarning();
       };
       UI.Settings.gracePeriodDisplay.addEventListener("change", _syncGracePeriodFromInput);
       UI.Settings.gracePeriodDisplay.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); _syncGracePeriodFromInput(); } });
@@ -3347,14 +3827,22 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!wrapper) return;
       wrapper.querySelectorAll(".stepper-btn").forEach(btn => {
         btn.addEventListener("click", () => {
-          const delta   = parseFloat(btn.dataset.delta) || 0;
-          const step    = parseFloat(input.step) || 1;
+          const delta    = parseFloat(btn.dataset.delta) || 0;
+          const step     = parseFloat(input.step) || 1;
           const decimals = (step.toString().split(".")[1] || "").length;
-          const current = isNaN(parseFloat(input.value)) ? lastValid : parseFloat(input.value);
-          const next    = parseFloat((current + delta).toFixed(decimals));
-          // Bug 7 fix: dispatch a change event so external listeners (e.g. validation
-          // or bin-warning checks) receive the update through standard DOM event bubbling.
-          input.value = next;
+          const current  = isNaN(parseFloat(input.value)) ? lastValid : parseFloat(input.value);
+          const raw      = parseFloat((current + delta).toFixed(decimals));
+          // Pre-clamp to [min, max] BEFORE setting input.value so that any
+          // synchronous "change" listener reading input.value sees the final
+          // committed value, not a transient out-of-range intermediate.
+          // _applyAndSave (triggered by the change event below) will also clamp
+          // and call toFixed, so this is a belt-and-suspenders guard.
+          const min     = input.min !== "" ? parseFloat(input.min) : -Infinity;
+          const max     = input.max !== "" ? parseFloat(input.max) :  Infinity;
+          const clamped = parseFloat(Math.max(min, Math.min(max, raw)).toFixed(decimals));
+          // Bug 7: dispatch a change event so external listeners receive the
+          // update through standard DOM event bubbling.
+          input.value = clamped;
           input.dispatchEvent(new Event("change", { bubbles: true }));
         });
       });
@@ -3393,7 +3881,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const configs = getExportConfigs();
     if (configs.length === 0) {
-      alert("Please select a dataset.");
+      showToast("Please select a dataset.", "info", 3000);
       return;
     }
 
@@ -3401,17 +3889,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (typeof XLSX === "undefined") {
       runWithSpinner(UI.Buttons.exportExcel, "Exporting…", () => {
         const result = performCSVExport(currentAssay, configs);
-        if (!result.success) alert("Export failed: " + result.error);
+        if (!result.success) showToast("Export failed: " + result.error, "error", 6000);
       });
       return;
     }
 
-    runWithSpinner(UI.Buttons.exportExcel, "Exporting…", () => {
+    runWithSpinner(UI.Buttons.exportExcel, "Exporting…", async () => {
       const result = performExcelExport(currentAssay, configs);
       if (!result.success) {
-        if (confirm(`Excel export failed: ${result.error}\n\nWould you like to export as CSV instead?`)) {
-          performCSVExport(currentAssay, configs);
-        }
+        // Non-destructive alternative-format offer — "primary" styling (not "danger")
+        // since accepting isn't a destructive action, unlike the modal's other call-sites.
+        const useCSV = await showConfirmModal(
+          "Excel export failed",
+          `${result.error} Would you like to export as CSV instead?`,
+          "Export CSV",
+          "primary"
+        );
+        if (useCSV) performCSVExport(currentAssay, configs);
       }
     });
   });
@@ -3422,12 +3916,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!currentAssay) return;
       const configs = getExportConfigs();
       if (configs.length === 0) {
-        alert("Please select a dataset.");
+        showToast("Please select a dataset.", "info", 3000);
         return;
       }
       runWithSpinner(UI.Buttons.exportCSV, "Exporting…", () => {
         const result = performCSVExport(currentAssay, configs);
-        if (!result.success) alert("CSV export failed: " + result.error);
+        if (!result.success) showToast("CSV export failed: " + result.error, "error", 6000);
       });
     });
   }
@@ -3437,7 +3931,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const configs = getExportConfigs();
     if (configs.length === 0) {
-      alert("Please select a dataset to preview.");
+      showToast("Please select a dataset to preview.", "info", 3000);
       return;
     }
 

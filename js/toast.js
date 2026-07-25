@@ -216,7 +216,8 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
 /**
  * Removes a toast from the DOM with an exit animation.
  * If it was the last toast, also cleans up the global key listener.
- * @param {HTMLElement} toast
+ * @param {Element} toast - Typed as the more general Element (not HTMLElement)
+ *   since callers pass querySelectorAll() results directly without a cast.
  */
 function dismiss(toast) {
   if (toast.classList.contains("toast--exiting")) return;
