@@ -692,6 +692,12 @@
         </svg>
         Back
       </button>
+
+      <!-- Inconspicuous diagnostic footer — populated by populateSwVersionFooter()
+           in main.js from the active service-worker cache name. Informational
+           only, useful for confirming an update actually applied without
+           opening devtools. -->
+      <p id="swVersionFooter" class="settings-footer-version"></p>
     </section>
 
     <!-- ── Assay Defaults Sub-page ───────────────────────────────────────── -->

@@ -2581,6 +2581,19 @@ input.settings-slider-input.settings-slider-badge:focus {
   font-style: italic;
 }
 
+/* Diagnostic-only cache version string — see populateSwVersionFooter() in
+   main.js. Deliberately small/low-contrast/empty-until-populated so it reads
+   as a footnote, not a UI element competing with the actual settings above it. */
+.settings-footer-version {
+  margin: 1.5rem 0 0;
+  padding: 0;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  opacity: 0.6;
+  text-align: center;
+  font-family: var(--font-mono);
+}
+
 /* ── Voice option 2×2 card grid ───────────────────────────────────── */
 .voice-option-grid {
   display: grid;

@@ -509,6 +509,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       metronomeBar:          document.getElementById("visualMetronomeBar"),
       armbandStatusSettings: document.getElementById("armbandStatusSettings"),
       armbandBatteryLevel:   document.getElementById("armbandBatteryLevel"),
+      swVersionFooter:       document.getElementById("swVersionFooter"),
     },
     Forms: {
       setup: document.getElementById("setupForm"),
@@ -580,7 +581,43 @@ document.addEventListener("DOMContentLoaded", async () => {
   UI.Inputs.assayName.value = generateAutoID(); // Pre-fill with timestamp-based ID
   restoreSetupDraft();                       // Restore any unsaved form draft
   initializeSettings();                      // Restore saved preferences from localStorage
+  populateSwVersionFooter();                 // Fire-and-forget: fills in the Settings-screen cache version footnote
   setState(STATES.SETUP);                    // Render the initial state
+
+  /**
+   * Fills in the small diagnostic footer on the Settings screen with the
+   * active service-worker cache name — purely informational, so a user (or
+   * whoever's helping them troubleshoot) can confirm an update actually
+   * applied without opening devtools. Reads it from the Cache Storage API
+   * rather than duplicating the CACHE_NAME literal from service-worker.js,
+   * since the page and the service worker are separate execution contexts
+   * with no shared module state.
+   */
+  async function populateSwVersionFooter() {
+    if (!UI.Displays.swVersionFooter || !("caches" in window)) return;
+    try {
+      // Wait for the service worker to finish installing+activating — its
+      // install handler only calls skipWaiting() after cache.addAll()
+      // resolves (see service-worker.js), so "ready" here guarantees the
+      // cache actually exists. Registration itself doesn't even start until
+      // this page's `load` event (a separate inline script), which fires
+      // after DOMContentLoaded — without this wait, a fresh page load reads
+      // caches.keys() before anything has been cached yet, leaving the
+      // footer permanently blank for that session.
+      if ("serviceWorker" in navigator) {
+        await navigator.serviceWorker.ready;
+      }
+      const names = await caches.keys();
+      // Mirrors CACHE_NAME's prefix in service-worker.js. Falls back to
+      // whatever's there if the prefix ever changes, rather than showing
+      // nothing; there should only ever be one cache for this origin.
+      const current = names.find(n => n.startsWith("touch-assay-cache-")) ?? names[0];
+      if (current) UI.Displays.swVersionFooter.textContent = current;
+    } catch {
+      // Cache API / service worker unavailable in this context — leave the
+      // footer blank rather than surfacing an error for this.
+    }
+  }
 
   /**
    * Cleans up orphaned sessions left by a previous crash/force-close.
