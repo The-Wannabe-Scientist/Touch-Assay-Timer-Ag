@@ -6,5 +6,8 @@
   "description": "Precision stimulus-response assay timer for C. elegans touch sensitivity experiments.",
   "scripts": {
     "test": "node --test"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
   }
 }
