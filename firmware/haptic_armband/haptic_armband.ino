@@ -181,6 +181,14 @@ static bool          motorWaveformMode  = false;  // true = INTTRIG waveform pla
 static unsigned long motorWaveformPollMs = 0;     // last GO-bit poll timestamp (throttle)
 
 void motorStart(const int* phases, int count) {
+  // Clear a stale motorWaveformMode flag left by an in-progress waveform
+  // effect (vibrateTap()/vibrateRunComplete()/etc.) — without this,
+  // motorUpdate() keeps polling the GO bit (waveform-mode branch) even
+  // though the driver is switched to REALTIME below, reads it cleared on
+  // the very next poll, and stops tracking before ever stepping through
+  // the phases[] on/off pattern this function is meant to play.
+  motorWaveformMode = false;
+
   drv.setRealtimeValue(0);
   drv.setMode(DRV2605_MODE_INTTRIG);
 
@@ -604,7 +612,13 @@ void loop() {
       if (heartbeatActive && (now - lastHeartbeatMs > HB_TIMEOUT_MS)) {
         Serial.println("Heartbeat lost! Stutter warning.");
         vibrateStutterWarning();
-        heartbeatActive = false;
+        // Deliberately leave heartbeatActive true and just push the deadline
+        // forward, instead of disarming — if the paired app crashed and never
+        // resumes sending heartbeats, this makes the watchdog re-fire every
+        // HB_TIMEOUT_MS for as long as the dropout continues, rather than
+        // warning once and then going silent for the rest of the run. A real
+        // 0x03 heartbeat arriving in the meantime (case above) still refreshes
+        // lastHeartbeatMs normally, so this has no effect once the link recovers.
         lastHeartbeatMs = millis();
       }
 

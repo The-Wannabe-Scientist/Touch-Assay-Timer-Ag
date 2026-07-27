@@ -113,6 +113,14 @@ export async function armbandDisconnect() {
     try { await _battChar.stopNotifications(); } catch { /* Ignore */ }
     _battChar = null;
   }
+  // Remove the listener BEFORE calling disconnect() — gatt.disconnect() itself
+  // asynchronously fires "gattserverdisconnected" on this device, and without
+  // this, _handleDisconnect() would still run afterward: it invokes the
+  // onDisconnect callback (main.js), which overwrites the "Not connected" UI
+  // this function's caller is about to set with a spurious "Disconnected ⚠ /
+  // Reconnect" state and a duplicate warning toast, right after an intentional,
+  // successful disconnect.
+  _device?.removeEventListener("gattserverdisconnected", _handleDisconnect);
   try { _device?.gatt?.disconnect(); } catch { /* Ignore */ }
   _device = _hapticChar = _hbChar = null;
 }

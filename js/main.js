@@ -1477,6 +1477,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     // startRun() concurrently, creating two runs for the same genotype.
     isWarmingUp = true;
 
+    // Lock genotype selection for the whole warmup+run duration. Without this,
+    // currentState stays CONFIGURED/POISED during warmup (it isn't its own
+    // STATES value), so setState()'s RUNNING-only disable never fires here —
+    // leaving the picker fully interactive for up to 60s while startRun()
+    // (called below) re-reads UI.Inputs.genotypeSelect.value fresh only once
+    // the countdown finishes. Changing genotype mid-countdown would silently
+    // file the run under the new genotype while the live badge (set by the
+    // caller just before this) still shows the one selected at confirmation.
+    UI.Inputs.genotypeSelect.disabled = true;
+    syncGenotypePickerEnabled();
+
     if (!isWarmupEnabled) {
       primeSpeechEngine();  // Warm the TTS engine even when skipping the countdown
       // Wrap startRun() so IDB/audio failures are surfaced rather than swallowed.
@@ -1485,6 +1496,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       } catch (err) {
         console.error("Failed to start run:", err);
         showToast("Failed to start run — storage error. Please try again.", "error");
+      }
+      if (currentState !== STATES.RUNNING) {
+        // startRun() early-returned or threw without transitioning to RUNNING
+        // (which would otherwise keep the picker disabled itself) — re-enable
+        // the lock above instead of leaving it stuck disabled with no run active.
+        UI.Inputs.genotypeSelect.disabled = false;
+        syncGenotypePickerEnabled();
       }
       isWarmingUp = false;  // clear flag after the no-warmup path exits
       return;
@@ -1533,12 +1551,23 @@ document.addEventListener("DOMContentLoaded", async () => {
       UI.Displays.warmup.removeAttribute("aria-hidden");
       UI.Displays.tapLabel.removeAttribute("aria-hidden");
       UI.Buttons.tap.classList.remove("warming-up");
-      // Restore the tap button label so it doesn't show the stale "Tap again…" text.
-      const sel = UI.Inputs.genotypeSelect.value;
-      if (sel && (currentState === STATES.CONFIGURED || currentState === STATES.POISED)) {
-        const at = getActiveTrial(currentAssay);
-        const n  = (at?.runs.filter(r => r.genotype === sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
-        UI.Displays.tapLabel.textContent = `Start ${sel} (Animal ${n})`;
+      // Only touch the picker if we're still on a screen where genotype
+      // selection is meaningful — if warmup was interrupted by navigating
+      // elsewhere, that screen's own setState() already set the correct
+      // disabled value and this must not stomp on it.
+      if (currentState === STATES.CONFIGURED || currentState === STATES.POISED) {
+        // Re-enable the picker locked at the top of runWarmup() — cancelling
+        // means no run started, so genotype selection is live again.
+        UI.Inputs.genotypeSelect.disabled = false;
+        syncGenotypePickerEnabled();
+
+        // Restore the tap button label so it doesn't show the stale "Tap again…" text.
+        const sel = UI.Inputs.genotypeSelect.value;
+        if (sel) {
+          const at = getActiveTrial(currentAssay);
+          const n  = (at?.runs.filter(r => r.genotype === sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
+          UI.Displays.tapLabel.textContent = `Start ${sel} (Animal ${n})`;
+        }
       }
     };
 
@@ -1586,6 +1615,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     } catch (err) {
       console.error("Failed to start run:", err);
       showToast("Failed to start run — storage error. Please try again.", "error");
+    }
+    if (currentState !== STATES.RUNNING) {
+      // Same safety net as the no-warmup branch above: startRun() early-returned
+      // or threw without transitioning to RUNNING, so re-enable the picker
+      // locked at the top of this function instead of leaving it stuck disabled.
+      UI.Inputs.genotypeSelect.disabled = false;
+      syncGenotypePickerEnabled();
     }
   }
 
@@ -4253,11 +4289,20 @@ document.addEventListener("DOMContentLoaded", async () => {
         showToast("No data available to preview.", "info", 3000);
         return;
       }
-      await runWithSpinner(btn, "Loading…", () => {
-        const sections = buildAllSections(currentAssay, configs, getExportOptions());
-        renderPreviewModal(sections);
-        UI.Displays.previewModal.hidden = false;
-      });
+      try {
+        await runWithSpinner(btn, "Loading…", () => {
+          const sections = buildAllSections(currentAssay, configs, getExportOptions());
+          renderPreviewModal(sections);
+          UI.Displays.previewModal.hidden = false;
+        });
+      } catch (err) {
+        // Without this catch, a data-shape edge case in buildAllSections/
+        // renderPreviewModal becomes an unhandled rejection that the global
+        // handler escalates to the full-screen fatal-error overlay — even
+        // though no assay data was actually lost, just this preview render.
+        console.error("Preview render failed:", err);
+        showToast("Could not build the preview for this assay.", "error", 5000);
+      }
 
     } else if (action === "export") {
       currentAssay = await hydrateAssay(assayId);
@@ -4751,6 +4796,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       const sections = buildAllSections(currentAssay, configs, getExportOptions());
       renderPreviewModal(sections);
       UI.Displays.previewModal.hidden = false;
+    }).catch(err => {
+      // Without this catch, a data-shape edge case in buildAllSections/
+      // renderPreviewModal becomes an unhandled rejection that the global
+      // handler escalates to the full-screen fatal-error overlay — even
+      // though no assay data was actually lost, just this preview render.
+      console.error("Preview render failed:", err);
+      showToast("Could not build the preview for this assay.", "error", 5000);
     });
   });
 

@@ -408,7 +408,7 @@ export async function markTrialCompleted(_assayId, trialId) {
 
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = reject;
+    tx.onerror    = () => reject(tx.error);
     tx.onabort    = () => reject(new Error(`markTrialCompleted: trial ${trialId} not found`));
   });
 }
@@ -443,7 +443,7 @@ export async function markTrialAbandoned(_assayId, trialId, reason = "App closed
 
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = reject;
+    tx.onerror    = () => reject(tx.error);
     tx.onabort    = () => reject(new Error(`markTrialAbandoned: trial ${trialId} not found`));
   });
 }

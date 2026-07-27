@@ -85,9 +85,22 @@ function groupAndSortRuns(runs, genotypes, isPooled = false) {
   const runsByGenotype = {};
   genotypes.forEach(g => { runsByGenotype[g] = []; });
 
-  // Assign each run to its genotype bucket.
+  // Assign each run to its genotype bucket. A run whose genotype doesn't
+  // exactly match a current entry in `genotypes` (stale/renamed label from
+  // an imported backup, since there's no in-app genotype-rename feature)
+  // would otherwise vanish from every export table with zero indication —
+  // warn once per unmatched label so the omission is at least visible.
+  const warnedUnmatchedGenotypes = new Set();
   runs.forEach(run => {
-    if (runsByGenotype[run.genotype]) runsByGenotype[run.genotype].push(run);
+    if (runsByGenotype[run.genotype]) {
+      runsByGenotype[run.genotype].push(run);
+    } else if (!warnedUnmatchedGenotypes.has(run.genotype)) {
+      warnedUnmatchedGenotypes.add(run.genotype);
+      console.warn(
+        `[export] Run genotype "${run.genotype}" does not match any of this assay's ` +
+        `declared genotypes (${genotypes.join(", ")}) — its data is omitted from this export.`
+      );
+    }
   });
 
   // Sort and (for pooled views) assign a sequential global animal index.
@@ -246,7 +259,7 @@ export function buildMetadata2D(assay) {
     ["Experiment ID",                assay.assayName],
     ["Date Created",                 formatDateTime(assay.createdAt)],
     ["Last Modified",                assay.lastModifiedAt ? formatDateTime(assay.lastModifiedAt) : "N/A"],
-    ["Genotypes",                    assay.genotypes.join(", ")],
+    ["Genotypes",                    Array.isArray(assay.genotypes) ? assay.genotypes.join(", ") : "N/A"],
     ["Temperature",                  assay.temperature !== undefined ? `${assay.temperature} °C` : "N/A"],
     ["Humidity",                     assay.humidity    !== undefined ? `${assay.humidity} % RH`  : "N/A"],
     ["Inter-stimulus Interval (s)",  assay.isi],

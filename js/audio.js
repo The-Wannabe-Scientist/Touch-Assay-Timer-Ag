@@ -413,7 +413,8 @@ export function playCompletionTone() {
  * Schedules the beep precisely on the AudioContext hardware clock, which is
  * immune to main-thread jank and timer throttling.
  *
- * In "count" mode with a fast ISI (< 1s) the tick is always played because
+ * In "count" and "tens" modes, a fast ISI (< 1s) makes the tick always play
+ * (on every stimulus for "count"; on multiples of 10 too for "tens") because
  * speech would not have time to complete before the next stimulus.
  *
  * @param {number} stimulusIndex - 1-based stimulus number being scheduled.
@@ -441,7 +442,11 @@ export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime) {
     case "tens":
       // Tick on all stimuli that are NOT multiples of 10
       // (multiples will have speech instead, scheduled in triggerImmediateSpeech).
-      if (stimulusIndex % 10 !== 0) playTick(exactTime);
+      // Fast-ISI exception: triggerImmediateSpeech() skips ALL speech below 1s
+      // (same reason "count" mode gets the override above — speech can't finish
+      // in time), so without this, multiples of 10 would get neither a tick nor
+      // speech at fast ISIs. Tick every stimulus instead of relying on speech.
+      if (assayIsi < 1 || stimulusIndex % 10 !== 0) playTick(exactTime);
       break;
 
     case "bins":
