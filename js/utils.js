@@ -115,7 +115,7 @@ export function validateInputs(values) {
     if (values.genotypes.some(g => !g || !g.trim())) {
       errors.push("Genotype labels must not be empty.");
     }
-    // Fuzzy duplicate check — mirrors normaliseGenotype() used in the chip-input UI.
+    // Fuzzy duplicate check — same normaliseGenotype() the chip-input UI imports.
     // Two labels that differ only in case, spacing, hyphens, or punctuation
     // (e.g. "Wild-Type" vs "wildtype") are treated as the same genotype because
     // they would produce identical export column headers after normalisation.
@@ -411,4 +411,42 @@ export function collectTouchIndexExclusions(assay) {
           "Baseline bin = 0 (animal had no responses in the first bin)"
         ])
     );
+}
+
+/**
+ * Tallies a single trial's runs into per-genotype totals for the live
+ * progress table: total/eligible/ineligible counts plus the run list itself
+ * (so callers can render per-run detail rows without a second pass).
+ *
+ * Every genotype declared on the assay gets an entry even if it has no runs
+ * yet, so callers can render a stable row order. Runs still in progress
+ * (status "active") are not tallied — only completed/stopped/abandoned runs
+ * count toward the totals.
+ *
+ * @param {string[]}    genotypes - All genotype labels declared on the assay.
+ * @param {Trial|null}  trial     - The trial whose runs to tally, or null.
+ * @returns {Object<string, {total: number, eligible: number, ineligible: number, runs: Run[]}>}
+ */
+export function summarizeTrialRunsByGenotype(genotypes, trial) {
+  const summary = {};
+
+  genotypes.forEach(g => {
+    summary[g] = { total: 0, eligible: 0, ineligible: 0, runs: [] };
+  });
+
+  if (trial && trial.runs) {
+    trial.runs.forEach(r => {
+      if (!summary[r.genotype]) return;
+      if (r.status === "active") return;  // Don't count in-progress runs
+      summary[r.genotype].total++;
+      if (r.status === "completed" && r.eligibleForAnalysis) {
+        summary[r.genotype].eligible++;
+      } else {
+        summary[r.genotype].ineligible++;
+      }
+      summary[r.genotype].runs.push(r);
+    });
+  }
+
+  return summary;
 }

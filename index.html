@@ -333,9 +333,6 @@
     <section id="exportScreen">
       <h2>Assay Export</h2>
 
-      <!-- Per-trial summary card, populated by JS after finishTrial -->
-      <div id="trialSummaryCard" hidden></div>
-
       <p>Select datasets to include in the export.</p>
 
       <!-- Touch Index exclusion warning — populated by JS in populateExportDatasetList() -->
@@ -1048,37 +1045,22 @@
 
   <script type="module" src="./js/main.js"></script>
 
-  <script>
+  <script type="module">
   // Chip / tag input for the Genotypes field.
   // Wraps the visible text input and hidden comma-list input so users can type
   // genotype labels one at a time. Each label becomes a removable chip tag.
   // The hidden `#genotypes` input always holds the canonical comma-separated list
   // that main.js reads on form submit.
+  import { normaliseGenotype } from "./js/utils.js";
+
   (function () {
     const wrapper    = document.getElementById('chipInputWrapper');
     const chipList   = document.getElementById('chipList');
     const textInput  = document.getElementById('genotypeTextInput');
     const hiddenInput = document.getElementById('genotypes');
 
-    /**
-     * Normalises a genotype label for fuzzy duplicate comparison.
-     * Strips: leading/trailing whitespace, internal whitespace, hyphens,
-     * underscores, and any other ASCII punctuation, then lowercases the result.
-     *
-     * Examples:
-     *   "Wild-Type"  → "wildtype"
-     *   "wt / WT"   → "wtWT"  (wait — let's also collapse slashes and spaces)
-     *   " WT "      → "wt"
-     *   "KO-1"      → "ko1"
-     *   "ko_1"      → "ko1"
-     */
-    function normaliseGenotype(str) {
-      return str
-        .toLowerCase()
-        // Remove all whitespace, hyphens, underscores, and non-alphanumeric chars
-        .replace(/[\s\-_\u2010-\u2015\u2212]+/g, '')  // spaces, hyphens (all Unicode dash variants)
-        .replace(/[^a-z0-9]/g, '');                    // strip remaining punctuation / symbols
-    }
+    // normaliseGenotype() is imported from utils.js — was previously
+    // duplicated here, which let the two copies silently drift.
 
     function getValues() {
       return Array.from(chipList.querySelectorAll('.chip')).map(c => c.dataset.value);

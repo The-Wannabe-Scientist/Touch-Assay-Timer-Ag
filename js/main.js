@@ -35,10 +35,10 @@
  */
 
 
-import { validateInputs, generateAutoID, binRunValues, escapeHTML, formatDateTime } from "./utils.js";  // escapeHTML is shared from utils.js
+import { validateInputs, generateAutoID, binRunValues, escapeHTML, formatDateTime, summarizeTrialRunsByGenotype } from "./utils.js";  // escapeHTML is shared from utils.js
 import {
   createAssay, createTrial, createRun,
-  getActiveTrial, completeRun
+  getActiveTrial, completeRun, abandonTrial
 }                                                      from "./models.js";
 import {
   saveAssay, loadAllAssays, hydrateAssay, deleteAssay,
@@ -68,6 +68,23 @@ import {
 /* ==========================================================================
    Global Application State
    ========================================================================== */
+
+/**
+ * localStorage keys used for persisted settings/drafts, centralised so each
+ * one is spelled once instead of repeated as a literal at every read/write site.
+ * @enum {string}
+ */
+const LS_KEYS = {
+  SPEECH_LEAD_MS:    "touchAssaySpeechLeadMs",
+  WARMUP_ENABLED:    "touchAssayWarmupEnabled",
+  WARMUP_DURATION:   "touchAssayWarmupDuration",
+  GRACE_PERIOD_MS:   "touchAssayGracePeriodMs",
+  THEME:             "touchAssayTheme",
+  VOICE_MODE:        "touchAssayVoiceMode",
+  TICK_PITCH:        "touchAssayTickPitch",
+  PROGRESS_VISIBLE:  "touchAssayProgressVisible",
+  SETUP_DRAFT:       "touchAssaySetupDraft"
+};
 
 /**
  * All valid application states.
@@ -219,7 +236,7 @@ let lastSchedulerTime = 0;
 // before DOMContentLoaded in restricted/Private-Browsing contexts can throw SecurityError.
 let speechLeadMs = 80;  // 80 ms default
 try {
-  const _stored = parseInt(localStorage.getItem("touchAssaySpeechLeadMs"), 10);
+  const _stored = parseInt(localStorage.getItem(LS_KEYS.SPEECH_LEAD_MS), 10);
   // use Math.max/min clamp (same as settings write at applyWarmupDuration)
   // so any stored value — including negatives from corrupted localStorage — is
   // consistently normalised to [0, 490] ms instead of being silently discarded.
@@ -267,14 +284,14 @@ let wantsWakeLock = false;
  */
 // wrap in try/catch (same reason as speechLeadMs above).
 let isWarmupEnabled = true;
-try { isWarmupEnabled = localStorage.getItem("touchAssayWarmupEnabled") !== "false"; } catch { /* use default */ }
+try { isWarmupEnabled = localStorage.getItem(LS_KEYS.WARMUP_ENABLED) !== "false"; } catch { /* use default */ }
 
 /**
  * Duration of the warmup countdown in seconds.
  * @type {number}
  */
 let warmupDuration = 3;
-try { warmupDuration = Math.min(60, Math.max(1, parseInt(localStorage.getItem("touchAssayWarmupDuration"), 10) || 3)); } catch { /* use default */ }
+try { warmupDuration = Math.min(60, Math.max(1, parseInt(localStorage.getItem(LS_KEYS.WARMUP_DURATION), 10) || 3)); } catch { /* use default */ }
 
 /**
  * Human reaction grace period in milliseconds.
@@ -285,7 +302,7 @@ try { warmupDuration = Math.min(60, Math.max(1, parseInt(localStorage.getItem("t
  */
 let gracePeriodMs = 250;
 try {
-  const _gp = parseInt(localStorage.getItem("touchAssayGracePeriodMs"), 10);
+  const _gp = parseInt(localStorage.getItem(LS_KEYS.GRACE_PERIOD_MS), 10);
   // Clamp to 400 ms max and snap to step=10 on load so a stale value like
   // 255 doesn't cause a silent jump on first slider interaction.
   if (!isNaN(_gp)) gracePeriodMs = Math.max(0, Math.min(400, Math.round(_gp / 10) * 10));
@@ -1677,11 +1694,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     // (e.g. a null UI element) are not silently swallowed.
     let savedTheme, savedVoiceMode, savedPitch, progressPref;
     try {
-      savedTheme    = localStorage.getItem("touchAssayTheme") ||
+      savedTheme    = localStorage.getItem(LS_KEYS.THEME) ||
         (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-      savedVoiceMode = localStorage.getItem("touchAssayVoiceMode") || "tick";
-      savedPitch    = parseInt(localStorage.getItem("touchAssayTickPitch"), 10);
-      progressPref  = localStorage.getItem("touchAssayProgressVisible");
+      savedVoiceMode = localStorage.getItem(LS_KEYS.VOICE_MODE) || "tick";
+      savedPitch    = parseInt(localStorage.getItem(LS_KEYS.TICK_PITCH), 10);
+      progressPref  = localStorage.getItem(LS_KEYS.PROGRESS_VISIBLE);
     } catch {
       // H5: localStorage unavailable — fall back to in-memory defaults already
       // set by the module-level variable initialisers (speechLeadMs, gracePeriodMs, etc.)
@@ -1791,7 +1808,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function applyProgressVisibilityPreference() {
     let pref = null;
-    try { pref = localStorage.getItem("touchAssayProgressVisible"); } catch {} // L7: guard for Private Browsing
+    try { pref = localStorage.getItem(LS_KEYS.PROGRESS_VISIBLE); } catch {} // L7: guard for Private Browsing
     const container = document.getElementById("assayProgress");
     if (!container) return;
     // Default: show the table ("true" or no stored pref = visible)
@@ -2204,27 +2221,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const trial = currentAssay ? getActiveTrial(currentAssay) : null;
     if (!currentAssay) return;
 
-    const summary = {};
-
-    // Initialise counters for every declared genotype
-    currentAssay.genotypes.forEach(g => {
-      summary[g] = { total: 0, eligible: 0, ineligible: 0, runs: [] };
-    });
-
-    // Tally runs into the appropriate bucket (skip active/in-progress runs)
-    if (trial && trial.runs) {
-      trial.runs.forEach(r => {
-        if (!summary[r.genotype]) return;
-        if (r.status === "active") return;  // Don't count in-progress runs
-        summary[r.genotype].total++;
-        if (r.status === "completed" && r.eligibleForAnalysis) {
-          summary[r.genotype].eligible++;
-        } else {
-          summary[r.genotype].ineligible++;
-        }
-        summary[r.genotype].runs.push(r);
-      });
-    }
+    const summary = summarizeTrialRunsByGenotype(currentAssay.genotypes, trial);
 
     let html = `<table><thead><tr>` +
                `<th>Genotype</th><th>Total Runs</th><th>Eligible</th><th>Ineligible</th>` +
@@ -2486,19 +2483,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // escapeHTML is imported from utils.js (shared with export.js).
   // The local copy that was here has been removed.
-
-  /**
-   * Builds and renders the trial summary card on the export screen.
-   * Shows eligible run counts and mean overall response rate per genotype
-   * for the most recently completed trial.
-   *
-   * @param {Object} assay - The fully hydrated assay (after hydrateAssay()).
-   */
-  function renderTrialSummaryCard(assay) {
-    // Trial summary removed — keep card permanently hidden.
-    const card = document.getElementById("trialSummaryCard");
-    if (card) card.hidden = true;
-  }
 
   /**
    * Fetches all saved assays from IndexedDB and renders them as a list
@@ -3263,7 +3247,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           temperature: UI.Inputs.temperature?.value || "",
           humidity:    UI.Inputs.humidity?.value   || ""
         };
-        localStorage.setItem("touchAssaySetupDraft", JSON.stringify(draft));
+        localStorage.setItem(LS_KEYS.SETUP_DRAFT, JSON.stringify(draft));
       } catch { /* storage not available */ }
     }, 400);  // 400ms debounce
   }
@@ -3286,7 +3270,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     let draft;
     try {
-      const raw = localStorage.getItem("touchAssaySetupDraft");
+      const raw = localStorage.getItem(LS_KEYS.SETUP_DRAFT);
       if (!raw) return;   // no draft — defaults applied above are sufficient
       draft = JSON.parse(raw);
     } catch { return; }
@@ -3322,7 +3306,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /** Clears the setup draft from localStorage. Called after a successful Begin. */
   function clearSetupDraft() {
-    try { localStorage.removeItem("touchAssaySetupDraft"); } catch { /* noop */ }
+    try { localStorage.removeItem(LS_KEYS.SETUP_DRAFT); } catch { /* noop */ }
   }
 
 
@@ -3928,8 +3912,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Hydrate FIRST so the export list reflects the updated trial status
     currentAssay = await hydrateAssay(currentAssay.assayId);
-    // Render summary card for the just-completed trial
-    renderTrialSummaryCard(currentAssay);
     populateExportDatasetList(currentAssay);
     setState(STATES.EXPORT);
   });
@@ -3953,7 +3935,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Buttons.progress.setAttribute("aria-pressed", String(nowVisible));
     // Persist the user's visibility preference
     // wrap in try/catch for Private Browsing / QuotaExceededError.
-    try { localStorage.setItem("touchAssayProgressVisible", String(nowVisible)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem(LS_KEYS.PROGRESS_VISIBLE, String(nowVisible)); } catch { /* storage unavailable */ }
   });
 
   // ── Genotype selection change — update tap button label ─────────────────
@@ -4243,9 +4225,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         // just written to IDB. Without this, getActiveTrial() would still
         // find this trial (status is "active" in memory), causing the new
         // trial created below to be shadowed.
-        active.status          = "abandoned";
-        active.abandonedReason = "Started new trial from saved assays";
-        active.endedAt         = Date.now();
+        abandonTrial(active, "Started new trial from saved assays");
       }
 
       const newTrial = createTrial(currentAssay.trials.length + 1);
@@ -4281,9 +4261,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     } else if (action === "export") {
       currentAssay = await hydrateAssay(assayId);
-      // render the trial summary card so the export screen shows
-      // trial details, matching the pattern used in the complete-trial path (~L2085).
-      renderTrialSummaryCard(currentAssay);
       hideScreenAndRestore(UI.Screens.savedAssays);
       populateExportDatasetList(currentAssay);
       setState(STATES.EXPORT);
@@ -4393,7 +4370,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   UI.Settings.warmupToggle.addEventListener("change", e => {
     isWarmupEnabled = e.target.checked;
     // wrap in try/catch for Private Browsing / QuotaExceededError.
-    try { localStorage.setItem("touchAssayWarmupEnabled", isWarmupEnabled); } catch { /* storage unavailable */ }
+    try { localStorage.setItem(LS_KEYS.WARMUP_ENABLED, isWarmupEnabled); } catch { /* storage unavailable */ }
     UI.Settings.warmupDurationContainer.style.display = isWarmupEnabled ? "flex" : "none";
   });
 
@@ -4430,7 +4407,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     warmupDuration = Math.min(60, Math.max(1, parsed));
     UI.Settings.warmupDurationInput.value = warmupDuration;  // Reflect clamped value back
     // wrap in try/catch for Private Browsing / QuotaExceededError.
-    try { localStorage.setItem("touchAssayWarmupDuration", warmupDuration); } catch { /* storage unavailable */ }
+    try { localStorage.setItem(LS_KEYS.WARMUP_DURATION, warmupDuration); } catch { /* storage unavailable */ }
   }
 
   UI.Settings.warmupDurationInput.addEventListener("input",  _applyWarmupDurationOnInput);
@@ -4445,7 +4422,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.querySelector('meta[name="theme-color"]')
         ?.setAttribute("content", theme === "dark" ? "#0f172a" : "#f1f5f9");
       // wrap in try/catch for Private Browsing / QuotaExceededError.
-      try { localStorage.setItem("touchAssayTheme", theme); } catch { /* storage unavailable */ }
+      try { localStorage.setItem(LS_KEYS.THEME, theme); } catch { /* storage unavailable */ }
     });
   });
 
@@ -4455,7 +4432,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       stopSpeech();
       setVoiceMode(input.value);
       // wrap in try/catch for Private Browsing / QuotaExceededError.
-      try { localStorage.setItem("touchAssayVoiceMode", input.value); } catch { /* storage unavailable */ }
+      try { localStorage.setItem(LS_KEYS.VOICE_MODE, input.value); } catch { /* storage unavailable */ }
     });
   });
 
@@ -4504,7 +4481,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Settings.tickPitch.addEventListener("input", e => {
       const hz = parseInt(e.target.value, 10);
       setTickPitch(hz);
-      try { localStorage.setItem("touchAssayTickPitch", hz); } catch { /* storage unavailable */ }
+      try { localStorage.setItem(LS_KEYS.TICK_PITCH, hz); } catch { /* storage unavailable */ }
       if (UI.Settings.tickPitchDisplay) {
         UI.Settings.tickPitchDisplay.value = hz;
         _popBadge(UI.Settings.tickPitchDisplay);
@@ -4520,7 +4497,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Settings.tickPitchDisplay.value = v;
         UI.Settings.tickPitch.value        = v;
         setTickPitch(v);
-        try { localStorage.setItem("touchAssayTickPitch", v); } catch { /* storage unavailable */ }
+        try { localStorage.setItem(LS_KEYS.TICK_PITCH, v); } catch { /* storage unavailable */ }
         _pitchPreviewTimer = _previewTick(_pitchPreviewTimer, 300);
       };
       UI.Settings.tickPitchDisplay.addEventListener("change", _syncTickPitchFromInput);
@@ -4535,7 +4512,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const parsed = parseInt(e.target.value, 10);
       if (isNaN(parsed)) return;
       speechLeadMs = Math.max(0, Math.min(490, parsed));
-      try { localStorage.setItem("touchAssaySpeechLeadMs", speechLeadMs); } catch { /* storage unavailable */ }
+      try { localStorage.setItem(LS_KEYS.SPEECH_LEAD_MS, speechLeadMs); } catch { /* storage unavailable */ }
       if (UI.Settings.speechLeadDisplay) {
         UI.Settings.speechLeadDisplay.value = speechLeadMs;
         _popBadge(UI.Settings.speechLeadDisplay);
@@ -4553,7 +4530,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         speechLeadMs = v;
         UI.Settings.speechLeadDisplay.value = v;
         UI.Settings.speechLead.value        = v;
-        try { localStorage.setItem("touchAssaySpeechLeadMs", v); } catch { /* storage unavailable */ }
+        try { localStorage.setItem(LS_KEYS.SPEECH_LEAD_MS, v); } catch { /* storage unavailable */ }
         if (currentState === STATES.RUNNING) {
           showToast("Speech lead will apply from the next run.", "info", 3000);
         }
@@ -4570,7 +4547,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const parsed = parseInt(e.target.value, 10);
       if (isNaN(parsed)) return;
       gracePeriodMs = Math.max(0, Math.min(400, parsed));
-      try { localStorage.setItem("touchAssayGracePeriodMs", gracePeriodMs); } catch { /* storage unavailable */ }
+      try { localStorage.setItem(LS_KEYS.GRACE_PERIOD_MS, gracePeriodMs); } catch { /* storage unavailable */ }
       if (UI.Settings.gracePeriodDisplay) {
         UI.Settings.gracePeriodDisplay.value = gracePeriodMs;
         _popBadge(UI.Settings.gracePeriodDisplay);
@@ -4591,7 +4568,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         gracePeriodMs = v;
         UI.Settings.gracePeriodDisplay.value = v;
         UI.Settings.gracePeriod.value        = v;
-        try { localStorage.setItem("touchAssayGracePeriodMs", v); } catch { /* storage unavailable */ }
+        try { localStorage.setItem(LS_KEYS.GRACE_PERIOD_MS, v); } catch { /* storage unavailable */ }
         // Keep the setup screen's grace×ISI warning in sync when the value is
         // typed directly instead of dragged on the slider (which already
         // calls this via its own "input" listener).

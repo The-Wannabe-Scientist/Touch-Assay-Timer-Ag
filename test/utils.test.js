@@ -9,7 +9,8 @@ import {
   computeTouchIndexBins,
   escapeHTML,
   collectPooledRuns,
-  collectTouchIndexExclusions
+  collectTouchIndexExclusions,
+  summarizeTrialRunsByGenotype
 } from "../js/utils.js";
 
 describe("normaliseGenotype", () => {
@@ -239,5 +240,41 @@ describe("collectTouchIndexExclusions", () => {
       }]
     };
     assert.deepEqual(collectTouchIndexExclusions(assay), []);
+  });
+});
+
+describe("summarizeTrialRunsByGenotype", () => {
+  test("gives every declared genotype an entry even with zero runs", () => {
+    const summary = summarizeTrialRunsByGenotype(["WT", "mec-4"], null);
+    assert.deepEqual(Object.keys(summary), ["WT", "mec-4"]);
+    assert.deepEqual(summary["WT"], { total: 0, eligible: 0, ineligible: 0, runs: [] });
+  });
+
+  test("tallies completed+eligible runs as eligible, everything else as ineligible", () => {
+    const trial = {
+      runs: [
+        { genotype: "WT", status: "completed",    eligibleForAnalysis: true  },
+        { genotype: "WT", status: "completed",    eligibleForAnalysis: false },
+        { genotype: "WT", status: "stoppedEarly", eligibleForAnalysis: true  },
+        { genotype: "WT", status: "abandoned",    eligibleForAnalysis: false }
+      ]
+    };
+    const summary = summarizeTrialRunsByGenotype(["WT"], trial);
+    assert.deepEqual(summary["WT"], {
+      total: 4, eligible: 1, ineligible: 3,
+      runs: trial.runs
+    });
+  });
+
+  test("excludes still-active (in-progress) runs from the tally", () => {
+    const trial = { runs: [{ genotype: "WT", status: "active", eligibleForAnalysis: null }] };
+    const summary = summarizeTrialRunsByGenotype(["WT"], trial);
+    assert.deepEqual(summary["WT"], { total: 0, eligible: 0, ineligible: 0, runs: [] });
+  });
+
+  test("ignores runs for genotypes not declared on the assay", () => {
+    const trial = { runs: [{ genotype: "unknown-genotype", status: "completed", eligibleForAnalysis: true }] };
+    const summary = summarizeTrialRunsByGenotype(["WT"], trial);
+    assert.deepEqual(summary["WT"], { total: 0, eligible: 0, ineligible: 0, runs: [] });
   });
 });

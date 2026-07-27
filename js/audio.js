@@ -106,16 +106,6 @@ export function setTickPitch(hz) {
 /** @returns {number} The current tick frequency in Hz. */
 export function getTickPitch() { return tickPitch; }
 
-/**
- * Merges new speech settings and refreshes the selected voice.
- * @param {{ rate?: number, pitch?: number, lang?: string }} config - Partial config to merge.
- */
-export function configureSpeech(config) {
-  speechConfig = { ...speechConfig, ...config };
-  loadVoices();
-}
-
-
 /* ==========================================================================
    Voice Initialisation
    ========================================================================== */
