@@ -104,9 +104,11 @@ Click **Begin Assay** to proceed.
 
 On the **Assay Screen**:
 
-1. Select the **genotype** from the dropdown for the current animal.
-2. Tap **Start Timer** (or press **Space**) to begin the 3-second countdown warm-up.
-3. The timer starts automatically after the warm-up.
+1. Select the **genotype** for the current animal from the picker.
+2. Tap the tap zone twice within 2 s (or press **Space** twice) to arm, then start the warm-up countdown.
+3. The run starts automatically once the countdown finishes.
+
+Warm-up defaults to 3 s but is configurable (1–60 s) or can be disabled entirely in **Settings**.
 
 The visual metronome bar pulses at the configured ISI. Each stimulus window is clearly marked on screen and by an audio cue.
 
@@ -116,7 +118,7 @@ The visual metronome bar pulses at the configured ISI. Each stimulus window is c
 |---|---|
 | Record a **non-response** | Tap the large tap zone / press **Space** |
 | Record a **response** | Do nothing — the timer advances automatically |
-| Stop a run early | **Stop Run** button |
+| Stop a run early | **Stop Run** button, or press **Esc** twice within 2 s |
 | Finish the current trial | **Finish Trial** button (enabled after completing ≥ 1 run) |
 
 > **Do not navigate away** during an active run — a banner reminds you. If you must leave, the run data up to that point is preserved in IndexedDB.
@@ -162,7 +164,7 @@ Assay  (experimental parameters, genotype list)
 
 - **Assay** — holds ISI, stimCount, binSize, temperature, humidity, genotypes.
 - **Trial** — status: `active` | `completed` | `abandoned`.
-- **Run** — status: `active` | `completed` | `stoppedEarly` | `abandoned`; includes eligibility flags and Touch Index exclusion reason.
+- **Run** — status: `active` | `completed` | `stoppedEarly` | `abandoned`; includes eligibility flags and Touch Index exclusion reason. Eligibility can be manually overridden from the progress table, with an optional reason logged.
 
 All objects are plain JSON — no classes — so they serialise cleanly to IndexedDB and can be inspected in DevTools.
 
@@ -179,10 +181,10 @@ The timing engine uses a **two-layer architecture** for accuracy:
 
 | Mode | Behaviour |
 |---|---|
-| **Tick** | Short beep every stimulus |
-| **Count** | Spoken stimulus number every stimulus |
-| **Both** | Tick + spoken count |
-| **Off** | Silent |
+| **Tick** | A beep on every stimulus |
+| **Count** | Stimulus number spoken aloud every interval |
+| **Bins** | Tick every stimulus; speak only at bin boundaries |
+| **Tens** | Speak every 10th stimulus; tick in between |
 
 ---
 
@@ -248,8 +250,10 @@ Access **Settings** from the ⋮ overflow menu in the header.
 | **Display Theme** | Light / Dark (or toggle from the header) |
 | **Tick Pitch** | 200 – 2000 Hz (preview plays on slider move) |
 | **Speech Lead** | How many ms before stimulus the spoken count starts |
-| **Audio Cue Mode** | Tick / Count / Both / Off |
+| **Audio Cue Mode** | Tick / Count / Bins / Tens |
 | **Voice** | Select from available TTS voices in your browser |
+| **Warmup Countdown** | Enable/disable; 1–60 s duration (default 3 s) |
+| **Human Reaction Grace Period** | 0–400 ms (default 250 ms) — accepts a late tap as a valid non-response after the window closes |
 
 All settings are persisted to `localStorage` and restored on next launch.
 
@@ -276,7 +280,7 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
 - All assay data is stored **locally** in your browser's **IndexedDB** (`touch-assay-db`).
 - **No data is ever sent to a server.** There is no backend, no analytics, no telemetry.
 - Data persists across sessions but is **browser-local** — it will not sync between devices.
-- Clearing your browser's site data will delete all saved assays. Export your data regularly.
+- Clearing your browser's site data deletes all saved assays. Back up regularly from **☰ → Saved Assays → Export Full Backup** — a re-importable JSON snapshot of every assay/trial/run, separate from the analysis Excel/CSV export.
 - A banner will appear if IndexedDB is unavailable (e.g. private/incognito mode) — in that case, data is **not** saved and you should export immediately after each trial.
 
 ---
@@ -292,6 +296,9 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
 ├── icon-192.png            # PWA icon (192×192)
 ├── icon-512.png            # PWA icon (512×512, maskable)
 ├── armband_build_guide.md  # Full hardware build guide for the haptic armband
+├── package.json            # `npm test` runs the unit test suite; no runtime deps
+├── fonts/                  # Self-hosted webfonts (no external CDN dependency)
+├── test/                   # Unit tests (node --test) for utils/models/export/db
 ├── js/
 │   ├── main.js             # App controller — state machine, event handling, UI updates
 │   ├── models.js           # Data model factories (createAssay, createTrial, createRun)
