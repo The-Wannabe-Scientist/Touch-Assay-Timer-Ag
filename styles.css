@@ -1300,23 +1300,44 @@ body.state-warming-up #liveProgress {
    9. PROGRESS PANEL & DATA TABLES
    ===================================================================== */
 
+/* Three-column grid (left badge / centered counter / empty mirror column)
+   instead of plain centered text — a left-aligned badge sitting inline
+   before the counter text would pull the counter itself off-center.
+   minmax(0, 1fr), not plain 1fr, on the side columns: plain 1fr has an
+   automatic MINIMUM size based on its content, so the badge's own width
+   would grow column 1 past column 3's (empty, so 0-content) share and
+   throw off the split. minmax(0, ...) lets both side columns shrink freely
+   so they always divide the remaining space equally, keeping
+   .live-progress-stim genuinely centered whether or not the badge is shown.
+   width:100% is required too: #tapZone is a flex column with
+   align-items:center, so without an explicit width this element only ever
+   shrink-wraps to its own content — leaving no free space for the side
+   columns to split evenly, silently defeating the trick above. */
 .live-progress {
-  text-align: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
   font-size: 1.15rem;
   font-weight: 600;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   /* Removed margin-bottom; #tapZone gap handles spacing uniformly */
 }
+.live-progress-stim {
+  grid-column: 2;
+}
 
 /* Which genotype the in-progress run belongs to — see showLiveGenotypeBadge()
    in main.js. Reuses the same --genotype-color dot convention as the picker's
-   pills/trigger so the color stays consistent with the rest of the UI. */
+   pills/trigger so the color stays consistent with the rest of the UI. Pinned
+   to the grid's left column — see .live-progress above. */
 .live-genotype-badge {
+  grid-column: 1;
+  justify-self: start;
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  margin-right: 0.9rem;
   color: var(--text-main);
 }
 .live-genotype-dot {
@@ -1325,6 +1346,14 @@ body.state-warming-up #liveProgress {
   min-width: 0.7rem;
   border-radius: 50%;
   background: var(--genotype-color, var(--text-muted));
+}
+/* No room for it alongside the stimulus counter on a narrow screen — the
+   un-faded picker pill/trigger (body.state-running rules further down) is
+   the fallback "which genotype is running" indicator there instead. */
+@media (max-width: 768px) {
+  .live-genotype-badge {
+    display: none;
+  }
 }
 
 /* The counter values (not the "Stimulus:" label or "/" divider) get the
@@ -1936,7 +1965,11 @@ body.state-running #assayScreen {
 
 body.state-running #liveProgress,
 body.state-warming-up #liveProgress {
-  display: block;
+  /* grid, not block: #liveProgress is .live-progress's 3-column centering
+     grid (see that class further up) — an ID selector's specificity beats
+     a class selector's regardless of source order, so this has to match
+     the display type .live-progress actually wants, not just "visible". */
+  display: grid;
 }
 body.state-running #visualMetronomeContainer,
 body.state-warming-up #visualMetronomeContainer {

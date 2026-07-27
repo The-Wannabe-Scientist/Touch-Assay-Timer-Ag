@@ -286,11 +286,17 @@
                in main.js right before warmup/run starts, so it stays visible
                (unlike the tap button label, which reverts to just "Tap") for
                the whole warmup+run duration. Reuses the same --genotype-color
-               dot convention as the picker's pills/trigger. -->
+               dot convention as the picker's pills/trigger. Lives in its own
+               grid column (see .live-progress in styles.css) so it can sit at
+               the left edge without pulling the stimulus counter off-center,
+               and is dropped entirely below the desktop breakpoint — on a
+               narrow screen there's no room for it next to the counter, and
+               the un-faded picker pill/trigger (see body.state-running rules)
+               is the fallback indicator there. -->
           <span id="liveGenotypeBadge" class="live-genotype-badge" hidden>
             <span class="live-genotype-dot" aria-hidden="true"></span><span id="liveGenotypeLabel"></span>
           </span>
-          Stimulus: <span id="currentStimDisplay">0</span> / <span id="totalStimDisplay">100</span>
+          <span class="live-progress-stim">Stimulus: <span id="currentStimDisplay">0</span> / <span id="totalStimDisplay">100</span></span>
         </div>
 
         <!-- Periodic progress announcement for screen-reader users in "Tick" voice
