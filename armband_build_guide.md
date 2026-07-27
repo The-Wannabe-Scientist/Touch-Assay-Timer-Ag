@@ -309,11 +309,10 @@ OD_CLAMP      (0x17) = V_peak  × 255 / 5.6  (default: 0x96 = 3.3V)
 
 ### Step 2: Connect DRV2605L to XIAO
 
-1. **OR Loop (VIN):** Solder anode of Diode 1 → XIAO **Pin 8 (5V USB)**. Solder anode of Diode 2 → **LiPo BAT+ wire** (tap the same red wire at the BAT+ pad — *not* XIAO Pin 14). Twist both cathodes together → DRV2605L **VIN**.
-2. **Decoupling cap:** Solder a **220µF–470µF** electrolytic cap across DRV2605L **VIN** and **GND**. (Positive → VIN). Mount the cap as close to the DRV2605L pins as possible.
-3. **Signal wires:** DRV2605L **GND → Pin 13**, **SDA → D4**, **SCL → D5**
-4. **EN wire:** DRV2605L **EN → D3** *(clone boards only)*
-5. Secure DRV2605L flat against XIAO with foam tape; hot-glue wire strain relief
+Wire VIN (dual-diode OR loop + decoupling cap), GND, SDA, SCL, and EN exactly per the **🔌 Wiring** diagram and table above — don't re-derive it here, that section is the source of truth if anything looks off mid-build.
+
+1. Complete every connection listed in the Wiring section
+2. Secure DRV2605L flat against XIAO with foam tape; hot-glue wire strain relief
 
 ### Step 3: Connect Motor
 
@@ -325,15 +324,10 @@ OD_CLAMP      (0x17) = V_peak  × 255 / 5.6  (default: 0x96 = 3.3V)
 
 ### Step 4: Connect External RGB LED (optional)
 
-1. Bend LED legs. Insert resistors **in series on each anode lead**:
-   - **Red anode:** 270 Ω resistor → XIAO **D6**
-   - **Green anode:** 100 Ω resistor → XIAO **D7**
-   - **Blue anode:** 100 Ω resistor → XIAO **D8**
-2. Common cathode → XIAO **GND**
-3. Mount LED at a visible spot on the enclosure or strap; use Kapton tape to insulate resistor leads
+Wire per the **External RGB LED** diagram above (270 Ω red, 100 Ω green/blue — do not substitute one 220 Ω for all three; see that section for why).
 
-> [!CAUTION]
-> Do **not** use a single 220 Ω on all three channels. Green and blue have a higher forward voltage (~2.8 V). On a 3.3 V rail that leaves only ~0.5 V across 220 Ω — barely 2 mA. Use **100 Ω** for green and blue.
+1. Bend LED legs; insert the resistor in series on each anode lead (D6/D7/D8), common cathode → GND
+2. Mount the LED at a visible spot on the enclosure or strap; Kapton-tape the resistor leads for insulation
 
 ### Step 5: Test Before Enclosing
 
