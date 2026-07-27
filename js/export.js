@@ -258,9 +258,15 @@ export function buildMetadata2D(assay) {
 // First-cell labels that mark a row as a header/descriptor row in the preview
 // table — covers every row type produced by buildTrialRaw2D/buildTrialBinned2D
 // /buildTrialTouchIndexBinned2D and their pooled equivalents.
+//
+// Also doubles as the "known header row" vocabulary injectLiveFormulas() uses
+// to walk a finished table and find the raw-value rows sandwiched between
+// them — every label added here must stay a single fixed row, since a
+// "Bin N (...)" per-bin row (deliberately NOT in this set) is what the
+// scanner treats as raw data to reference from a formula.
 const HTML_PREVIEW_HEADER_LABELS = new Set([
   "Bin", "Genotype", "Animal", "Trial", "Trial Animal", "Run Status",
-  "Partial Bin Warning", "Ineligible Reason", "Manual Override"
+  "Eligible", "Partial Bin Warning", "Ineligible Reason", "Manual Override"
 ]);
 
 /**
@@ -268,7 +274,19 @@ const HTML_PREVIEW_HEADER_LABELS = new Set([
  * The first row and any row whose first cell is a known header/descriptor
  * label (see HTML_PREVIEW_HEADER_LABELS) are rendered as <th> header cells.
  *
- * @param {string}  title  - Section heading displayed above the table.
+ * Eligibility gets one extra treatment on top of that generic rule: the
+ * positive ("Yes" / `true`) state — whether expressed as a whole wide-format
+ * "Eligible" row or a single tidy-format "Eligible" column — renders as a
+ * green pill (reusing .status-pill--good, the same visual language as the
+ * live progress table), so a QC pass is a visual scan rather than reading
+ * every cell. Every other state (blank, `false`, or an unrelated spacer
+ * column between genotypes) is deliberately left as plain text/blank —
+ * a wide table's blank Eligible cell is ambiguous with a spacer column, so
+ * only the unambiguous positive signal gets highlighted.
+ *
+ * @param {string}  [title]  - Section heading displayed above the table. Omit
+ *   to render the table alone with no <h3> — used when the caller (an
+ *   accordion <summary>) already shows the section name.
  * @param {any[][]} data2D - The 2D array to render.
  * @returns {string} HTML string for this section. Empty string if data is empty.
  */
@@ -277,9 +295,15 @@ export function buildHtmlTableFrom2D(title, data2D) {
 
   // Use the imported escapeHTML() — previously a hand-rolled replacement
   // only covered &, <, > — omitting " and ' which escapeHTML handles correctly.
-  const safeTitle = title ? escapeHTML(title) : "";
+  const titleHtml = title ? `<h3>${escapeHTML(title)}</h3>` : "";
 
-  let html = `<div class="preview-section"><h3>${safeTitle}</h3>` +
+  // Column index of a tidy-format "Eligible" column, if this table has one —
+  // its header row literally lists "Eligible" among several column names.
+  // Always -1 (no match, never a false positive) for wide-format tables,
+  // whose row 0 is always a Genotype/Trial header with no such column.
+  const eligibleColIndex = data2D[0]?.indexOf("Eligible") ?? -1;
+
+  let html = `<div class="preview-section">${titleHtml}` +
              `<div class="preview-table-wrapper"><table><tbody>`;
 
   data2D.forEach((row, rowIndex) => {
@@ -289,27 +313,40 @@ export function buildHtmlTableFrom2D(title, data2D) {
       return;
     }
 
+    const isEligibleRow = row[0] === "Eligible";  // wide-format case
+    const isHeaderRow    = rowIndex === 0 || HTML_PREVIEW_HEADER_LABELS.has(row[0]);
+    const tag            = isHeaderRow ? "th" : "td";
+
     html += "<tr>";
-    row.forEach(cell => {
+    row.forEach((cell, colIndex) => {
       const content  = (cell === null || cell === undefined || cell === "") ? "" : cell;
       const isNumeric = typeof content === "number";
-      const displayValue = isNumeric
+
+      const isEligibleCell = (isEligibleRow && colIndex > 0) || colIndex === eligibleColIndex;
+      let displayValue;
+      if (isEligibleCell && (content === "Yes" || content === true)) {
+        displayValue = `<span class="status-pill status-pill--good">✓ Yes</span>`;
+      } else if (isNumeric) {
         // Numeric values are converted via String() before being placed
         // in innerHTML. Number-derived strings cannot contain HTML-injectable characters
         // (only digits, '.', '-', 'e') so this path is safe. The String() wrapper is
         // explicit to document the assumption and catch exotic Number subclasses.
-        ? String(Number.isInteger(content) ? content : content.toFixed(2))
-        : escapeHTML(content);  // Escape user-supplied strings to prevent XSS
+        displayValue = String(Number.isInteger(content) ? content : content.toFixed(2));
+      } else if (content === true) {
+        displayValue = "Yes";
+      } else if (content === false) {
+        displayValue = "No";
+      } else {
+        displayValue = escapeHTML(content);  // Escape user-supplied strings to prevent XSS
+      }
 
-      // Header cells: first row, or rows starting with a known header/descriptor label
-      const isHeaderRow = rowIndex === 0 || HTML_PREVIEW_HEADER_LABELS.has(row[0]);
       // Numeric data (raw 0/1 grid, bin %, mean/SEM/N) gets the mono/tabular
       // treatment and stays centered; text values (genotype names, dates,
       // reasons) are left-aligned instead of centered — long strings like
       // "N2, mec-4(u253), unc-13" or a full timestamp read oddly centered.
       html += isHeaderRow
-        ? `<th>${displayValue}</th>`
-        : `<td class="${isNumeric ? "cell-numeric" : "cell-text"}">${displayValue}</td>`;
+        ? `<${tag}>${displayValue}</${tag}>`
+        : `<${tag} class="${isNumeric ? "cell-numeric" : "cell-text"}">${displayValue}</${tag}>`;
     });
     html += "</tr>";
   });
@@ -340,6 +377,59 @@ export function buildTouchAnalysedSheet2D({ percentAnalysed2D, tiBinned2D, tiAna
   append(tiAnalysed2D);
 
   return out;
+}
+
+/**
+ * Extracts per-genotype {bins, means, sems, ns} series from a table
+ * containing a Mean/SEM/N summary block — a row whose first cell is
+ * exactly "Bin", followed by `${genotype}_Mean`/`_SEM`/`_N` columns and one
+ * row per bin after it. This is the shape every *Binned2D and
+ * *TouchIndexAnalysed2D builder in this file produces (buildTrialBinned2D's
+ * tail, buildPooledBinned2D's tail, buildTrialTouchIndexAnalysed2D,
+ * buildPooledTouchIndexAnalysed2D) — the function only looks for that block
+ * and reads forward from it, so it works whether `data2D` is one of those
+ * standalone summary tables or a larger table with a summary block
+ * somewhere inside it.
+ *
+ * Used to feed the preview modal's sparkline charts (see renderPreviewModal
+ * in main.js) — never touches the Excel/CSV/HTML export paths.
+ *
+ * @param {any[][]} data2D
+ * @returns {Object.<string, {bins:number[], means:(number|null)[], sems:number[], ns:number[]}>}
+ *   Empty object if no "Bin" summary header row is found.
+ */
+export function extractBinSeries(data2D) {
+  const headerRowIndex = data2D.findIndex(row => row && row[0] === "Bin");
+  if (headerRowIndex === -1) return {};
+
+  const header = data2D[headerRowIndex];
+  const genotypeCols = [];  // [{ genotype, meanCol }]
+  for (let col = 1; col < header.length; col += 3) {
+    const meanLabel = header[col];
+    if (typeof meanLabel === "string" && meanLabel.endsWith("_Mean")) {
+      genotypeCols.push({ genotype: meanLabel.slice(0, -"_Mean".length), meanCol: col });
+    }
+  }
+
+  const series = {};
+  genotypeCols.forEach(({ genotype }) => { series[genotype] = { bins: [], means: [], sems: [], ns: [] }; });
+
+  let binIndex = 0;
+  for (let r = headerRowIndex + 1; r < data2D.length; r++) {
+    const row = data2D[r];
+    if (!row || row.length === 0 || row.every(c => c === "" || c == null)) break;  // end of this summary block
+
+    binIndex++;
+    genotypeCols.forEach(({ genotype, meanCol }) => {
+      const s = series[genotype];
+      s.bins.push(binIndex);
+      s.means.push(typeof row[meanCol]   === "number" ? row[meanCol]   : null);
+      s.sems.push(typeof row[meanCol+1]  === "number" ? row[meanCol+1] : 0);
+      s.ns.push(typeof row[meanCol+2]    === "number" ? row[meanCol+2] : 0);
+    });
+  }
+
+  return series;
 }
 
 
@@ -426,10 +516,15 @@ export function buildTrialBinned2D(trial, assay) {
   const { genotypes, binSize } = assay;
   const runsByGenotype = groupAndSortRuns(trial.runs, genotypes, false);
 
-  // Header rows
+  // Header rows. Unlike the optional QC rows below, "Eligible" is always
+  // present (never dropped even when every run is eligible) — the live
+  // Excel formulas injected by injectLiveFormulas() key off its row
+  // position to filter the summary stats, so its presence/position must be
+  // unconditional and predictable rather than data-dependent.
   const headerGenotype = ["Genotype"];
   const headerAnimal   = ["Animal"];
   const headerStatus   = ["Run Status"];
+  const headerEligible = ["Eligible"];
   const headerOverride = ["Manual Override"];
 
   genotypes.forEach((g, gi) => {
@@ -437,10 +532,12 @@ export function buildTrialBinned2D(trial, assay) {
       headerGenotype.push(g);
       headerAnimal.push(`Animal ${run.animalIndex}${run.animalLabelSuffix ?? ""}`);
       headerStatus.push(RUN_STATUS_LABELS[run.status] ?? run.status);
+      headerEligible.push(run.eligibleForAnalysis ? "Yes" : "");
       headerOverride.push(formatOverrideNote(run));
     });
     if (gi < genotypes.length - 1) {
-      headerGenotype.push(""); headerAnimal.push(""); headerStatus.push(""); headerOverride.push("");
+      headerGenotype.push(""); headerAnimal.push(""); headerStatus.push("");
+      headerEligible.push(""); headerOverride.push("");
     }
   });
 
@@ -499,7 +596,7 @@ export function buildTrialBinned2D(trial, assay) {
   const optionalHeaders = [headerOverride].filter(row => !isDescriptorRowEmpty(row));
 
   return [
-    headerGenotype, headerAnimal, headerStatus, ...optionalHeaders,
+    headerGenotype, headerAnimal, headerStatus, headerEligible, ...optionalHeaders,
     ...rawRows,
     _sep, _sep, _sep,
     summaryHeader,
@@ -630,6 +727,93 @@ export function buildTrialTouchIndexAnalysed2D(trial, assay) {
 
 
 /* ==========================================================================
+   Trial-Level Tidy (Long-Format) Builders
+
+   One row per (run, observation) instead of one column per run — the shape
+   R (ggplot2/lme4), Python (pandas/statsmodels), and similar tools expect
+   natively, letting the analysis tool itself group/filter/pivot instead of
+   needing to un-pivot the wide grid above first. Additive: included
+   alongside the wide-format sections above when requested (see the
+   includeTidy option on buildAllSections), never replacing them.
+
+   Every run is included regardless of eligibility, matching the raw wide
+   tables' QC-transparency rationale — filter on the Eligible column
+   downstream for an eligible-only analysis. Rows stop at each run's own
+   recorded length rather than padding to assay.stimCount with blanks, since
+   there is no column alignment to preserve in a long table.
+   ========================================================================== */
+
+/**
+ * Builds a tidy raw-observation table for a single trial: one row per
+ * (run, stimulus).
+ *
+ * @param {Trial} trial
+ * @param {Assay} assay
+ * @returns {any[][]} [header, ...rows], each row one recorded stimulus.
+ */
+export function buildTrialRawTidy2D(trial, assay) {
+  const { genotypes } = assay;
+  const runsByGenotype = groupAndSortRuns(trial.runs, genotypes, false);
+  const rows = [["Trial", "Genotype", "Animal", "RunID", "RunStatus", "Eligible", "StimulusIndex", "Value"]];
+
+  genotypes.forEach(g => {
+    runsByGenotype[g].forEach(run => {
+      (run.values ?? []).forEach((v, i) => {
+        rows.push([
+          trial.trialIndex, g, `Animal ${run.animalIndex}${run.animalLabelSuffix ?? ""}`, run.runId,
+          RUN_STATUS_LABELS[run.status] ?? run.status, !!run.eligibleForAnalysis, i + 1, v
+        ]);
+      });
+    });
+  });
+
+  return rows;
+}
+
+/**
+ * Builds a tidy binned-observation table for a single trial: one row per
+ * (run, bin), combining binned response percentage and Touch Index in the
+ * same row since both are bin-level and computed together.
+ *
+ * TouchIndex is blank for ineligible runs and for runs excluded from Touch
+ * Index analysis (zero baseline bin) — mirrors buildTrialTouchIndexBinned2D
+ * exactly. BinnedPercent has no such exclusion; it's populated for every
+ * run regardless of eligibility, same as the raw wide grid.
+ *
+ * @param {Trial} trial
+ * @param {Assay} assay
+ * @returns {any[][]} [header, ...rows], each row one bin of one run.
+ */
+export function buildTrialBinnedTidy2D(trial, assay) {
+  const { genotypes, binSize } = assay;
+  const runsByGenotype = groupAndSortRuns(trial.runs, genotypes, false);
+  const rows = [[
+    "Trial", "Genotype", "Animal", "RunID", "RunStatus", "Eligible",
+    "BinIndex", "BinStart", "BinEnd", "BinnedPercent", "TouchIndex"
+  ]];
+
+  genotypes.forEach(g => {
+    runsByGenotype[g].forEach(run => {
+      const binned = binRunValues(run.values, binSize);
+      const ti     = run.eligibleForAnalysis ? computeTouchIndexBins(binned) : null;
+
+      binned.forEach((pct, i) => {
+        const start = i * binSize + 1;
+        const end   = start + binSize - 1;
+        rows.push([
+          trial.trialIndex, g, `Animal ${run.animalIndex}${run.animalLabelSuffix ?? ""}`, run.runId,
+          RUN_STATUS_LABELS[run.status] ?? run.status, !!run.eligibleForAnalysis,
+          i + 1, start, end, pct, ti ? ti[i] : ""
+        ]);
+      });
+    });
+  });
+
+  return rows;
+}
+
+
+/* ==========================================================================
    Pooled (Cross-Trial) 2D Builders
    ========================================================================== */
 
@@ -719,6 +903,9 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
   const hTrial       = ["Trial"];
   const hTrialAnimal = ["Trial Animal"];
   const hStatus      = ["Run Status"];
+  // Always present (see the comment in buildTrialBinned2D) — the live Excel
+  // formulas injected by injectLiveFormulas() key off this row's position.
+  const hEligible    = ["Eligible"];
   const hOverride    = ["Manual Override"];
 
   genotypes.forEach((g, gi) => {
@@ -728,10 +915,11 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
       hTrial.push(`Trial ${run.trialIndex}`);
       hTrialAnimal.push(`Animal ${run.animalIndex}`);
       hStatus.push(RUN_STATUS_LABELS[run.status] ?? run.status);
+      hEligible.push(run.eligibleForAnalysis ? "Yes" : "");
       hOverride.push(formatOverrideNote(run));
     });
     if (gi < genotypes.length - 1) {
-      [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hOverride].forEach(h => h.push(""));
+      [hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hEligible, hOverride].forEach(h => h.push(""));
     }
   });
 
@@ -790,7 +978,7 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
   const optionalHeaders = [hOverride].filter(row => !isDescriptorRowEmpty(row));
 
   return [
-    hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, ...optionalHeaders,
+    hGenotype, hAnimal, hTrial, hTrialAnimal, hStatus, hEligible, ...optionalHeaders,
     ...rawRows,
     // Separator rows must span the FULL header width (all run columns
     // plus the spacer columns between genotypes), not just the static header fields.
@@ -946,6 +1134,94 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}, _runs = nul
 
 
 /* ==========================================================================
+   Pooled Tidy (Long-Format) Builders
+
+   Same rationale and conventions as the Trial-Level Tidy builders above —
+   see that section's banner comment. The only structural difference is an
+   extra TrialAnimal column: "Animal" here is the pooled globalAnimalIndex
+   (unique across the whole pool), while TrialAnimal is the original
+   per-trial animalIndex, mirroring how buildPooledRaw2D distinguishes
+   "Animal" from "Trial Animal".
+   ========================================================================== */
+
+/**
+ * Builds a tidy raw-observation table across all selected trials (pooled):
+ * one row per (run, stimulus).
+ *
+ * @param {Assay}  assay
+ * @param {Object} [options]  - Filter options passed to collectPooledRuns.
+ * @param {Run[]}  [_runs]    - Pre-collected runs (optional, avoids re-querying).
+ * @returns {any[][]} [header, ...rows], each row one recorded stimulus.
+ */
+export function buildPooledRawTidy2D(assay, options = {}, _runs = null) {
+  const { genotypes } = assay;
+  const runs           = _runs || collectPooledRuns(assay, options);
+  const runsByGenotype = groupAndSortRuns(runs, genotypes, true);
+  const rows = [[
+    "Trial", "Genotype", "Animal", "TrialAnimal", "RunID", "RunStatus", "Eligible", "StimulusIndex", "Value"
+  ]];
+
+  genotypes.forEach(g => {
+    runsByGenotype[g].forEach(run => {
+      (run.values ?? []).forEach((v, i) => {
+        rows.push([
+          run.trialIndex, g, `Animal ${run.globalAnimalIndex}`, `Animal ${run.animalIndex}`, run.runId,
+          RUN_STATUS_LABELS[run.status] ?? run.status, !!run.eligibleForAnalysis, i + 1, v
+        ]);
+      });
+    });
+  });
+
+  return rows;
+}
+
+/**
+ * Builds a tidy binned-observation table across all selected trials
+ * (pooled): one row per (run, bin), combining binned response percentage
+ * and Touch Index in the same row.
+ *
+ * Accepts a pre-built run cache (see buildRunCache) to avoid redundant
+ * binning when called from buildAllSections alongside the wide pooled
+ * builders, which already compute the same cache.
+ *
+ * @param {Assay}  assay
+ * @param {Object} [options]  - Filter options passed to collectPooledRuns.
+ * @param {Run[]}  [_runs]    - Pre-collected runs (optional).
+ * @param {Map}    [_cache]   - Pre-built run cache from buildRunCache (optional).
+ * @returns {any[][]} [header, ...rows], each row one bin of one run.
+ */
+export function buildPooledBinnedTidy2D(assay, options = {}, _runs = null, _cache = null) {
+  const { genotypes, binSize } = assay;
+  const runs           = _runs || collectPooledRuns(assay, options);
+  const runsByGenotype = groupAndSortRuns(runs, genotypes, true);
+  const rows = [[
+    "Trial", "Genotype", "Animal", "TrialAnimal", "RunID", "RunStatus", "Eligible",
+    "BinIndex", "BinStart", "BinEnd", "BinnedPercent", "TouchIndex"
+  ]];
+
+  genotypes.forEach(g => {
+    runsByGenotype[g].forEach(run => {
+      const cached = _cache?.get(run);
+      const binned = cached ? cached.binned : binRunValues(run.values, binSize);
+      const ti     = run.eligibleForAnalysis ? (cached ? cached.ti : computeTouchIndexBins(binned)) : null;
+
+      binned.forEach((pct, i) => {
+        const start = i * binSize + 1;
+        const end   = start + binSize - 1;
+        rows.push([
+          run.trialIndex, g, `Animal ${run.globalAnimalIndex}`, `Animal ${run.animalIndex}`, run.runId,
+          RUN_STATUS_LABELS[run.status] ?? run.status, !!run.eligibleForAnalysis,
+          i + 1, start, end, pct, ti ? ti[i] : ""
+        ]);
+      });
+    });
+  });
+
+  return rows;
+}
+
+
+/* ==========================================================================
    Master Section Builder
    ========================================================================== */
 
@@ -954,19 +1230,38 @@ export function buildPooledTouchIndexAnalysed2D(assay, options = {}, _runs = nul
  * Always produces: Assay Metadata first, then trial/pooled sections in config
  * order, then Touch Index Exclusions (if any excluded runs exist).
  *
- * This is the single source of truth consumed by performExcelExport,
- * performCSVExport, and generatePreviewHTML, eliminating ~100 lines of
- * duplicated looping logic.
+ * This is the single source of truth consumed by performExcelExport and
+ * performCSVExport, eliminating ~100 lines of duplicated looping logic. The
+ * preview modal (see renderPreviewModal in main.js) also builds directly off
+ * this array, rendering each section's HTML itself via buildHtmlTableFrom2D
+ * rather than through a single pre-concatenated string, so it can lazily
+ * render/collapse/cap individual sections instead of injecting everything
+ * into the DOM at once.
  *
  * For pooled configs, collectPooledRuns is called once per config and a shared
  * binning cache is passed to all three pooled sub-table builders, avoiding
  * redundant binRunValues calls.
  *
- * @param {Object}   assay         - The full assay object.
- * @param {Object[]} exportConfigs - Array of dataset selection configs from getExportConfigs().
- * @returns {Array<{ name: string, excelSheetName: string, data2D: any[][] }>}
+ * @param {Object}   assay             - The full assay object.
+ * @param {Object[]} exportConfigs     - Array of dataset selection configs from getExportConfigs().
+ * @param {Object}   [options]
+ * @param {boolean}  [options.includeTidy=false] - Also append a long/tidy-format
+ *   pair of sections (Raw, Binned) after each trial/pooled config's existing
+ *   wide-format sections — additive, never replaces them. Off by default so
+ *   the existing Excel-first workflow is unaffected unless requested.
+ * @returns {Array<{ name: string, excelSheetName: string, data2D: any[][], large?: boolean, charts?: Object }>}
+ *   `large` marks Raw/Raw(Tidy)/Binned(Tidy) sections — one row per
+ *   stimulus or per observation, potentially thousands of rows for a big
+ *   pooled dataset — as opposed to the small, always-fully-shown
+ *   Metadata/Analysed/Exclusions sections. Consumed only by the preview
+ *   modal's default-collapse/row-cap behavior; the actual Excel/CSV export
+ *   is never capped regardless of this flag.
+ *   `charts` (Analysed sections only) is `{ percentResponse, touchIndex }`,
+ *   each an extractBinSeries() result — feeds the preview modal's sparkline
+ *   charts and is otherwise unused by the Excel/CSV/HTML export paths.
  */
-export function buildAllSections(assay, exportConfigs) {
+export function buildAllSections(assay, exportConfigs, options = {}) {
+  const { includeTidy = false } = options;
   const sections = [];
 
   // ── Metadata (always first) ──────────────────────────────────────────────
@@ -986,17 +1281,44 @@ export function buildAllSections(assay, exportConfigs) {
       sections.push({
         name:           `Trial ${trial.trialIndex} - Raw`,
         excelSheetName: `Trial_${trial.trialIndex}_Raw`,
-        data2D:         buildTrialRaw2D(trial, assay)
+        data2D:         buildTrialRaw2D(trial, assay),
+        large:          true
       });
-      sections.push({
-        name:           `Trial ${trial.trialIndex} - Analysed`,
-        excelSheetName: `Trial_${trial.trialIndex}_Analysed`,
-        data2D:         buildTouchAnalysedSheet2D({
-          percentAnalysed2D: buildTrialBinned2D(trial, assay),
-          tiBinned2D:        buildTrialTouchIndexBinned2D(trial, assay),
-          tiAnalysed2D:      buildTrialTouchIndexAnalysed2D(trial, assay)
-        })
-      });
+      {
+        const percentBinned2D = buildTrialBinned2D(trial, assay);
+        const tiAnalysed2D    = buildTrialTouchIndexAnalysed2D(trial, assay);
+        sections.push({
+          name:           `Trial ${trial.trialIndex} - Analysed`,
+          excelSheetName: `Trial_${trial.trialIndex}_Analysed`,
+          data2D:         buildTouchAnalysedSheet2D({
+            percentAnalysed2D: percentBinned2D,
+            tiBinned2D:        buildTrialTouchIndexBinned2D(trial, assay),
+            tiAnalysed2D
+          }),
+          // Feeds the preview modal's sparkline charts (see renderPreviewModal
+          // in main.js) — extracted from the same builder output used above,
+          // before it's flattened into the HTML-oriented combined sheet.
+          charts: {
+            percentResponse: extractBinSeries(percentBinned2D),
+            touchIndex:      extractBinSeries(tiAnalysed2D)
+          }
+        });
+      }
+
+      if (includeTidy) {
+        sections.push({
+          name:           `Trial ${trial.trialIndex} - Raw (Tidy)`,
+          excelSheetName: `Trial_${trial.trialIndex}_RawTidy`,
+          data2D:         buildTrialRawTidy2D(trial, assay),
+          large:          true
+        });
+        sections.push({
+          name:           `Trial ${trial.trialIndex} - Binned (Tidy)`,
+          excelSheetName: `Trial_${trial.trialIndex}_BinnedTidy`,
+          data2D:         buildTrialBinnedTidy2D(trial, assay),
+          large:          true
+        });
+      }
     }
 
     // ── Pooled (cross-trial) sections ──────────────────────────────────────
@@ -1012,17 +1334,41 @@ export function buildAllSections(assay, exportConfigs) {
       sections.push({
         name:           `Pooled (${suffix}) - Raw`,
         excelSheetName: `Pooled_${xlSuffix}_Raw`,
-        data2D:         buildPooledRaw2D(assay, poolOpt, runs)
+        data2D:         buildPooledRaw2D(assay, poolOpt, runs),
+        large:          true
       });
-      sections.push({
-        name:           `Pooled (${suffix}) - Analysed`,
-        excelSheetName: `Pooled_${xlSuffix}_Analysed`,
-        data2D:         buildTouchAnalysedSheet2D({
-          percentAnalysed2D: buildPooledBinned2D(assay, poolOpt, runs, cache),
-          tiBinned2D:        buildPooledTouchIndexBinned2D(assay, poolOpt, runs, cache),
-          tiAnalysed2D:      buildPooledTouchIndexAnalysed2D(assay, poolOpt, runs, cache)
-        })
-      });
+      {
+        const percentBinned2D = buildPooledBinned2D(assay, poolOpt, runs, cache);
+        const tiAnalysed2D    = buildPooledTouchIndexAnalysed2D(assay, poolOpt, runs, cache);
+        sections.push({
+          name:           `Pooled (${suffix}) - Analysed`,
+          excelSheetName: `Pooled_${xlSuffix}_Analysed`,
+          data2D:         buildTouchAnalysedSheet2D({
+            percentAnalysed2D: percentBinned2D,
+            tiBinned2D:        buildPooledTouchIndexBinned2D(assay, poolOpt, runs, cache),
+            tiAnalysed2D
+          }),
+          charts: {
+            percentResponse: extractBinSeries(percentBinned2D),
+            touchIndex:      extractBinSeries(tiAnalysed2D)
+          }
+        });
+      }
+
+      if (includeTidy) {
+        sections.push({
+          name:           `Pooled (${suffix}) - Raw (Tidy)`,
+          excelSheetName: `Pooled_${xlSuffix}_RawTidy`,
+          data2D:         buildPooledRawTidy2D(assay, poolOpt, runs),
+          large:          true
+        });
+        sections.push({
+          name:           `Pooled (${suffix}) - Binned (Tidy)`,
+          excelSheetName: `Pooled_${xlSuffix}_BinnedTidy`,
+          data2D:         buildPooledBinnedTidy2D(assay, poolOpt, runs, cache),
+          large:          true
+        });
+      }
     }
   });
 
@@ -1037,6 +1383,222 @@ export function buildAllSections(assay, exportConfigs) {
   }
 
   return sections;
+}
+
+
+/* ==========================================================================
+   Live Formulas (Excel only)
+
+   Every Mean/SEM/N summary cell in a finished data2D currently holds a
+   static number computed once in JS by calculateStats(). This section
+   replaces those numbers with live Excel formulas referencing the raw
+   values above them, so the workbook stays correct if a run is later
+   excluded/included by editing a cell directly in Excel.
+
+   This works by re-scanning a table's own row labels rather than by
+   threading row/column bookkeeping out of every builder above — the raw
+   header vocabulary (HTML_PREVIEW_HEADER_LABELS) and the "Genotype +
+   spacer" column layout are already consistent conventions used throughout
+   this file, so a table is fully self-describing. CSV export and the HTML
+   preview are untouched: this only ever mutates a SheetJS sheet object
+   built from data2D, never data2D itself.
+   ========================================================================== */
+
+/**
+ * Scans a "Genotype" header row (built by the genotype+spacer pattern used
+ * throughout this file — a genotype's name repeated once per run column,
+ * with a single blank spacer column between genotypes) and groups
+ * consecutive matching cells into 0-indexed, inclusive column ranges.
+ * Column 0 (the row label) is always skipped.
+ *
+ * A genotype with zero runs never appears in the row at all (the
+ * header-building loops simply push nothing for it), so it is absent from
+ * the returned map entirely rather than mapping to an empty range.
+ *
+ * @param {any[]} headerGenotypeRow - A row whose first cell is "Genotype".
+ * @returns {Object.<string, {start: number, end: number}>}
+ */
+function scanGenotypeColumnRanges(headerGenotypeRow) {
+  const ranges = {};
+  let col = 1;
+  while (col < headerGenotypeRow.length) {
+    const g = headerGenotypeRow[col];
+    if (!g) { col++; continue; }  // Spacer column between genotypes.
+    let end = col;
+    while (end + 1 < headerGenotypeRow.length && headerGenotypeRow[end + 1] === g) end++;
+    ranges[g] = { start: col, end };
+    col = end + 1;
+  }
+  return ranges;
+}
+
+/**
+ * True if every cell in a row is blank — used to distinguish the fixed-width
+ * blank separator rows this file uses (both true zero-length rows and the
+ * `Array(n).fill("")` rows inserted before a summary section) from an
+ * ordinary data row.
+ *
+ * @param {any[]} row
+ * @returns {boolean}
+ */
+function isBlankRow(row) {
+  return !row || row.length === 0 || row.every(c => c === "" || c == null);
+}
+
+/**
+ * Converts a 0-indexed column number to an Excel column letter
+ * (0 -> "A", 25 -> "Z", 26 -> "AA", ...).
+ *
+ * A tiny local implementation rather than reaching for XLSX.utils.encode_col
+ * so this whole live-formula module stays unit-testable in Node without the
+ * SheetJS package — XLSX only ever exists as a browser global loaded from
+ * the CDN <script> tag (see the typeof guard in performExcelExport), never
+ * as a project dependency.
+ *
+ * @param {number} col - 0-indexed column number.
+ * @returns {string}
+ */
+function encodeColumnLetter(col) {
+  let letters = "";
+  let n = col;
+  while (n >= 0) {
+    letters = String.fromCharCode(65 + (n % 26)) + letters;
+    n = Math.floor(n / 26) - 1;
+  }
+  return letters;
+}
+
+/**
+ * Builds an "A1"-style cell address from 0-indexed row/column numbers.
+ * @param {number} row
+ * @param {number} col
+ * @returns {string}
+ */
+function encodeCellAddress(row, col) {
+  return `${encodeColumnLetter(col)}${row + 1}`;
+}
+
+/**
+ * Writes live Mean/SEM/N formulas for one summary block (the rows
+ * immediately following a "Bin" summary header) onto an already-built
+ * SheetJS sheet, referencing the raw value rows recorded in `block`.
+ *
+ * Two formula shapes, chosen per genotype column range:
+ *   - `block.eligibleRow` present (percent-response tables): ineligible
+ *     runs' raw cells are still shown for QC, so the formula must filter by
+ *     both the Eligible marker row AND non-blank value cells. Built from
+ *     COUNTIFS/AVERAGEIFS (parallel-range conditional functions, not array
+ *     formulas) plus a SUMPRODUCT-based conditional SEM, since Excel has no
+ *     built-in STDEVIFS.
+ *   - `block.eligibleRow` absent (Touch Index tables): exclusion is already
+ *     blank-cell-encoded in the raw grid (see buildTrialTouchIndexBinned2D),
+ *     so plain COUNT/AVERAGE/STDEV — which already ignore blanks — suffice.
+ *
+ * Every formula is guarded against N=0 (blank instead of #DIV/0!) and N=1
+ * (blank SEM), mirroring calculateStats()'s own edge-case handling exactly.
+ *
+ * @param {Object}   sheet             - SheetJS worksheet (mutated in place).
+ * @param {any[][]}  data2D            - The full table this block belongs to.
+ * @param {number}   summaryHeaderRow  - Row index of the "Bin"/`_Mean`/... header.
+ * @param {Object}   block             - { genotypeCols, eligibleRow, rawRowStart, rawRowEnd }.
+ */
+function applySummaryFormulas(sheet, data2D, summaryHeaderRow, block) {
+  const { genotypeCols, eligibleRow, rawRowStart, rawRowEnd } = block;
+  if (rawRowStart === null) return;  // No raw rows were seen for this block — nothing to reference.
+
+  const summaryHeaderCells = data2D[summaryHeaderRow];
+
+  for (let r = summaryHeaderRow + 1; r < data2D.length; r++) {
+    if (isBlankRow(data2D[r])) break;  // End of this summary block.
+
+    const rawRow = rawRowStart + (r - (summaryHeaderRow + 1));
+    if (rawRow > rawRowEnd) break;  // No corresponding raw row left to reference.
+
+    for (let col = 1; col < summaryHeaderCells.length; col += 3) {
+      const meanLabel = summaryHeaderCells[col];
+      if (typeof meanLabel !== "string" || !meanLabel.endsWith("_Mean")) continue;
+      const genotype = meanLabel.slice(0, -"_Mean".length);
+      const range    = genotypeCols[genotype];
+      if (!range) continue;  // Genotype has zero runs in this table — leave the static "" as-is.
+
+      const colStart = encodeColumnLetter(range.start);
+      const colEnd   = encodeColumnLetter(range.end);
+      const valRange = `${colStart}${rawRow + 1}:${colEnd}${rawRow + 1}`;  // +1: 0-indexed row -> 1-indexed Excel row.
+
+      const meanAddr = encodeCellAddress(r, col);
+      const semAddr  = encodeCellAddress(r, col + 1);
+      const nAddr    = encodeCellAddress(r, col + 2);
+
+      let nFormula, meanFormula, semFormula;
+
+      if (eligibleRow !== null) {
+        const elRange = `${colStart}${eligibleRow + 1}:${colEnd}${eligibleRow + 1}`;
+        nFormula    = `COUNTIFS(${elRange},"Yes",${valRange},"<>")`;
+        meanFormula = `IF(${nAddr}=0,"",AVERAGEIFS(${valRange},${elRange},"Yes"))`;
+        semFormula  = `IF(${nAddr}<=1,"",SQRT(SUMPRODUCT((${elRange}="Yes")*(${valRange}<>"")*` +
+                      `(${valRange}-${meanAddr})^2)/(${nAddr}-1))/SQRT(${nAddr}))`;
+      } else {
+        nFormula    = `COUNT(${valRange})`;
+        meanFormula = `IF(${nAddr}=0,"",AVERAGE(${valRange}))`;
+        semFormula  = `IF(${nAddr}<=1,"",STDEV(${valRange})/SQRT(${nAddr}))`;
+      }
+
+      // Cells already exist (aoa_to_sheet built them from the static JS
+      // values) — .f is added alongside the existing cached .v so a viewer
+      // that doesn't recalculate on open still shows the correct number.
+      if (sheet[meanAddr]) sheet[meanAddr].f = meanFormula;
+      if (sheet[semAddr])  sheet[semAddr].f  = semFormula;
+      if (sheet[nAddr])    sheet[nAddr].f    = nFormula;
+    }
+  }
+}
+
+/**
+ * Walks a finished data2D top-to-bottom, tracking the most recently seen
+ * genotype-columned raw block, and calls applySummaryFormulas() every time
+ * a "Bin" summary header row is found — wiring each summary section to the
+ * raw rows that immediately precede it (across the blank separator rows
+ * this file always inserts between a raw block and its summary).
+ *
+ * Safe to call on any sheet, including ones with no genotype/summary rows
+ * at all (Assay Metadata, Touch Index Exclusions) — it simply does nothing
+ * in that case.
+ *
+ * @param {Object}  sheet  - SheetJS worksheet (mutated in place).
+ * @param {any[][]} data2D - The full table this sheet was built from.
+ */
+export function injectLiveFormulas(sheet, data2D) {
+  let block = null;
+
+  data2D.forEach((row, rowIndex) => {
+    if (isBlankRow(row)) return;
+    const label = row[0];
+
+    if (label === "Genotype") {
+      block = { genotypeCols: scanGenotypeColumnRanges(row), eligibleRow: null, rawRowStart: null, rawRowEnd: null };
+      return;
+    }
+
+    if (!block) return;  // Not currently inside a tracked raw block.
+
+    if (label === "Eligible") {
+      block.eligibleRow = rowIndex;
+      return;
+    }
+
+    if (label === "Bin") {
+      // Exact match only — a per-bin raw row is labelled "Bin N (start–end)".
+      applySummaryFormulas(sheet, data2D, rowIndex, block);
+      block = null;  // This summary consumes the block; a later one must not reuse it.
+      return;
+    }
+
+    if (HTML_PREVIEW_HEADER_LABELS.has(label)) return;  // Another known header row (Animal, Run Status, ...).
+
+    // Anything else at this point is a raw data row ("Bin N (...)" or "Stimulus N").
+    if (block.rawRowStart === null) block.rawRowStart = rowIndex;
+    block.rawRowEnd = rowIndex;
+  });
 }
 
 
@@ -1056,16 +1618,17 @@ export function buildAllSections(assay, exportConfigs) {
  *
  * @param {Object}   currentAssay  - The full assay object.
  * @param {Object[]} exportConfigs - Array of dataset selection configs from getExportConfigs().
+ * @param {Object}   [options]     - Passed through to buildAllSections() (see includeTidy there).
  * @returns {{ success: boolean, error?: string }}
  */
-export function performExcelExport(currentAssay, exportConfigs) {
+export function performExcelExport(currentAssay, exportConfigs, options = {}) {
   // Guard against XLSX being undefined (CDN failure, CSP block, etc.)
   if (typeof XLSX === "undefined") {
     return { success: false, error: "SheetJS library not loaded. Please check your internet connection and reload." };
   }
   try {
     const wb       = XLSX.utils.book_new();
-    const sections = buildAllSections(currentAssay, exportConfigs);
+    const sections = buildAllSections(currentAssay, exportConfigs, options);
 
     sections.forEach(({ excelSheetName, data2D }) => {
       const sheet = XLSX.utils.aoa_to_sheet(data2D);
@@ -1074,6 +1637,11 @@ export function performExcelExport(currentAssay, exportConfigs) {
         sheet["!cols"] = [{ wch: 25 }, { wch: 40 }];
       } else {
         applySheetLayout(sheet, data2D);
+        // Excel-only enhancement: replace the static Mean/SEM/N numbers with
+        // live formulas. No-ops harmlessly on sheets with no genotype/summary
+        // rows (Assay Metadata is already excluded above; Touch Index
+        // Exclusions has neither and is left untouched by the scan itself).
+        injectLiveFormulas(sheet, data2D);
       }
 
       XLSX.utils.book_append_sheet(wb, sheet, excelSheetName);
@@ -1126,11 +1694,12 @@ function arrayToCSVRow(row) {
  *
  * @param {Object}   currentAssay  - The full assay object.
  * @param {Object[]} exportConfigs - Array of dataset selection configs.
+ * @param {Object}   [options]     - Passed through to buildAllSections() (see includeTidy there).
  * @returns {{ success: boolean, error?: string }}
  */
-export function performCSVExport(currentAssay, exportConfigs) {
+export function performCSVExport(currentAssay, exportConfigs, options = {}) {
   try {
-    const sections = buildAllSections(currentAssay, exportConfigs);
+    const sections = buildAllSections(currentAssay, exportConfigs, options);
 
     let csv = "";
     sections.forEach((section, i) => {
@@ -1161,17 +1730,3 @@ export function performCSVExport(currentAssay, exportConfigs) {
   }
 }
 
-/**
- * Generates the full HTML content for the data preview modal.
- * All sections are built via buildAllSections().
- *
- * @param {Assay}    currentAssay  - The full assay object.
- * @param {Object[]} exportConfigs - Array of dataset selection configs.
- * @returns {string} Complete HTML string ready to inject into the modal container.
- */
-export function generatePreviewHTML(currentAssay, exportConfigs) {
-  const sections = buildAllSections(currentAssay, exportConfigs);
-  return sections
-    .map(({ name, data2D }) => buildHtmlTableFrom2D(name, data2D))
-    .join("");
-}

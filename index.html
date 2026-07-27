@@ -335,7 +335,17 @@
         <div id="exportDatasetList">
           </div>
       </fieldset>
-      
+
+      <!-- Opt-in, off by default: adds a long/tidy-format pair of sheets
+           (Raw, Binned — one row per observation) alongside the normal
+           wide-format sheets for every selected dataset above, for loading
+           into R/pandas/statistical tools without un-pivoting first. Never
+           replaces the wide-format sheets the Excel workflow already uses. -->
+      <label class="toggle-label" id="exportTidyFormatLabel">
+        <input type="checkbox" id="exportIncludeTidy">
+        Also include long/tidy-format data (for R, Python, Prism, Origin)
+      </label>
+
       <div class="export-actions">
         <button id="exportExcel" class="primary export-primary-btn">
           <!-- Table/spreadsheet icon -->
@@ -1004,7 +1014,13 @@
         <h2 id="previewModalTitle">Data Preview</h2>
         <button id="closePreview" type="button" aria-label="Close">✕</button>
       </header>
-      
+
+      <!-- Always-visible jump menu, one button per section — populated by
+           renderPreviewModal() in main.js. Sits outside the scrolling
+           #previewContainer so it never needs CSS position:sticky to stay
+           visible. -->
+      <nav id="previewNav" class="preview-nav" aria-label="Jump to section" hidden></nav>
+
       <div id="previewContainer">
         </div>
       

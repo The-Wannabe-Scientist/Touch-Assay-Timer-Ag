@@ -1482,7 +1482,7 @@ th {
 
 #previewContainer {
   flex: 1; overflow: auto; padding: 1.25rem;
-  display: flex; flex-direction: column; gap: 2rem;
+  display: flex; flex-direction: column; gap: 0.75rem;
 }
 
 .preview-table-wrapper {
@@ -1523,6 +1523,153 @@ th {
   display: flex; justify-content: flex-end;
 }
 
+/* ── Preview modal: jump menu ─────────────────────────────────────────────
+   Sits outside the scrolling #previewContainer as an ordinary flex child of
+   .modal-content, so it's always visible without needing position:sticky —
+   see the comment on #previewNav in index.html. */
+.preview-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border-base);
+  background: var(--bg-card);
+}
+
+.preview-nav-link {
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-base);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.preview-nav-link:hover,
+.preview-nav-link:focus-visible {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+/* ── Preview modal: collapsible sections ──────────────────────────────────
+   Raw/Tidy sections (buildAllSections' `large` flag) start collapsed and
+   are not rendered into the DOM until first expanded — see
+   renderPreviewModal() in main.js. Metadata/Analysed/Exclusions start open. */
+.preview-section-details {
+  border: 1px solid var(--border-base);
+  border-radius: 10px;
+  /* Deliberately no overflow:hidden here to clip the rounded corners —
+     .preview-section-details is a flex item inside #previewContainer's
+     column layout, and any overflow value other than "visible" forces a
+     flex item's automatic minimum height to 0 (a well-known flexbox
+     interaction), collapsing/overlapping every section regardless of its
+     real content. The summary below gets its own border-radius instead. */
+}
+
+.preview-section-details summary {
+  padding: 0.7rem 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--bg-table-header);
+  list-style: revert;  /* keep the browser's default disclosure triangle */
+  border-radius: 9px 9px 0 0;
+}
+.preview-section-details:not([open]) summary {
+  border-radius: 9px;  /* closed: summary is the only visible content, round every corner */
+}
+.preview-section-details summary:hover {
+  background: color-mix(in srgb, var(--color-primary) 6%, var(--bg-table-header));
+}
+.preview-section-details[open] summary {
+  border-bottom: 1px solid var(--border-base);
+}
+
+/* The label/mini-sparkline flex layout lives on this inner wrapper, not on
+   <summary> itself — see the comment in renderPreviewModal() in main.js on
+   why <summary> must keep its default display for the marker to render. */
+.summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.preview-section-body {
+  padding: 1rem;
+}
+.preview-section-body .preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.preview-cap-notice {
+  margin: 0.6rem 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ── Preview modal: sparkline charts ──────────────────────────────────────
+   Hand-rolled inline SVG (see buildSparklineSVG in main.js) rather than a
+   charting library — genotype line/dot colors come from the same
+   assignGenotypeColors() palette the assay screen's genotype picker uses,
+   set inline per-element by JS, not here. */
+.summary-sparklines {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.preview-charts-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-base);
+}
+
+.preview-chart-block h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.sparkline-gridline {
+  stroke: var(--border-base);
+  stroke-width: 1;
+}
+.sparkline-reference {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 2;
+}
+
+.sparkline-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.35rem;
+}
+.sparkline-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.sparkline-legend-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 /* =====================================================================
    11. UTILITIES, LISTS & WARNINGS
    ===================================================================== */
@@ -1555,6 +1702,14 @@ th {
   margin-top: 0.2rem !important; /* Aligns with text visually */
   flex-shrink: 0;
 }
+/* Grows to fill the header row so `.assay-row-sparklines` (the next flex
+   sibling) lands pinned to the right edge, next to the name, rather than
+   immediately after the text. min-width:0 lets a long assay name still
+   truncate/wrap instead of forcing the sparklines off-row. */
+.assay-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 /* Name is the primary identifier; genotypes + date are secondary metadata
    on their own muted line, instead of one run-on string that wrapped
    awkwardly for assays with several genotypes. */
@@ -1568,6 +1723,36 @@ th {
   font-size: 0.83rem;
   color: var(--text-muted);
   margin-top: 0.15rem;
+}
+/* Row-level preview charts (see enrichSavedAssayRowsWithSparklines in
+   main.js) — reuses the same mini sparkline SVGs as the preview modal's
+   collapsed-section summary bar. Sits next to the assay name inside
+   `.assay-row-header`, vertically centered against the name+meta block.
+   Hidden below the app's existing desktop breakpoint (769px, matched with
+   #tapButton above) rather than shrunk to illegibility: a 380px phone row
+   has no room left for two charts once the name and meta line are in place.
+   `.has-charts` is added by JS only once real data has been drawn in, so
+   assays with nothing eligible to chart don't leave a blank gap. */
+.assay-row-sparklines {
+  display: none;
+  align-items: center;
+  align-self: center;
+  flex-shrink: 0;
+  gap: 0.75rem;
+  margin-left: auto;
+}
+@media (min-width: 769px) {
+  .assay-row-sparklines.has-charts {
+    display: flex;
+  }
+}
+/* Scales with the row's available width instead of a fixed pixel size —
+   height:auto preserves the SVG's own viewBox aspect ratio as the width
+   changes, so the chart never looks stretched or squashed. */
+.assay-row-sparklines svg {
+  width: clamp(40px, 6vw, 80px);
+  height: auto;
+  flex-shrink: 0;
 }
 .assay-actions {
   display: flex;
@@ -3128,6 +3313,9 @@ button.secondary.btn-loading::before {
   .modal-header {
     padding: 0.85rem 1rem;
   }
+  .preview-nav {
+    padding: 0.6rem 1rem;
+  }
   #previewContainer {
     padding: 0.75rem;
   }
@@ -3432,6 +3620,15 @@ body.state-running {
   padding-bottom: 0.5rem;
   margin-bottom: 0.5rem;
   border-bottom: 1px solid var(--border-base);
+}
+
+/* ── Export screen: tidy-format opt-in — secondary to the dataset list, not
+   a dataset itself, so it's visually smaller/quieter than .toggle-label's
+   default size rather than competing with the primary checklist above it. */
+#exportTidyFormatLabel {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 0.75rem;
 }
 
 /* ── Bulk select label in saved assays ─────────────────────────────────── */

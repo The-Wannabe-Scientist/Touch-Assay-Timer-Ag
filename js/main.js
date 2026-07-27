@@ -54,7 +54,7 @@ import {
   playTick
 }                                                      from "./audio.js";
 import {
-  performExcelExport, performCSVExport, generatePreviewHTML, RUN_STATUS_LABELS
+  performExcelExport, performCSVExport, buildAllSections, buildHtmlTableFrom2D, RUN_STATUS_LABELS
 }                                                      from "./export.js";
 import { showToast, dismissLatestToast }                from "./toast.js";
 import {
@@ -427,6 +427,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       genotypeListbox:     document.getElementById("genotypeListbox"),
       selectAllAssays:  document.getElementById("selectAllAssays"),
       exportSelectAll:  document.getElementById("exportSelectAll"),
+      exportIncludeTidy: document.getElementById("exportIncludeTidy"),
       importBackupFile: document.getElementById("importBackupInput"),
     },
     Screens: {
@@ -481,6 +482,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       savedAssaysList:  document.getElementById("savedAssaysList"),
       previewModal:     document.getElementById("previewModal"),
       previewContainer: document.getElementById("previewContainer"),
+      previewNav:       document.getElementById("previewNav"),
       closePreview:     document.getElementById("closePreview"),
       overflowMenu:          document.getElementById("overflowMenu"),
       // Cached once to avoid repeated getElementById calls inside the hot scheduler loop
@@ -2532,10 +2534,12 @@ document.addEventListener("DOMContentLoaded", async () => {
               <div class="assay-info-name">${escapeHTML(assay.assayName) || "Untitled"}</div>
               <div class="assay-info-meta">${metaParts.join(" &middot; ")}</div>
             </div>
+            <div class="assay-row-sparklines" data-assay-id="${escapeHTML(assay.assayId)}"></div>
           </div>
           <div class="assay-actions">
-            <button class="secondary" data-action="start"  data-assay-id="${escapeHTML(assay.assayId)}">Start New Trial</button>
-            <button class="secondary" data-action="export" data-assay-id="${escapeHTML(assay.assayId)}">Export</button>
+            <button class="secondary" data-action="start"   data-assay-id="${escapeHTML(assay.assayId)}">Start New Trial</button>
+            <button class="secondary" data-action="preview" data-assay-id="${escapeHTML(assay.assayId)}">Preview</button>
+            <button class="secondary" data-action="export"  data-assay-id="${escapeHTML(assay.assayId)}">Export</button>
             <button class="btn-danger-outline" data-action="delete" data-assay-id="${escapeHTML(assay.assayId)}"
               data-assay-name="${escapeHTML(assay.assayName)}">Delete</button>
           </div>
@@ -2547,6 +2551,72 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Buttons.deleteSelectedAssays.disabled  = true;
     UI.Inputs.selectAllAssays.checked         = false;
     UI.Inputs.selectAllAssays.indeterminate   = false;  // clear indeterminate on every rebuild
+
+    // Charts are filled in progressively after the list itself is already
+    // interactive — each one needs a full hydrate + pooled-binning pass,
+    // which is too slow to block the initial render on for lists with many
+    // saved assays.
+    enrichSavedAssayRowsWithSparklines(assays);
+  }
+
+  // Bumped on every populateSavedAssaysList() call so an in-flight
+  // enrichment pass from a stale render doesn't write into rows that belong
+  // to a newer one (e.g. the list was reopened, or an assay was deleted,
+  // while hydrates were still resolving).
+  let savedAssaysSparklineToken = 0;
+
+  /**
+   * Progressively fills in each saved-assay row's `.assay-row-sparklines`
+   * placeholder with tiny Response/Touch-Index charts, pooled across that
+   * assay's completed trials. Purely decorative and best-effort: an assay
+   * with no completed/eligible data simply keeps its placeholder empty
+   * (hidden by CSS), and any hydrate/build failure for one assay is skipped
+   * without affecting the others. Rendering itself stays CSS-gated to wider
+   * screens — see `.assay-row-sparklines` in styles.css — so this still runs
+   * on narrow viewports (cheap enough, and keeps behavior width-independent)
+   * but simply has nothing visible to show for it.
+   *
+   * @param {Array<{assayId: string}>} assays - The lightweight list-view assay records just rendered.
+   */
+  async function enrichSavedAssayRowsWithSparklines(assays) {
+    const token = ++savedAssaysSparklineToken;
+
+    await Promise.all(assays.map(async assay => {
+      let hydrated;
+      try {
+        hydrated = await hydrateAssay(assay.assayId);
+      } catch {
+        return;  // assay may have been deleted while this was in flight
+      }
+      if (token !== savedAssaysSparklineToken) return;  // list was repopulated meanwhile
+
+      const container = document.querySelector(
+        `.assay-row-sparklines[data-assay-id="${CSS.escape(assay.assayId)}"]`
+      );
+      if (!container) return;  // row no longer present (list re-rendered / assay removed)
+
+      let sections;
+      try {
+        sections = buildAllSections(hydrated, [{ type: "pooled", includeAbandoned: false }], {});
+      } catch {
+        return;
+      }
+      const analysed = sections.find(s => s.charts);
+      if (!analysed) return;
+
+      const genotypeColors = assignGenotypeColors(hydrated.genotypes || []);
+      let svgHtml = "";
+      // Taller than the preview modal's collapsed-summary mini sparklines
+      // (height 26) — this is the row's only glanceable data, so it gets
+      // more vertical room to actually be readable.
+      const rowSparklineOpts = { mini: true, height: 44 };
+      svgHtml += buildSparklineSVG(analysed.charts.percentResponse, genotypeColors, { ...rowSparklineOpts, yMin: 0, yMax: 100 });
+      svgHtml += buildSparklineSVG(analysed.charts.touchIndex,      genotypeColors, { ...rowSparklineOpts, referenceY: 1 });
+      if (!svgHtml.trim()) return;  // no eligible completed-trial data to chart
+
+      container.innerHTML = svgHtml;
+      container.classList.add("has-charts");
+    }));
   }
 
   /**
@@ -2563,6 +2633,309 @@ document.addEventListener("DOMContentLoaded", async () => {
       trialId:          input.dataset.trialId,
       includeAbandoned: input.dataset.includeAbandoned === "true"
     }));
+  }
+
+  /**
+   * Reads the "also include tidy/long-format data" toggle. A format option,
+   * not a dataset selection, so it's independent of getExportConfigs() and
+   * threaded separately into buildAllSections() via each export function's
+   * options parameter.
+   *
+   * @returns {{ includeTidy: boolean }}
+   */
+  function getExportOptions() {
+    return { includeTidy: !!UI.Inputs.exportIncludeTidy?.checked };
+  }
+
+  /**
+   * Row cap applied only to "large" preview sections (see the `large` flag
+   * on buildAllSections' return value) — Raw and Raw/Binned (Tidy) sections,
+   * which are one row per stimulus or per observation and can reach into
+   * the thousands for a big pooled dataset. The preview exists to
+   * sanity-check structure before committing to a download, not to browse
+   * the full dataset row by row, so capping it here is safe — the actual
+   * Excel/CSV export always receives the complete, uncapped data2D.
+   * @type {number}
+   */
+  const PREVIEW_ROW_CAP = 250;
+
+  /**
+   * Maps a bin's N (sample size) to a marker radius between a fixed
+   * min/max, relative to the largest N in the same series — a bigger dot
+   * means that bin's mean is backed by more animals, so two bins with the
+   * same mean but different sample sizes don't read as equally trustworthy
+   * on the chart. Pure display scaling, not a statistic.
+   *
+   * @param {number} n
+   * @param {number} maxN
+   * @returns {number}
+   */
+  function chartPointRadius(n, maxN) {
+    const MIN_R = 2, MAX_R = 5;
+    if (!maxN) return MIN_R;
+    return MIN_R + (MAX_R - MIN_R) * Math.min(1, n / maxN);
+  }
+
+  /**
+   * Builds a small inline SVG line chart ("sparkline-plus": light gridlines
+   * and point markers, not a fully-labelled figure) for one or more
+   * genotype bin-series — the response-habituation or Touch Index curves
+   * from extractBinSeries() (see export.js).
+   *
+   * Hand-rolled rather than via a charting library — at this data size
+   * (≤~10 bins, a handful of genotypes) a library would be disproportionate
+   * for an app that otherwise has zero rendering dependencies.
+   *
+   * @param {Object.<string, {bins:number[], means:(number|null)[], sems:number[], ns:number[]}>} seriesByGenotype
+   * @param {Map<string,string>} colorByGenotype - from assignGenotypeColors(), for palette consistency
+   *   with the assay screen's genotype picker.
+   * @param {Object}  [opts]
+   * @param {number}  [opts.yMin] - Defaults to min(0, data).
+   * @param {number}  [opts.yMax] - Defaults to max(data).
+   * @param {number}  [opts.referenceY] - Draws a dashed horizontal line at this Y value (e.g. Touch Index baseline = 1).
+   * @param {boolean} [opts.mini=false] - true = tiny inline sparkline for a collapsed section's <summary>: no gridlines, no point markers.
+   * @param {number}  [opts.width] - Overrides the default viewBox width for the mini/full size.
+   * @param {number}  [opts.height] - Overrides the default viewBox height for the mini/full size (e.g. a taller mini chart elsewhere).
+   * @returns {string} SVG markup, or "" if there's no data to plot.
+   */
+  function buildSparklineSVG(seriesByGenotype, colorByGenotype, opts = {}) {
+    const genotypes = Object.keys(seriesByGenotype).filter(g => seriesByGenotype[g].means.some(m => m != null));
+    if (genotypes.length === 0) return "";
+
+    const mini   = !!opts.mini;
+    const width  = opts.width  ?? (mini ? 72 : 280);
+    const height = opts.height ?? (mini ? 26 : 150);
+    const padL   = mini ? 1 : 8;
+    const padR   = mini ? 1 : 8;
+    const padT   = mini ? 1 : 8;
+    const padB   = mini ? 1 : 8;
+
+    const allMeans = genotypes.flatMap(g => seriesByGenotype[g].means.filter(m => m != null));
+    const allSems  = genotypes.flatMap(g => seriesByGenotype[g].means.map((m, i) => m == null ? null : seriesByGenotype[g].sems[i])).filter(v => v != null);
+    const dataMin  = Math.min(...allMeans.map((m, i) => m - (allSems[i] || 0)));
+    const dataMax  = Math.max(...allMeans.map((m, i) => m + (allSems[i] || 0)));
+
+    // Response % and Touch Index are both non-negative measures, so the axis
+    // floor defaults to 0 rather than reserving empty negative space nobody
+    // needs — but if a bin's mean-minus-SEM actually does dip below zero
+    // (a real, legitimate part of the error band, not clamped/hidden here),
+    // the axis still extends down far enough to show it truthfully.
+    let yMin = opts.yMin ?? Math.min(0, dataMin);
+    let yMax = opts.yMax ?? Math.max(dataMax, opts.referenceY ?? -Infinity);
+    if (yMin === yMax) { yMin -= 1; yMax += 1; }  // guard perfectly flat data
+
+    const numBins = Math.max(...genotypes.map(g => seriesByGenotype[g].bins.length));
+    const xFor = i => numBins <= 1 ? width / 2 : padL + (i / (numBins - 1)) * (width - padL - padR);
+    const yFor = v => height - padB - ((v - yMin) / (yMax - yMin)) * (height - padT - padB);
+
+    let svg = `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" ` +
+              `class="sparkline${mini ? " sparkline--mini" : ""}" role="img" aria-hidden="true">`;
+
+    if (!mini) {
+      [yMin, (yMin + yMax) / 2, yMax].forEach(v => {
+        const y = yFor(v);
+        svg += `<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" class="sparkline-gridline" />`;
+      });
+    }
+
+    if (opts.referenceY != null) {
+      const y = yFor(opts.referenceY);
+      svg += `<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" class="sparkline-reference" />`;
+    }
+
+    genotypes.forEach(g => {
+      const { means, sems, ns } = seriesByGenotype[g];
+      const color = colorByGenotype.get(g) || "currentColor";
+      const maxN  = Math.max(0, ...ns);
+
+      const pts = means.map((m, i) => m == null ? null : `${xFor(i)},${yFor(m)}`).filter(Boolean);
+      if (pts.length === 0) return;
+
+      if (!mini) {
+        // SEM band: upper edge left->right, then lower edge right->left, closing the shape.
+        const upperPts = means.map((m, i) => m == null ? null : `${xFor(i)},${yFor(m + (sems[i] || 0))}`).filter(Boolean);
+        const lowerPts = means.map((m, i) => m == null ? null : `${xFor(i)},${yFor(m - (sems[i] || 0))}`).filter(Boolean).reverse();
+        if (upperPts.length > 1) {
+          svg += `<polygon points="${[...upperPts, ...lowerPts].join(" ")}" fill="${color}" opacity="0.15" />`;
+        }
+      }
+
+      svg += `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="${mini ? 1.5 : 2}" />`;
+
+      if (!mini) {
+        means.forEach((m, i) => {
+          if (m == null) return;
+          svg += `<circle cx="${xFor(i)}" cy="${yFor(m)}" r="${chartPointRadius(ns[i], maxN)}" fill="${color}" />`;
+        });
+      }
+    });
+
+    svg += `</svg>`;
+    return svg;
+  }
+
+  /**
+   * Builds one titled chart + legend block (an SVG from buildSparklineSVG()
+   * plus a color-keyed genotype legend built via safe DOM methods — never
+   * string-concatenated, since genotype names are user-supplied).
+   *
+   * @param {string} title
+   * @param {Object} series - see buildSparklineSVG's seriesByGenotype param.
+   * @param {Map<string,string>} colorByGenotype
+   * @param {Object} svgOpts - passed through to buildSparklineSVG.
+   * @returns {HTMLElement|null} null if there's no data to plot.
+   */
+  function buildChartBlock(title, series, colorByGenotype, svgOpts) {
+    const svgMarkup = buildSparklineSVG(series, colorByGenotype, svgOpts);
+    if (!svgMarkup) return null;
+
+    const wrap = document.createElement("div");
+    wrap.className = "preview-chart-block";
+
+    const heading = document.createElement("h4");
+    heading.textContent = title;
+    wrap.appendChild(heading);
+    wrap.insertAdjacentHTML("beforeend", svgMarkup);
+
+    const legend = document.createElement("div");
+    legend.className = "sparkline-legend";
+    Object.keys(series).forEach(g => {
+      if (!series[g].means.some(m => m != null)) return;
+      const item = document.createElement("span");
+      item.className = "sparkline-legend-item";
+      const dot = document.createElement("span");
+      dot.className = "sparkline-legend-dot";
+      dot.style.background = colorByGenotype.get(g) || "currentColor";
+      item.appendChild(dot);
+      item.appendChild(document.createTextNode(g));
+      legend.appendChild(item);
+    });
+    wrap.appendChild(legend);
+
+    return wrap;
+  }
+
+  /**
+   * Populates the Data Preview modal from buildAllSections()' output.
+   *
+   * Unlike the old single-innerHTML-dump approach, this builds one
+   * collapsible <details> per section plus a jump-menu, and — critically —
+   * only calls buildHtmlTableFrom2D() (i.e. only builds that section's DOM)
+   * the first time it's actually expanded. A large pooled export at a
+   * realistic scale (3 trials x 20 animals x 100 stimuli) was measured at
+   * ~6,800 rows / ~70,000 DOM cells if rendered all at once; deferring
+   * large sections until opened, and capping them at PREVIEW_ROW_CAP rows
+   * even then, keeps the modal responsive regardless of dataset size.
+   *
+   * Analysed sections additionally get sparkline charts (see buildAllSections'
+   * `charts` field) — a tiny always-visible one in the <summary> bar, and a
+   * full one at the top of the lazily-rendered body.
+   *
+   * @param {Array<{ name: string, data2D: any[][], large?: boolean, charts?: Object }>} sections
+   */
+  function renderPreviewModal(sections) {
+    const nav       = UI.Displays.previewNav;
+    const container = UI.Displays.previewContainer;
+    nav.innerHTML       = "";
+    container.innerHTML = "";
+    // scrollTop is a property of the container element itself, not its
+    // content — replacing innerHTML alone leaves a previous scroll position
+    // (e.g. from an earlier nav-link jump) in place on next open.
+    container.scrollTop = 0;
+    nav.hidden = sections.length === 0;
+
+    // Computed once and reused by every section's charts, so a genotype is
+    // the same color everywhere in this modal — and matches the same
+    // adjacency-guarded palette already used by the assay screen's
+    // genotype picker (assignGenotypeColors), not a separate chart palette.
+    const genotypeColors = assignGenotypeColors(currentAssay?.genotypes || []);
+
+    sections.forEach((section, i) => {
+      const sectionId = `preview-section-${i}`;
+
+      const navLink = document.createElement("button");
+      navLink.type      = "button";
+      navLink.className = "preview-nav-link";
+      navLink.textContent = section.name;
+      navLink.addEventListener("click", () => {
+        const details = document.getElementById(sectionId);
+        if (!details) return;
+        details.open = true;  // expand it if collapsed, so jumping to a Raw section shows something
+        details.scrollIntoView({ block: "start" });
+      });
+      nav.appendChild(navLink);
+
+      const details = document.createElement("details");
+      details.id        = sectionId;
+      details.className = "preview-section-details";
+      details.open      = !section.large;  // Metadata/Analysed/Exclusions start open; Raw/Tidy start collapsed
+
+      // The flex label/sparkline layout lives on an inner wrapper rather than
+      // <summary> itself — <summary>'s native disclosure triangle is a
+      // ::marker tied to its default `display: list-item`, which switching
+      // to `display: flex` directly on <summary> would drop in spec-compliant
+      // browsers.
+      const summary    = document.createElement("summary");
+      const summaryRow = document.createElement("div");
+      summaryRow.className = "summary-row";
+      const summaryLabel = document.createElement("span");
+      summaryLabel.textContent = `${section.name} (${section.data2D.length.toLocaleString()} rows)`;
+      summaryRow.appendChild(summaryLabel);
+
+      if (section.charts) {
+        const miniSparklines = document.createElement("span");
+        miniSparklines.className = "summary-sparklines";
+        miniSparklines.insertAdjacentHTML("beforeend",
+          buildSparklineSVG(section.charts.percentResponse, genotypeColors, { yMin: 0, yMax: 100, mini: true }));
+        miniSparklines.insertAdjacentHTML("beforeend",
+          buildSparklineSVG(section.charts.touchIndex, genotypeColors, { referenceY: 1, mini: true }));
+        if (miniSparklines.childElementCount > 0) summaryRow.appendChild(miniSparklines);
+      }
+
+      summary.appendChild(summaryRow);
+      details.appendChild(summary);
+
+      const body = document.createElement("div");
+      body.className = "preview-section-body";
+      details.appendChild(body);
+
+      const renderBody = () => {
+        if (body.dataset.rendered) return;  // already built — <details> re-toggling shouldn't rebuild
+        body.dataset.rendered = "true";
+
+        if (section.charts) {
+          const chartsRow = document.createElement("div");
+          chartsRow.className = "preview-charts-row";
+          const responseBlock = buildChartBlock(
+            "Response Habituation", section.charts.percentResponse, genotypeColors, { yMin: 0, yMax: 100 }
+          );
+          const tiBlock = buildChartBlock(
+            "Touch Index", section.charts.touchIndex, genotypeColors, { referenceY: 1 }
+          );
+          if (responseBlock) chartsRow.appendChild(responseBlock);
+          if (tiBlock) chartsRow.appendChild(tiBlock);
+          if (chartsRow.childElementCount > 0) body.appendChild(chartsRow);
+        }
+
+        const isCapped = section.large && section.data2D.length > PREVIEW_ROW_CAP;
+        const data2D   = isCapped ? section.data2D.slice(0, PREVIEW_ROW_CAP) : section.data2D;
+        body.insertAdjacentHTML("beforeend", buildHtmlTableFrom2D(null, data2D));
+
+        if (isCapped) {
+          const notice = document.createElement("p");
+          notice.className = "preview-cap-notice";
+          notice.textContent =
+            `Showing ${PREVIEW_ROW_CAP.toLocaleString()} of ${section.data2D.length.toLocaleString()} rows — ` +
+            `the full data is included in the export.`;
+          body.appendChild(notice);
+        }
+      };
+
+      if (details.open) renderBody();
+      details.addEventListener("toggle", () => { if (details.open) renderBody(); });
+
+      container.appendChild(details);
+    });
   }
 
 
@@ -3860,6 +4233,26 @@ document.addEventListener("DOMContentLoaded", async () => {
       hideScreenAndRestore(UI.Screens.savedAssays);
       setState(STATES.POISED);
 
+    } else if (action === "preview") {
+      // Quick preview without leaving the saved-assays list: hydrate the
+      // assay, populate the (offscreen) export dataset list to get sensible
+      // default configs — same defaults the Export screen starts with — then
+      // open the preview modal directly. Since #previewModal is a fixed,
+      // full-viewport overlay, it renders fine on top of this screen and
+      // closing it returns straight to the list, no navigation round-trip.
+      currentAssay = await hydrateAssay(assayId);
+      populateExportDatasetList(currentAssay);
+      const configs = getExportConfigs();
+      if (configs.length === 0) {
+        showToast("No data available to preview.", "info", 3000);
+        return;
+      }
+      await runWithSpinner(btn, "Loading…", () => {
+        const sections = buildAllSections(currentAssay, configs, getExportOptions());
+        renderPreviewModal(sections);
+        UI.Displays.previewModal.hidden = false;
+      });
+
     } else if (action === "export") {
       currentAssay = await hydrateAssay(assayId);
       // render the trial summary card so the export screen shows
@@ -4299,18 +4692,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       showToast("Please select a dataset.", "info", 3000);
       return;
     }
+    const exportOptions = getExportOptions();
 
     // If SheetJS isn't loaded (offline / CDN failure), fall back to CSV silently
     if (typeof XLSX === "undefined") {
       runWithSpinner(UI.Buttons.exportExcel, "Exporting…", () => {
-        const result = performCSVExport(currentAssay, configs);
+        const result = performCSVExport(currentAssay, configs, exportOptions);
         if (!result.success) showToast("Export failed: " + result.error, "error", 6000);
       });
       return;
     }
 
     runWithSpinner(UI.Buttons.exportExcel, "Exporting…", async () => {
-      const result = performExcelExport(currentAssay, configs);
+      const result = performExcelExport(currentAssay, configs, exportOptions);
       if (!result.success) {
         // Non-destructive alternative-format offer — "primary" styling (not "danger")
         // since accepting isn't a destructive action, unlike the modal's other call-sites.
@@ -4320,7 +4714,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           "Export CSV",
           "primary"
         );
-        if (useCSV) performCSVExport(currentAssay, configs);
+        if (useCSV) performCSVExport(currentAssay, configs, exportOptions);
       }
     });
   });
@@ -4335,7 +4729,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         return;
       }
       runWithSpinner(UI.Buttons.exportCSV, "Exporting…", () => {
-        const result = performCSVExport(currentAssay, configs);
+        const result = performCSVExport(currentAssay, configs, getExportOptions());
         if (!result.success) showToast("CSV export failed: " + result.error, "error", 6000);
       });
     });
@@ -4351,8 +4745,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     runWithSpinner(UI.Buttons.previewExcel, "Loading…", () => {
-      UI.Displays.previewContainer.innerHTML = generatePreviewHTML(currentAssay, configs);
-      UI.Displays.previewModal.hidden        = false;
+      const sections = buildAllSections(currentAssay, configs, getExportOptions());
+      renderPreviewModal(sections);
+      UI.Displays.previewModal.hidden = false;
     });
   });
 
