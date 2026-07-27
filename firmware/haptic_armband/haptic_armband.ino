@@ -314,6 +314,15 @@ void vibrateBleReady() {               // double-tap on BLE ready (blocking — 
 
 void vibrateConnected() { vibrateTap(); }
 
+void vibrateSOS() {                    // Morse "SOS": BLE-init failure, critical battery
+  static const int seq[] = {
+    100, 80, 100, 80, 100, 80,
+    300, 80, 300, 80, 300, 80,
+    100, 80, 100, 80, 100, 0
+  };
+  motorStart(seq, 18);
+}
+
 // ── Battery Reading ──────────────────────────────────────────
 // Reads WLY 602040 3.7V LiPo via XIAO on-board 1MΩ/1MΩ divider.
 // AR_INTERNAL2V4 = 2.4V internal reference (Seeed nRF52 BSP).
@@ -363,7 +372,12 @@ void updateLED() {
 
 // ── DRV2605L motor init (LRA) ────────────────────────────────
 #ifdef MOTOR_LRA
-void initMotor() {
+// Configures the DRV2605L's library, feedback mode, resonance tracking, and
+// haptic strength registers for LRA closed-loop drive. Shared by initMotor()
+// (first boot) and recoverMotor() (post I2C-fault reinit) so the two can
+// never drift apart — a value tuned in one used to require remembering to
+// update the other by hand.
+void configureMotorRegisters() {
   drv.selectLibrary(6);                                          // library 6 = LRA
   drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);    // N_ERM_LRA = 1 (LRA)
   drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);   // closed-loop (auto-resonance tracking)
@@ -375,6 +389,10 @@ void initMotor() {
   // If your LRA is rated lower (e.g. 2.0V RMS), drop 0x16 to 0x62 and 0x17 to 0x80.
   drv.writeRegister8(0x16, 0x78);  // RATED_VOLTAGE: 2.5V RMS × 255/5.3 ≈ 120
   drv.writeRegister8(0x17, 0xA4);  // OD_CLAMP:      3.6V peak × 255/5.6 ≈ 164
+}
+
+void initMotor() {
+  configureMotorRegisters();
 
   drv.setMode(DRV2605_MODE_AUTOCAL);
   drv.go();
@@ -395,19 +413,18 @@ void initMotor() {
 // I2C recovery restores full LRA config
 void recoverMotor() {
   if (!drv.begin()) return;
-  drv.selectLibrary(6);
-  drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);
-  drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);
-  drv.writeRegister8(0x22, 0x00);
-  drv.writeRegister8(0x16, 0x78);
-  drv.writeRegister8(0x17, 0xA4);
+  configureMotorRegisters();
   drv.setMode(DRV2605_MODE_INTTRIG);
 }
 #endif
 
 // ── DRV2605L motor init (ERM) ────────────────────────────────
 #ifdef MOTOR_ERM
-void initMotor() {
+// Configures the DRV2605L's library, feedback mode, and haptic strength
+// registers for ERM open-loop drive. Shared by initMotor() (first boot) and
+// recoverMotor() (post I2C-fault reinit) so the two can never drift apart —
+// a value tuned in one used to require remembering to update the other by hand.
+void configureMotorRegisters() {
   drv.selectLibrary(1);                                          // library 1 = ERM
   drv.useERM();                                                  // clears N_ERM_LRA bit
   drv.writeRegister8(0x1D, drv.readRegister8(0x1D) | 0x20);    // ERM open-loop
@@ -417,6 +434,10 @@ void initMotor() {
   // Do NOT exceed 0xFF/0xFF; stay within your motor's rated voltage.
   drv.writeRegister8(0x16, 0xC0);  // RATED_VOLTAGE: ~4.0V × 255/5.3 ≈ 193
   drv.writeRegister8(0x17, 0xD0);  // OD_CLAMP:      ~4.4V × 255/5.6 ≈ 208
+}
+
+void initMotor() {
+  configureMotorRegisters();
   drv.setMode(DRV2605_MODE_INTTRIG);
   Serial.println("DRV2605L: ERM open-loop mode (high-drive).");
 }
@@ -424,11 +445,7 @@ void initMotor() {
 // I2C recovery restores full ERM config
 void recoverMotor() {
   if (!drv.begin()) return;
-  drv.selectLibrary(1);
-  drv.useERM();
-  drv.writeRegister8(0x1D, drv.readRegister8(0x1D) | 0x20);
-  drv.writeRegister8(0x16, 0xC0);
-  drv.writeRegister8(0x17, 0xD0);
+  configureMotorRegisters();
   drv.setMode(DRV2605_MODE_INTTRIG);
 }
 #endif
@@ -485,15 +502,10 @@ void setup() {
     Serial.println("ERROR: BLE init failed!");
     boardState = STATE_BLE_ERROR;
     updateLED();
-    static const int sosPulses[] = {
-      100, 80, 100, 80, 100, 80,
-      300, 80, 300, 80, 300, 80,
-      100, 80, 100, 80, 100, 0
-    };
     unsigned long lastSos = millis() - 10001UL;
     while (1) {
       unsigned long now = millis();
-      if (now - lastSos > 10000UL) { lastSos = now; motorStart(sosPulses, 18); }
+      if (now - lastSos > 10000UL) { lastSos = now; vibrateSOS(); }
       motorUpdate();
       updateLED();
     }
@@ -605,12 +617,7 @@ void loop() {
 
         if (pct <= 10) {
           boardState = STATE_LOW_BATTERY;
-          static const int sosSeq[] = {
-            100, 80, 100, 80, 100, 80,
-            300, 80, 300, 80, 300, 80,
-            100, 80, 100, 80, 100, 0
-          };
-          motorStart(sosSeq, 18);
+          vibrateSOS();
           Serial.println("CRITICAL: Battery <=10%!");
         } else if (pct <= 20) {
           boardState = STATE_LOW_BATTERY;
