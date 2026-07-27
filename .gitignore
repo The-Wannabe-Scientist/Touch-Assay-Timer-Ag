@@ -29,12 +29,13 @@ Desktop.ini
 # ── Claude Code (local, machine-specific settings) ──────────────────────────
 .claude/settings.local.json
 
-# ── Node (if a dev server / build tool is ever added) ────────────────────────
+# ── Node ─────────────────────────────────────────────────────────────────────
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-package-lock.json
+# package-lock.json is tracked (see js/db.js's test devDependency) so
+# `npm test` resolves the exact same fake-indexeddb tree everywhere.
 yarn.lock
 
 # ── Build output ─────────────────────────────────────────────────────────────
