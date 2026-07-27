@@ -1309,6 +1309,24 @@ body.state-warming-up #liveProgress {
   /* Removed margin-bottom; #tapZone gap handles spacing uniformly */
 }
 
+/* Which genotype the in-progress run belongs to — see showLiveGenotypeBadge()
+   in main.js. Reuses the same --genotype-color dot convention as the picker's
+   pills/trigger so the color stays consistent with the rest of the UI. */
+.live-genotype-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-right: 0.9rem;
+  color: var(--text-main);
+}
+.live-genotype-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  min-width: 0.7rem;
+  border-radius: 50%;
+  background: var(--genotype-color, var(--text-muted));
+}
+
 /* The counter values (not the "Stimulus:" label or "/" divider) get the
    monospace data face — the label stays UI text, the numbers read as data. */
 #currentStimDisplay, #totalStimDisplay {
@@ -1923,6 +1941,22 @@ body.state-warming-up #liveProgress {
 body.state-running #visualMetronomeContainer,
 body.state-warming-up #visualMetronomeContainer {
   display: flex;
+}
+
+/* The genotype picker is disabled (and fades to 0.55 opacity, see
+   .genotype-pill:disabled / .genotype-trigger:disabled above) once a run
+   starts, since it can no longer be changed — but that fade also swallowed
+   the color-coded highlight showing which genotype is actually running.
+   Keep the CURRENTLY SELECTED pill (and the trigger, which only ever shows
+   the current selection) at full opacity so its color/border stays a clear
+   "this one" indicator; only the other, inapplicable pills stay dimmed.
+   !important is required here to outrank [data-theme="dark"] button:disabled
+   (see "BROWSER SPECIFIC FIXES" above), which sets opacity 0.55 !important
+   on every disabled button and would otherwise always win regardless of
+   this rule's higher specificity. */
+body.state-running .genotype-pill:disabled[aria-pressed="true"],
+body.state-running .genotype-trigger:disabled {
+  opacity: 1 !important;
 }
 
 body.state-configured #openSavedAssays,

@@ -282,6 +282,14 @@
 
       <div id="tapZone">
         <div id="liveProgress" class="live-progress">
+          <!-- Which genotype this run belongs to — set by showLiveGenotypeBadge()
+               in main.js right before warmup/run starts, so it stays visible
+               (unlike the tap button label, which reverts to just "Tap") for
+               the whole warmup+run duration. Reuses the same --genotype-color
+               dot convention as the picker's pills/trigger. -->
+          <span id="liveGenotypeBadge" class="live-genotype-badge" hidden>
+            <span class="live-genotype-dot" aria-hidden="true"></span><span id="liveGenotypeLabel"></span>
+          </span>
           Stimulus: <span id="currentStimDisplay">0</span> / <span id="totalStimDisplay">100</span>
         </div>
 

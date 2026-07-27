@@ -473,6 +473,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       liveProgress:     document.getElementById("liveProgress"),
       currentStim:      document.getElementById("currentStimDisplay"),
       totalStim:        document.getElementById("totalStimDisplay"),
+      liveGenotypeBadge: document.getElementById("liveGenotypeBadge"),
+      liveGenotypeDot:   document.querySelector("#liveGenotypeBadge .live-genotype-dot"),
+      liveGenotypeLabel: document.getElementById("liveGenotypeLabel"),
       stimulusProgressAnnouncer: document.getElementById("stimulusProgressAnnouncer"),
       testRigBtnLabel:  document.getElementById("testRigBtnLabel"),
       testRigPulse:     document.getElementById("testRigPulse"),
@@ -1427,6 +1430,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.add("fulfilled");
 
     } else if (isStartingNewRun) {
+      // Shown for the whole warmup+run duration — see showLiveGenotypeBadge().
+      showLiveGenotypeBadge(UI.Inputs.genotypeSelect.value);
       // Start the warmup countdown (which then calls startRun)
       await runWarmup();
     }
@@ -1953,6 +1958,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     const map = new Map();
     genotypes.forEach((g, i) => map.set(g, assigned[i]));
     return map;
+  }
+
+  /**
+   * Shows the color-coded genotype badge inside #liveProgress, which is the
+   * only part of the screen that stays visible for the whole warmup+run
+   * duration — the tap button's own label reverts to a plain "Tap" once a
+   * run starts, and the genotype picker itself gets disabled/faded, so
+   * without this badge there's nothing on screen reminding the experimenter
+   * which genotype is currently under the probe.
+   *
+   * @param {string} genotype - The genotype about to be (or currently being) tested.
+   */
+  function showLiveGenotypeBadge(genotype) {
+    if (!genotype || !currentAssay) {
+      UI.Displays.liveGenotypeBadge.hidden = true;
+      return;
+    }
+    const colors = assignGenotypeColors(currentAssay.genotypes);
+    UI.Displays.liveGenotypeDot.style.background = colors.get(genotype) || "";
+    UI.Displays.liveGenotypeLabel.textContent    = genotype;
+    UI.Displays.liveGenotypeBadge.hidden         = false;
   }
 
   /**
