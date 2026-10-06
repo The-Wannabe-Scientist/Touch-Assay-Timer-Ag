@@ -409,6 +409,26 @@ describe("buildMetadata2D", () => {
     assert.equal(asObj["Genotypes"], "WT, mec-4");
     assert.equal(asObj["Inter-stimulus Interval (s)"], 1);
   });
+
+  test("renders blank (null) temperature/humidity as N/A, not \"null °C\"", () => {
+    const rows = buildMetadata2D({
+      assayName: "x", createdAt: Date.now(), genotypes: ["WT"],
+      temperature: null, humidity: null, isi: 1, stimCount: 30, binSize: 10
+    });
+    const asObj = Object.fromEntries(rows.slice(1));
+    assert.equal(asObj["Temperature"], "N/A");
+    assert.equal(asObj["Humidity"], "N/A");
+  });
+
+  test("keeps a genuine 0 °C / 0 % RH reading", () => {
+    const rows = buildMetadata2D({
+      assayName: "x", createdAt: Date.now(), genotypes: ["WT"],
+      temperature: 0, humidity: 0, isi: 1, stimCount: 30, binSize: 10
+    });
+    const asObj = Object.fromEntries(rows.slice(1));
+    assert.equal(asObj["Temperature"], "0 °C");
+    assert.equal(asObj["Humidity"], "0 % RH");
+  });
 });
 
 describe("buildAllSections", () => {
@@ -429,6 +449,24 @@ describe("buildAllSections", () => {
     assert.equal(byName["Trial 1 - Analysed"], false);
     assert.equal(byName["Trial 1 - Raw (Tidy)"], true);
     assert.equal(byName["Trial 1 - Binned (Tidy)"], true);
+  });
+
+  test("keeps every Excel sheet name within the 31-char cap (SheetJS throws past it)", () => {
+    // Two-digit trial index + both pooled variants with tidy on: the longest
+    // names buildAllSections can produce.
+    const wide = {
+      ...assay,
+      trials: [{ ...assay.trials[0], trialId: "t12", trialIndex: 12 }]
+    };
+    const sections = buildAllSections(wide, [
+      { type: "trial",  trialId: "t12" },
+      { type: "pooled", includeAbandoned: false },
+      { type: "pooled", includeAbandoned: true }
+    ], { includeTidy: true });
+    assert.ok(sections.some(s => s.excelSheetName === "Pooled_CompletedTrials_BinTidy"));
+    for (const s of sections) {
+      assert.ok(s.excelSheetName.length <= 31, `${s.excelSheetName} is ${s.excelSheetName.length} chars`);
+    }
   });
 
   test("omits tidy sections entirely when includeTidy is not set", () => {

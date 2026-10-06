@@ -260,8 +260,11 @@ export function buildMetadata2D(assay) {
     ["Date Created",                 formatDateTime(assay.createdAt)],
     ["Last Modified",                assay.lastModifiedAt ? formatDateTime(assay.lastModifiedAt) : "N/A"],
     ["Genotypes",                    Array.isArray(assay.genotypes) ? assay.genotypes.join(", ") : "N/A"],
-    ["Temperature",                  assay.temperature !== undefined ? `${assay.temperature} °C` : "N/A"],
-    ["Humidity",                     assay.humidity    !== undefined ? `${assay.humidity} % RH`  : "N/A"],
+    // != null (not !== undefined): temperature/humidity are optional, and a
+    // blank field is stored as null — which would otherwise render literally
+    // as "null °C" in the exported metadata sheet.
+    ["Temperature",                  assay.temperature != null ? `${assay.temperature} °C` : "N/A"],
+    ["Humidity",                     assay.humidity    != null ? `${assay.humidity} % RH`  : "N/A"],
     ["Inter-stimulus Interval (s)",  assay.isi],
     ["Number of Stimulations",       assay.stimCount],
     ["Bin Size",                     assay.binSize]
@@ -1327,7 +1330,11 @@ export function buildAllSections(assay, exportConfigs, options = {}) {
         });
         sections.push({
           name:           `Trial ${trial.trialIndex} - Binned (Tidy)`,
-          excelSheetName: `Trial_${trial.trialIndex}_BinnedTidy`,
+          // "_BinTidy", not "_BinnedTidy": the pooled counterpart below would
+          // otherwise reach 33 chars, over Excel's hard 31-char sheet-name cap,
+          // and SheetJS throws rather than truncating. Kept consistent here so
+          // the two tidy sheets are named the same way.
+          excelSheetName: `Trial_${trial.trialIndex}_BinTidy`,
           data2D:         buildTrialBinnedTidy2D(trial, assay),
           large:          true
         });
@@ -1377,7 +1384,11 @@ export function buildAllSections(assay, exportConfigs, options = {}) {
         });
         sections.push({
           name:           `Pooled (${suffix}) - Binned (Tidy)`,
-          excelSheetName: `Pooled_${xlSuffix}_BinnedTidy`,
+          // "Pooled_CompletedTrials_BinnedTidy" is 33 chars — over Excel's
+          // 31-char sheet-name cap, which made SheetJS throw and knocked the
+          // whole workbook down to the CSV fallback whenever tidy format was
+          // enabled on the (default-checked) completed-trials pool.
+          excelSheetName: `Pooled_${xlSuffix}_BinTidy`,
           data2D:         buildPooledBinnedTidy2D(assay, poolOpt, runs, cache),
           large:          true
         });

@@ -239,7 +239,14 @@ export async function hydrateAssay(assayId) {
     trial.runs = runs.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   }
 
-  assay.trials = trials;
+  // Sort by trialIndex — the "assayId" index returns records in primary-key
+  // (trialId) order, and trialIds are random UUIDs, so without this the trial
+  // list comes back shuffled: the Export screen's dataset checkboxes and the
+  // resulting workbook's sheet order would read "Trial 2, Trial 3, Trial 1".
+  // startedAt breaks ties for any legacy record missing a trialIndex.
+  assay.trials = trials.sort(
+    (a, b) => (a.trialIndex ?? 0) - (b.trialIndex ?? 0) || (a.startedAt || 0) - (b.startedAt || 0)
+  );
   return assay;
 }
 

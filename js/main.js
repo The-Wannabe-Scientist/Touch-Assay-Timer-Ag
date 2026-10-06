@@ -27,10 +27,12 @@
  * Scheduling pipeline (fires ~125×/sec via timer-worker.js):
  *
  *   Worker "tick" → scheduler() {
- *     Step 0: Gap check — auto-stop if timing gap > 2×ISI (backgrounding detected)
- *     Step 1: Speech/UI layer  — update counter, trigger voice cue at stimulus open
- *     Step 2: Data layer       — record 0/1 at stimulus close, batch-save to IDB
- *     Step 3: Audio layer      — pre-schedule hardware beep slightly in advance
+ *     Step 0:  Gap check — auto-stop if timing gap > 2×ISI (backgrounding detected)
+ *     Step 1:  Speech/UI layer  — update counter, trigger voice cue at stimulus open
+ *     Step 2a: Window boundary  — restart the metronome sweep at stimulus close
+ *     Step 2b: Data layer       — record 0/1 one grace period after stimulus close,
+ *                                 then turn over the "tap registered" indicators
+ *     Step 3:  Audio layer      — pre-schedule hardware beep slightly in advance
  *   }
  */
 
@@ -203,7 +205,33 @@ let runGraceSec = 0;
 /** @type {number} AudioContext time when the next speech/UI update should fire. */
 let nextSpeechTime = 0.0;
 
-/** @type {number} AudioContext time when the next data recording window closes. */
+/**
+ * AudioContext time at which the current stimulus window closes.
+ *
+ * This is the window-boundary clock: it advances exactly on each stimulus
+ * edge and drives the visual metronome bar's sweep. It is deliberately
+ * separate from nextDataIntervalTime, which is held back by the grace period —
+ * the bar must still turn over on the beat even while scoring for that window
+ * is still accepting late taps. The "tap registered" indicators follow the
+ * scoring clock instead; see Step 2b in scheduler().
+ * @type {number}
+ */
+let nextWindowCloseTime = 0.0;
+
+/**
+ * Number of stimulus windows whose close edge has already been processed by
+ * the Step 2a boundary pass. Runs one grace period ahead of
+ * currentStimulusIndex (the scoring counter).
+ * @type {number}
+ */
+let closedWindowIndex = 0;
+
+/**
+ * AudioContext time of the close edge of the next stimulus window awaiting
+ * scoring. Scoring fires at this time PLUS runGraceSec — see Step 2b in
+ * scheduler() for why the delay is load-bearing.
+ * @type {number}
+ */
 let nextDataIntervalTime = 0.0;
 
 /** @type {number} AudioContext time when the next hardware tick should be scheduled. */
@@ -908,6 +936,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Reset all scheduling counters
     currentStimulusIndex    = 0;
+    closedWindowIndex       = 0;
     nextSpeechIndex         = 0;
     nextAudioStimulusIndex  = 0;
     tapTimestamps           = [];
@@ -922,6 +951,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // for browser speech-engine latency (speechLeadMs, default 80 ms).
     nextSpeechTime         = startTime - (speechLeadMs / 1000);
     nextDataIntervalTime   = startTime + runISI;  // First window closes after one ISI
+    nextWindowCloseTime    = startTime + runISI;  // Same edge; diverges once grace > 0
 
     timerWorker.postMessage("start");
     armbandStartHeartbeat();  // keep armband watchdog alive during the run
@@ -953,9 +983,17 @@ document.addEventListener("DOMContentLoaded", async () => {
    *     Fires at the opening of each stimulus window.
    *     Updates the stimulus counter and triggers optional voice cues.
    *
-   *   Step 2: DATA RECORDING
+   *   Step 2a: WINDOW BOUNDARY
    *     Fires at the closing of each stimulus window.
-   *     Checks whether a tap occurred during that interval and records 0 or 1.
+   *     Advances the boundary clock the visual metronome sweep reads, so the
+   *     bar restarts on the beat.
+   *
+   *   Step 2b: DATA RECORDING
+   *     Fires one grace period AFTER each stimulus window closes, so a tap
+   *     arriving inside the grace span has actually happened by the time the
+   *     window is scored. Checks whether a tap occurred and records 0 or 1,
+   *     then turns over the "tap registered" indicators — the window accepting
+   *     taps only really changes here, not on the boundary above.
    *     No IDB write happens here — see the no-mid-run-save note below.
    *     Triggers run completion when all stimuli are recorded.
    *
@@ -1041,8 +1079,36 @@ document.addEventListener("DOMContentLoaded", async () => {
       void speechFired;  // Suppress unused-variable linters
     }
 
-    // ── Step 2: Data recording (fires at stimulus close) ───────────────────
-    while (currentTime >= nextDataIntervalTime && currentStimulusIndex < runStimCount) {
+    // ── Step 2a: Window close (fires exactly at stimulus close) ────────────
+    // Advances the window-boundary clock that the visual metronome sweep reads,
+    // so the bar restarts on the beat rather than being held back by the grace
+    // period the way scoring below is.
+    //
+    // Only the beat-derived glow is cleared here. The "tap registered" state
+    // (see Step 2b) deliberately is NOT: during the grace span the window that
+    // is still accepting taps is the one that just closed, so turning those
+    // indicators over on the boundary would advertise a fresh window a full
+    // grace period before one actually opens.
+    while (currentTime >= nextWindowCloseTime && closedWindowIndex < runStimCount) {
+      if (UI.Displays.metronomeBar) {
+        UI.Displays.metronomeBar.classList.remove("near-full");
+      }
+      nextWindowCloseTime += runISI;
+      closedWindowIndex++;
+    }
+
+    // ── Step 2b: Data recording (fires one grace period after stimulus close) ──
+    // The +runGraceSec delay is what makes the grace period real. Scoring a
+    // window the instant it closes means no tap from inside the grace span has
+    // physically happened yet, so graceEnd is unreachable and the late tap
+    // instead falls through to the NEXT window — corrupting two values at once
+    // (a false "responded" here, a false "did not respond" next). Waiting out
+    // the grace span before reading tapTimestamps is what lets a late tap be
+    // credited to the window it belongs to.
+    while (
+      currentTime >= nextDataIntervalTime + runGraceSec &&
+      currentStimulusIndex < runStimCount
+    ) {
       const intervalStart = nextDataIntervalTime - runISI;
       const intervalEnd   = nextDataIntervalTime;
       // Grace period: extend acceptance window for taps that arrived up to
@@ -1085,12 +1151,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       // or exported — there is no "response latency" to capture here.
       run.values.push(tapOccurred ? 0 : 1);
 
-      // Reset visual "bucket fulfilled" indicators for the next interval
+      // Reset the "tap registered" indicators now that this window has been
+      // scored — NOT on the window boundary in Step 2a. The scan above credits
+      // any tap before graceEnd to this window and consumes it, so between the
+      // boundary and here a tap still counts toward the window just closed and
+      // cannot reach the next one. Clearing the green on the boundary would
+      // therefore invite a second tap that gets silently swallowed, and would
+      // leave a genuinely late tap lighting the button green against the wrong
+      // (still-unscored) window — reading as "already recorded" and suppressing
+      // the tap that window actually needed.
       UI.Buttons.tap.classList.remove("bucket-fulfilled");
-      // Remove ISI waiting dim now that a new interval is starting
+      // Remove the ISI waiting dim now that a new interval is genuinely open.
       UI.Buttons.tap.classList.remove("isi-waiting");
       if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.remove("fulfilled");
-      if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.remove("near-full");
 
       currentStimulusIndex++;
       nextDataIntervalTime += runISI;
@@ -1688,10 +1761,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // Snapshot nextDataIntervalTime once to avoid a race with scheduler(), which can
+    // Track the window-boundary clock, not the scoring clock — nextDataIntervalTime
+    // lags by the grace period, which would pin the bar at 100% for that whole span
+    // after each tick. Snapshot it once to avoid a race with scheduler(), which can
     // increment it between consecutive rAF callbacks and cause the bar to flash to 100%
     // or reset to 0% mid-interval before the next frame corrects it.
-    const intervalEnd   = nextDataIntervalTime;
+    const intervalEnd   = nextWindowCloseTime;
     const currentTime   = getAudioTime();
     const intervalStart = intervalEnd - runISI;  // Use cached ISI
 
@@ -3151,6 +3226,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function resetTimingState() {
     isWarmingUp            = false;
     currentStimulusIndex   = 0;
+    closedWindowIndex      = 0;
     // Also reset the two speech/audio index counters so a fresh session after
     // resetToSetup() cannot inherit stale values from a previous run.
     nextSpeechIndex        = 0;
@@ -3161,6 +3237,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     nextAudioScheduleTime  = 0.0;
     nextSpeechTime         = 0.0;
     nextDataIntervalTime   = 0.0;
+    nextWindowCloseTime    = 0.0;
   }
 
   /**
@@ -3200,12 +3277,32 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Inputs.assayName.value     = generateAutoID();
     UI.Displays.binWarning.hidden = true;
 
-    // form.reset() clears the hidden #genotypes input value but does NOT
-    // clear the chip DOM elements — chips from the previous assay would remain
-    // visually, while the hidden input is empty, causing a confusing validation
-    // error on next submit. Clear the chip list explicitly.
-    const chipList = document.getElementById("chipList");
-    if (chipList) chipList.innerHTML = "";
+    // form.reset() does NOT reset a type="hidden" input, so the previous
+    // assay's genotype list survives in #genotypes even though the chips are
+    // gone from view — submitting again would silently create a new assay
+    // carrying the old genotypes. Nor does reset() clear the `disabled` flag
+    // the 20-genotype cap sets on the text input, which locked genotype entry
+    // out for the rest of the session.
+    //
+    // Route through the ChipInput API rather than clearing #chipList by hand:
+    // clearChips() also re-syncs the hidden input and re-runs the max-genotype
+    // hint (which is what re-enables the text input).
+    if (window.ChipInput) {
+      window.ChipInput.clearChips();
+    } else {
+      // ChipInput lives in an index.html module that may not have evaluated
+      // yet — clear both halves manually so neither stale value can leak.
+      const chipList = document.getElementById("chipList");
+      if (chipList) chipList.innerHTML = "";
+      UI.Inputs.genotypes.value = "";
+    }
+
+    // form.reset() restored index.html's compile-time values, not the user's
+    // configured Assay Defaults — reapply them, then refresh the two warnings
+    // that are derived from these fields.
+    applyAssayDefaultsToForm();
+    updateBinWarning();
+    updateGraceIsiWarning();
 
     // Clear progress table from the previous assay
     const progressContainer = document.getElementById("assayProgress");
@@ -3326,6 +3423,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   /**
+   * Writes the user's saved Assay Defaults into the setup form's numeric fields.
+   *
+   * Shared by restoreSetupDraft() (page load) and resetToSetup() ("New Assay"),
+   * because form.reset() only restores the HTML compile-time defaults baked
+   * into index.html — which have nothing to do with whatever the user
+   * configured on the Assay Defaults sub-page. Without this, starting a new
+   * assay silently discarded those defaults until the next page load.
+   */
+  function applyAssayDefaultsToForm() {
+    const defaults = _loadAssayDefaults();
+    UI.Inputs.isi.value         = defaults.isi;
+    UI.Inputs.stimCount.value   = defaults.stimCount;
+    UI.Inputs.binSize.value     = defaults.binSize;
+    UI.Inputs.temperature.value = defaults.temperature;
+    UI.Inputs.humidity.value    = defaults.humidity;
+  }
+
+  /**
    * Restores a saved setup draft into the form fields and genotype chips.
    * Only runs if there is a non-empty draft in localStorage.
    */
@@ -3334,12 +3449,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // even when there is no saved draft. User-entered drafts below will
     // overwrite these if a draft exists, so defaults are only visible on
     // a truly fresh setup screen.
-    const defaults = _loadAssayDefaults();
-    UI.Inputs.isi.value         = defaults.isi;
-    UI.Inputs.stimCount.value   = defaults.stimCount;
-    UI.Inputs.binSize.value     = defaults.binSize;
-    UI.Inputs.temperature.value = defaults.temperature;
-    UI.Inputs.humidity.value    = defaults.humidity;
+    applyAssayDefaultsToForm();
 
     let draft;
     try {
@@ -3352,9 +3462,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (draft.isi)                                 UI.Inputs.isi.value          = draft.isi;
     if (draft.stimCount)                           UI.Inputs.stimCount.value    = draft.stimCount;
     if (draft.binSize)                             UI.Inputs.binSize.value      = draft.binSize;
-    // Use != null (not truthiness) so that valid values of 0 (e.g. 0 °C, 0% RH) are restored.
-    if (draft.temperature != null && draft.temperature !== "") UI.Inputs.temperature.value  = draft.temperature;
-    if (draft.humidity    != null && draft.humidity    !== "") UI.Inputs.humidity.value     = draft.humidity;
+    // Temperature and humidity are optional, so a blank string is a value the
+    // user chose ("not recorded" → exported as N/A), not an absent field. Both
+    // the truthiness test and an extra `!== ""` guard would drop it and leave
+    // the assay default applied above in place — silently substituting a
+    // fabricated ambient reading into the recorded metadata after a reload.
+    // != null restores "" verbatim while still falling through to the default
+    // for a key an older draft never wrote (undefined) — and, as before, keeps
+    // genuine zeroes (0 °C, 0 % RH) from being treated as blank.
+    if (draft.temperature != null) UI.Inputs.temperature.value  = draft.temperature;
+    if (draft.humidity    != null) UI.Inputs.humidity.value     = draft.humidity;
 
     // Restore genotype chips through the shared chip-input infrastructure
     // (window.ChipInput, exposed by index.html) so restored chips get the same
@@ -4673,8 +4790,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     /**
-     * Wires a stepper button pair (+/−) for an assay default input.
-     * On click: applies delta, clamps to input min/max, updates field, persists.
+     * Wires persistence for an assay default input.
+     *
+     * Deliberately does NOT bind the +/− buttons: index.html already binds a
+     * single delegated handler to every `.stepper-btn` on the page, and that
+     * handler clamps, writes the field, and dispatches `change`. Binding a
+     * second click handler here made each button apply its delta twice (20 →
+     * 22 °C, 100 → 102 stimuli, 1.0 → 1.2 s ISI), and it was the doubled value
+     * that got persisted. Listening for the `change` that handler dispatches
+     * keeps one source of truth for the arithmetic and one for the storage.
+     *
      * @param {HTMLInputElement} input - The number input.
      * @param {string}           storageField - Key suffix for localStorage.
      */
@@ -4712,33 +4837,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         _saveAssayDefault(storageField, val);
       }
 
-      // Persist on direct keyboard/spinner changes
+      // Persist on every committed change — typed/spinner edits, and the
+      // `change` the shared index.html stepper handler dispatches after a
+      // +/− click. _applyAndSave re-clamps to min/max/step, so the value that
+      // reaches localStorage is correct regardless of which path produced it.
       input.addEventListener("change", () => _applyAndSave(input.value));
-
-      // Wire stepper buttons via event delegation on the wrapper
-      const wrapper = input.closest(".stepper-wrapper");
-      if (!wrapper) return;
-      wrapper.querySelectorAll(".stepper-btn").forEach(btn => {
-        btn.addEventListener("click", () => {
-          const delta    = parseFloat(btn.dataset.delta) || 0;
-          const step     = parseFloat(input.step) || 1;
-          const decimals = (step.toString().split(".")[1] || "").length;
-          const current  = isNaN(parseFloat(input.value)) ? lastValid : parseFloat(input.value);
-          const raw      = parseFloat((current + delta).toFixed(decimals));
-          // Pre-clamp to [min, max] BEFORE setting input.value so that any
-          // synchronous "change" listener reading input.value sees the final
-          // committed value, not a transient out-of-range intermediate.
-          // _applyAndSave (triggered by the change event below) will also clamp
-          // and call toFixed, so this is a belt-and-suspenders guard.
-          const min     = input.min !== "" ? parseFloat(input.min) : -Infinity;
-          const max     = input.max !== "" ? parseFloat(input.max) :  Infinity;
-          const clamped = parseFloat(Math.max(min, Math.min(max, raw)).toFixed(decimals));
-          // Dispatch a change event so external listeners receive the
-          // update through standard DOM event bubbling.
-          input.value = clamped;
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        });
-      });
     }
 
     _wireDefaultStepper(UI.Settings.defaultISI,         "ISI");

@@ -136,6 +136,22 @@ describe("hydrateAssay", () => {
     );
   });
 
+  test("returns trials sorted by trialIndex, not primary-key (trialId) order", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+
+    // trialIds chosen so primary-key order ("a" < "b" < "c") is the reverse
+    // of trialIndex order — the "assayId" index yields records in key order.
+    const prefix = uid("t");
+    const trial3 = makeTrial({ trialId: `${prefix}_a`, trialIndex: 3 });
+    const trial2 = makeTrial({ trialId: `${prefix}_b`, trialIndex: 2 });
+    const trial1 = makeTrial({ trialId: `${prefix}_c`, trialIndex: 1 });
+    for (const t of [trial3, trial2, trial1]) await saveTrial(assay.assayId, t);
+
+    const hydrated = await hydrateAssay(assay.assayId);
+    assert.deepEqual(hydrated.trials.map(t => t.trialIndex), [1, 2, 3]);
+  });
+
   test("throws when the assay does not exist", async () => {
     await assert.rejects(() => hydrateAssay("does-not-exist"), /not found/i);
   });

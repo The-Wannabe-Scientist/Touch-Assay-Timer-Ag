@@ -164,7 +164,7 @@
               <label for="temperature">Temperature (°C)</label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="temperature" data-delta="-1" aria-label="Decrease temperature">−</button>
-                <input type="number" id="temperature" min="-10" max="60" value="20" required inputmode="decimal">
+                <input type="number" id="temperature" min="-10" max="60" value="20" inputmode="decimal">
                 <button type="button" class="stepper-btn" data-target="temperature" data-delta="1" aria-label="Increase temperature">+</button>
               </div>
             </div>
@@ -173,7 +173,7 @@
               <label for="humidity">Humidity (% RH)</label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="humidity" data-delta="-1" aria-label="Decrease humidity">−</button>
-                <input type="number" id="humidity" min="0" max="100" value="60" required inputmode="decimal">
+                <input type="number" id="humidity" min="0" max="100" value="60" inputmode="decimal">
                 <button type="button" class="stepper-btn" data-target="humidity" data-delta="1" aria-label="Increase humidity">+</button>
               </div>
             </div>
@@ -1072,8 +1072,22 @@
       return Array.from(chipList.querySelectorAll('.chip')).map(c => c.dataset.value);
     }
 
+    /**
+     * Mirrors the current chip list into the hidden #genotypes input and
+     * notifies listeners.
+     *
+     * The `change` dispatch lives here rather than at each call site because
+     * assigning `.value` programmatically fires no event, and main.js's
+     * draft auto-save listens for `change` on this input alone. Every mutation
+     * path used to dispatch it by hand — except addChip(), so adding a
+     * genotype (by typing, pasting, or blurring) never wrote the draft while
+     * removing one did, and a genotype list edited last was silently lost on
+     * reload. Dispatching from the one place that writes the value makes that
+     * class of omission impossible.
+     */
     function syncHidden() {
       hiddenInput.value = getValues().join(',');
+      hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     /** Clears a lingering duplicate tooltip from the wrapper. */
@@ -1194,8 +1208,7 @@
       });
       chip.addEventListener('dragend', function() {
         chip.classList.remove('dragging');
-        syncHidden();
-        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+        syncHidden();  // also dispatches `change` — see syncHidden().
       });
 
       const label = document.createElement('span');
@@ -1209,13 +1222,11 @@
       removeBtn.textContent = '✕';
       removeBtn.addEventListener('click', function () {
         chip.remove();
+        // syncHidden() dispatches `change`, which is what persists the updated
+        // genotype list to the localStorage draft — without it the removed chip
+        // would reappear on the next page load.
         syncHidden();
         updateGenotypeMaxHint();
-        // Notify main.js's scheduleDraftSave listener so the updated genotype list
-        // is persisted to localStorage. Without this dispatch, removing a chip here
-        // only updates the hidden input value in memory — the draft is never written,
-        // so the removed chip reappears on the next page load.
-        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
       });
 
       chip.appendChild(label);
@@ -1235,8 +1246,8 @@
         var chips = chipList.querySelectorAll('.chip');
         if (chips.length) {
           chips[chips.length - 1].remove();
-          syncHidden();
-          hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+          syncHidden();  // also dispatches `change` — see syncHidden().
+          updateGenotypeMaxHint();
         }
       }
     });

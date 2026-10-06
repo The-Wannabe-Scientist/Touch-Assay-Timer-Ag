@@ -92,8 +92,8 @@ Fill in the **Assay Setup** form before beginning:
 |---|---|
 | **Experiment ID** | A name for this assay (saved with your data) |
 | **Genotypes** | Type a genotype label and press **Enter** or **,** to add it as a chip. Add as many as needed. |
-| **Temperature (°C)** | Ambient temperature; logged with the assay |
-| **Humidity (% RH)** | Relative humidity; logged with the assay |
+| **Temperature (°C)** | Ambient temperature; logged with the assay. Optional — leave blank to record "N/A" |
+| **Humidity (% RH)** | Relative humidity; logged with the assay. Optional — leave blank to record "N/A" |
 | **Inter-stimulus Interval (s)** | Time between stimuli (e.g. `1.0` for 1-second ISI) |
 | **Total Number of Stimulations** | How many stimuli to deliver per animal (e.g. `100`) |
 | **Bin Size** | Number of stimuli grouped into each analysis bin (e.g. `10`) |
