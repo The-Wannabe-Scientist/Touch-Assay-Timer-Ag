@@ -224,10 +224,31 @@ export function getAudioTime() {
   return lastMonotonicTime;
 }
 
+/**
+ * Returns how long after its scheduled AudioContext time a sound is actually
+ * heard: the context's own processing latency plus the output device's.
+ * A few ms on wired outputs; 100 ms and up over Bluetooth.
+ *
+ * `outputLatency` is not implemented everywhere (Safari), and either property
+ * can be missing or non-finite, so each falls back to 0.
+ *
+ * @returns {number} Estimated output latency in seconds (>= 0).
+ */
+export function getOutputLatencySec() {
+  const ctx    = getAudioContext();
+  const base   = Number(ctx.baseLatency);
+  const output = Number(ctx.outputLatency);
+  return (Number.isFinite(base)   && base   > 0 ? base   : 0)
+       + (Number.isFinite(output) && output > 0 ? output : 0);
+}
+
 // When the app returns to the foreground after backgrounding, the
 // AudioContext may have been suspended. Resume it automatically.
+// Anything other than "running" counts: WebKit reports "interrupted" (not
+// "suspended") after a call or Siri takes the audio session.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && audioCtx && audioCtx.state === "suspended") {
+  if (document.visibilityState === "visible" && audioCtx &&
+      audioCtx.state !== "running" && audioCtx.state !== "closed") {
     audioCtx.resume().catch(err =>
       console.warn("Could not resume audio context on visibility restore.", err)
     );

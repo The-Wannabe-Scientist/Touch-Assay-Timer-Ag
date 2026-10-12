@@ -481,6 +481,10 @@ export async function saveRun(_assayId, trialId, run) {
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
     tx.onerror    = () => reject(tx.error);
+    // A failure at commit time (e.g. QuotaExceededError) fires only `abort`,
+    // never `error`. Without this the promise would never settle and callers
+    // awaiting the save would hang.
+    tx.onabort    = () => reject(tx.error ?? new Error("saveRun: transaction aborted"));
   });
 }
 

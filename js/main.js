@@ -51,7 +51,7 @@ import {
 import {
   isAudioReady, setVoiceMode, getVoiceMode, loadVoices, speak, stopSpeech,
   warmUpAudio, playWarmupTone, scheduleWebAudioTick,
-  triggerImmediateSpeech, getAudioTime, playCompletionTone,
+  triggerImmediateSpeech, getAudioTime, getOutputLatencySec, playCompletionTone,
   setTickPitch, getTickPitch, primeSpeechEngine, setBinSpeak,
   playTick
 }                                                      from "./audio.js";
@@ -255,6 +255,51 @@ const SCHEDULE_AHEAD_TIME = 0.20;
 let lastSchedulerTime = 0;
 
 /**
+ * Wall-clock (Date.now()) and monotonic (performance.now()) readings taken at
+ * the last scheduler() invocation, in ms. The AudioContext clock stops while
+ * the context is suspended (sleep, screen lock, backgrounding), so a gap
+ * measured on that clock alone reads as zero across exactly the interruptions
+ * the gap guard exists to catch. Date.now() is tracked alongside
+ * performance.now() because the latter can itself stop during system sleep.
+ * @type {number}
+ */
+let lastSchedulerWallMs = 0;
+let lastSchedulerPerfMs = 0;
+
+/**
+ * performance.now() of the last scheduler() tick on which the AudioContext
+ * clock was seen to advance. Detects the context stalling while JS keeps
+ * running (e.g. a call or Siri interruption with the page still visible).
+ * @type {number}
+ */
+let lastAudioAdvancePerfMs = 0;
+
+/**
+ * How late (seconds) a hardware tick may be handed to the audio graph before
+ * the cue counts as missed. playTick() gives each tick a 50 ms envelope
+ * anchored to its scheduled time, so anything much later than this is
+ * truncated or silent rather than merely delayed.
+ * @type {number}
+ */
+const LATE_CUE_TOLERANCE_SEC = 0.02;
+
+/**
+ * Audio output latency for the current run in seconds: how long after its
+ * scheduled AudioContext time a tick is actually heard. Captured at run start
+ * and used to shift the scoring and metronome-bar windows onto the audible
+ * beat. Clamped to half the ISI. 0 when the browser doesn't report it.
+ * @type {number}
+ */
+let runOutputLatencySec = 0;
+
+/**
+ * The output-latency shift (ms) last announced in a toast, so the notice
+ * appears when the value first matters or changes — not on every run.
+ * @type {number}
+ */
+let lastAnnouncedLatencyMs = 0;
+
+/**
  * How many milliseconds before the stimulus opens to fire the TTS command,
  * to compensate for browser speech-engine cold-path latency (typically 50–120 ms).
  * Loaded from localStorage so users can tune it per-device in Settings.
@@ -276,8 +321,13 @@ try {
 /** @type {number|null} requestAnimationFrame handle for the visual metronome bar. */
 let visualAnimationFrame = null;
 
-/** @type {number|null} Timestamp (Date.now()) of the last processed tap. */
-let lastTapTime = 0;
+/**
+ * performance.now() of the last processed tap. Monotonic on purpose: a
+ * wall-clock (Date.now()) debounce drops every tap after a backward system
+ * clock step until the clock catches up.
+ * @type {number}
+ */
+let lastTapTime = -Infinity;
 
 /**
  * Minimum milliseconds between accepted taps (hardware debounce).
@@ -350,6 +400,33 @@ let lastEscapeTime = 0;
  * @type {boolean}
  */
 let isWarmingUp = false;
+
+/**
+ * Incremented by every runWarmup() call. Each countdown loop remembers the
+ * value it started with and exits silently once it no longer matches, so a
+ * loop cancelled with Escape cannot wake from its 1 s sleep, find isWarmingUp
+ * true again because a newer warmup has begun, and start the run on its own
+ * stale schedule.
+ * @type {number}
+ */
+let warmupToken = 0;
+
+/**
+ * True from the moment a Finish Trial confirmation is accepted until the
+ * trial has been written and the Export screen is showing. Blocks taps for
+ * that span so a run cannot be started on a trial that is being closed.
+ * @type {boolean}
+ */
+let isFinishingTrial = false;
+
+/**
+ * Completed runs whose final IDB save failed. They exist only in memory, and
+ * finishing the trial re-reads it from IDB, so they would be dropped from the
+ * export. flushUnsavedRuns() retries them before the next run starts and
+ * before a trial is finished.
+ * @type {Array<{assayId: string, trialId: string, run: Object}>}
+ */
+const unsavedRuns = [];
 
 /**
  * The Web Worker instance that drives the scheduling heartbeat.
@@ -697,6 +774,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   function setState(nextState) {
     currentState           = nextState;
     document.body.className = `state-${currentState}`;
+    // The assignment above also dropped the state-overlay modifier. Put it
+    // back if an overlay screen is still open (e.g. Settings opened mid-run,
+    // then the run completes), or that screen renders stacked under the
+    // assay screen instead of covering it.
+    const overlayOpen = !UI.Screens.settings.hidden      || !UI.Screens.guidelines.hidden
+                     || !UI.Screens.savedAssays.hidden   || !UI.Screens.assayDefaults.hidden;
+    document.body.classList.toggle("state-overlay", overlayOpen);
 
     switch (currentState) {
       case STATES.SETUP:
@@ -759,6 +843,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Every branch above may have just changed #genotypeSelect.disabled;
     // keep the custom picker's pills/trigger in sync without a full rebuild.
     syncGenotypePickerEnabled();
+
+    // The scheduler only turns the "tap registered" indicators over when it
+    // scores a window, which never happens again once a run is stopped.
+    if (currentState !== STATES.RUNNING) clearTapRegisteredIndicators();
+  }
+
+  /**
+   * Returns the tap button and metronome bar to their neutral, "no tap
+   * registered" look. Called whenever no run is being scored, so a green left
+   * over from a stopped run can't make the next animal's first window look
+   * already tapped.
+   */
+  function clearTapRegisteredIndicators() {
+    UI.Buttons.tap.classList.remove("bucket-fulfilled", "isi-waiting");
+    if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.remove("fulfilled", "near-full");
   }
 
 
@@ -776,6 +875,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.overflowMenu.hidden = true;
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");  // M9: reset aria-expanded
     document.body.classList.add("state-overlay");
+
+    // Switching from Settings to another overlay hides the Test Rig's Stop
+    // button, so don't leave its loop ticking/vibrating behind it.
+    if (screenElement !== UI.Screens.settings) stopTestRig();
 
     // Collapse all overlay screens first to avoid stacking
     UI.Screens.settings.hidden      = true;
@@ -812,7 +915,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     wantsWakeLock = true;
     try {
       if ("wakeLock" in navigator) {
-        wakeLock = await navigator.wakeLock.request("screen");
+        // Hold the new sentinel locally until it is known to still be wanted.
+        // releaseWakeLock() can run while this request is pending (e.g. a gap
+        // auto-stop right after returning from background); assigning straight
+        // to `wakeLock` would then store a lock nothing ever releases.
+        const lock = await navigator.wakeLock.request("screen");
+        if (!wantsWakeLock) {
+          lock.release().catch(() => {});
+          return;
+        }
+        if (wakeLock && wakeLock !== lock) wakeLock.release().catch(() => {});
+        wakeLock = lock;
+        // The browser releases the lock itself when the page is hidden.
+        lock.addEventListener("release", () => { if (wakeLock === lock) wakeLock = null; });
       }
     } catch (err) {
       console.warn("Wake Lock request failed:", err);
@@ -854,6 +969,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     // underneath an actual assay run.
     stopTestRig();
 
+    // Best effort: an earlier run whose final save failed gets another chance
+    // now that storage may have recovered. Nothing to do in the normal case.
+    if (unsavedRuns.length > 0) {
+      await flushUnsavedRuns();
+      if (!currentAssay) return;
+    }
+
     const activeTrial = getActiveTrial(currentAssay);
     if (!activeTrial) return;
 
@@ -879,7 +1001,24 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     activeTrial.runs.push(run);
-    await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+    try {
+      await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+    } catch (err) {
+      // Don't leave an orphan "active" run in memory: every later run in the
+      // trial would otherwise be recorded into it (wrong genotype and animal
+      // index). The caller surfaces the failure to the user.
+      const orphanIndex = activeTrial.runs.indexOf(run);
+      if (orphanIndex !== -1) activeTrial.runs.splice(orphanIndex, 1);
+      throw err;
+    }
+
+    // An overlay screen can still be open here if the run was armed with the
+    // Space shortcut or the screen was opened during the warmup. Close it so
+    // the tap button is on screen for the run that is about to be scored.
+    UI.Screens.settings.hidden      = true;
+    UI.Screens.guidelines.hidden    = true;
+    UI.Screens.savedAssays.hidden   = true;
+    UI.Screens.assayDefaults.hidden = true;
 
     // Transition UI
     setState(STATES.RUNNING);
@@ -888,7 +1027,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.currentStim.textContent = "1";
 
     requestWakeLock();
-    startCueLoop();
+    startCueLoop(run);
   }
 
   /**
@@ -901,11 +1040,16 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Also captures the active run reference and stable assay parameters into
    * module-level cache variables so scheduler() never dereferences currentAssay
    * or scans the runs array during its hot path.
+   *
+   * @param {Object} [run] - The run startRun() just created. Passed in rather
+   *   than looked up by status, so a stale "active" run can never be picked up.
    */
-  function startCueLoop() {
+  function startCueLoop(run) {
     // Capture the active run reference once — scheduler() will use this directly
-    const activeTrial = getActiveTrial(currentAssay);
-    activeRun         = activeTrial?.runs.find(r => r.status === "active") ?? null;
+    activeRun = run ?? getActiveTrial(currentAssay)?.runs.find(r => r.status === "active") ?? null;
+
+    // A new run always opens window 1 in the neutral state.
+    clearTapRegisteredIndicators();
 
     // Cache stable run parameters to avoid repeated property lookups in scheduler()
     runISI        = currentAssay.isi;
@@ -942,16 +1086,40 @@ document.addEventListener("DOMContentLoaded", async () => {
     tapTimestamps           = [];
     tapReadIndex            = 0;
     lastSchedulerTime       = 0;
+    lastSchedulerWallMs     = 0;
+    lastSchedulerPerfMs     = 0;
+    lastAudioAdvancePerfMs  = performance.now();
 
     const t0 = getAudioTime();
     const startTime = t0 + 0.5;  // 500ms warm-up delay
+
+    // A tick scheduled for AudioContext time T is heard at T + output latency
+    // (a few ms on wired outputs, 100 ms and up over Bluetooth). The
+    // experimenter reacts to the tick they hear, so the scoring and bar
+    // windows are shifted onto the audible beat; only the audio schedule
+    // itself stays on the render clock. Capped at half the ISI so a bogus
+    // reading can't push a window past the next stimulus.
+    runOutputLatencySec = Math.min(getOutputLatencySec(), runISI / 2);
+
+    // Say so when the shift is big enough to matter. The figure is the
+    // browser's own estimate, so this is also the experimenter's chance to
+    // notice one that doesn't match what they hear.
+    const latencyMs = Math.round(runOutputLatencySec * 1000);
+    if (latencyMs >= 100 && Math.abs(latencyMs - lastAnnouncedLatencyMs) >= 20) {
+      lastAnnouncedLatencyMs = latencyMs;
+      showToast(
+        `Audio output lags by about ${latencyMs} ms (typical of Bluetooth). Scoring windows are shifted to match.`,
+        "info",
+        6000
+      );
+    }
 
     nextAudioScheduleTime  = startTime;
     // Fire the TTS command slightly before the stimulus opens to compensate
     // for browser speech-engine latency (speechLeadMs, default 80 ms).
     nextSpeechTime         = startTime - (speechLeadMs / 1000);
-    nextDataIntervalTime   = startTime + runISI;  // First window closes after one ISI
-    nextWindowCloseTime    = startTime + runISI;  // Same edge; diverges once grace > 0
+    nextDataIntervalTime   = startTime + runISI + runOutputLatencySec;  // First window closes one ISI after the first audible tick
+    nextWindowCloseTime    = startTime + runISI + runOutputLatencySec;  // Same edge; diverges once grace > 0
 
     timerWorker.postMessage("start");
     armbandStartHeartbeat();  // keep armband watchdog alive during the run
@@ -1018,20 +1186,39 @@ document.addEventListener("DOMContentLoaded", async () => {
     // first tick (lastSchedulerTime === 0) the guard is intentionally skipped.
     // On a recovered return from background, the first tick post-resume will
     // correctly fire the gap guard and abort the run before any data is lost.
+    //
+    // Three gaps are measured, because no single clock sees every interruption:
+    //   - audio:   AudioContext time since the last tick. Catches JS being
+    //              throttled while audio keeps rendering (background tab).
+    //   - wall:    real time since the last tick. Catches the context being
+    //              suspended together with JS (sleep, screen lock), where the
+    //              AudioContext clock stops and the audio gap reads ~0.
+    //   - stalled: real time since the AudioContext clock last advanced.
+    //              Catches the context stalling while JS keeps ticking (a call
+    //              or Siri interruption with the page still visible).
+    const wallNowMs = Date.now();
+    const perfNowMs = performance.now();
+    if (currentTime > lastSchedulerTime) lastAudioAdvancePerfMs = perfNowMs;
     if (lastSchedulerTime > 0) {
-      const gap           = currentTime - lastSchedulerTime;
+      const audioGap      = currentTime - lastSchedulerTime;
+      const wallGap       = Math.max(wallNowMs - lastSchedulerWallMs, perfNowMs - lastSchedulerPerfMs) / 1000;
+      const stalledFor    = (perfNowMs - lastAudioAdvancePerfMs) / 1000;
+      const gap           = Math.max(audioGap, wallGap, stalledFor);
       const maxAllowedGap = Math.max(runISI * 2, 1.0);
 
       if (gap > maxAllowedGap) {
         console.error(
-          `Timing gap: ${gap.toFixed(3)}s exceeds max ${maxAllowedGap.toFixed(3)}s — ` +
+          `Timing gap: ${gap.toFixed(3)}s exceeds max ${maxAllowedGap.toFixed(3)}s ` +
+          `(audio ${audioGap.toFixed(3)}s, wall ${wallGap.toFixed(3)}s, audio clock stalled ${stalledFor.toFixed(3)}s) — ` +
           `auto-stopping run (device was backgrounded or throttled)`
         );
         stopRunEarly("Timing interrupted — device was backgrounded or throttled");
         return;
       }
     }
-    lastSchedulerTime = currentTime;
+    lastSchedulerTime   = currentTime;
+    lastSchedulerWallMs = wallNowMs;
+    lastSchedulerPerfMs = perfNowMs;
 
     // ── Step 1: Speech & UI sync (fires at stimulus open) ──────────────────
     // Optimisation: when the scheduler misses several ticks (e.g. a brief JS
@@ -1185,7 +1372,14 @@ document.addEventListener("DOMContentLoaded", async () => {
         // so completeRunNormally() receives it directly without a fragile .find() re-scan.
         const completedRun = run;
         stopCueLoop();
-        completeRunNormally(completedRun);
+        // Safety net: whatever goes wrong while finalising, never leave the
+        // app in RUNNING with the cue loop already stopped.
+        completeRunNormally(completedRun).catch(err => {
+          console.error("completeRunNormally failed:", err);
+          releaseWakeLock();
+          if (currentState === STATES.RUNNING) setState(STATES.POISED);
+          showToast("Run finished, but finalising it failed. Export your data before reloading.", "error", 10000);
+        });
         return;  // Exit scheduler immediately — run is over
       }
     }
@@ -1195,6 +1389,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       nextAudioScheduleTime < currentTime + SCHEDULE_AHEAD_TIME &&
       nextAudioStimulusIndex < runStimCount
     ) {
+      // A main-thread stall longer than the look-ahead, but shorter than the
+      // Step 0 limit, gets here with the cue's time already in the past. The
+      // tick would be truncated or silent, so the experimenter never gets the
+      // signal to deliver this stimulus while its window is still scored.
+      // That is not a run that can be trusted, so end it as interrupted.
+      if (currentTime - nextAudioScheduleTime > LATE_CUE_TOLERANCE_SEC) {
+        console.error(
+          `Stimulus ${nextAudioStimulusIndex + 1} cue is ` +
+          `${((currentTime - nextAudioScheduleTime) * 1000).toFixed(0)} ms late — auto-stopping run`
+        );
+        stopRunEarly(`Timing interrupted — stimulus ${nextAudioStimulusIndex + 1} cue could not be played on time`);
+        return;
+      }
       scheduleWebAudioTick(nextAudioStimulusIndex + 1, runISI, nextAudioScheduleTime);
       nextAudioScheduleTime += runISI;
       nextAudioStimulusIndex++;
@@ -1289,8 +1496,20 @@ document.addEventListener("DOMContentLoaded", async () => {
         `Last ${remainder} value(s) dropped — not enough to fill a complete bin of size ${currentAssay.binSize}`;
     }
 
-    // Final save: ensures all values are in IDB regardless of batch timing
-    await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+    // Final save: ensures all values are in IDB regardless of batch timing.
+    // A failure here must not escape: everything below — including the
+    // transition back to POISED — would be skipped, stranding the app in
+    // RUNNING with no run for Stop to act on. Try twice, then carry on and
+    // tell the user the run only exists in memory.
+    let saved = false;
+    for (let attempt = 1; attempt <= 2 && !saved; attempt++) {
+      try {
+        await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+        saved = true;
+      } catch (err) {
+        console.error(`Final run save failed (attempt ${attempt}):`, err);
+      }
+    }
 
     // Update last-modified timestamp so metadata exports reflect the latest activity
     currentAssay.lastModifiedAt = Date.now();
@@ -1314,7 +1533,35 @@ document.addEventListener("DOMContentLoaded", async () => {
     // (set via the "Hide/Show Progress" toggle in the assay screen).
     applyProgressVisibilityPreference();
     setState(STATES.POISED);
-    showToast("Run complete — all stimulations recorded.", "success");
+    if (saved) {
+      showToast("Run complete — all stimulations recorded.", "success");
+    } else {
+      unsavedRuns.push({ assayId: currentAssay.assayId, trialId: activeTrial.trialId, run });
+      showToast(
+        "Run complete, but it could NOT be saved (storage error). Do not reload — " +
+        "the save is retried when the next run starts and when you finish the trial.",
+        "error",
+        12000
+      );
+    }
+  }
+
+  /**
+   * Retries the final save of every run in unsavedRuns, dropping the ones
+   * that now succeed.
+   * @returns {Promise<boolean>} True when nothing is left unsaved.
+   */
+  async function flushUnsavedRuns() {
+    for (let i = unsavedRuns.length - 1; i >= 0; i--) {
+      const { assayId, trialId, run } = unsavedRuns[i];
+      try {
+        await saveRun(assayId, trialId, run);
+        unsavedRuns.splice(i, 1);
+      } catch (err) {
+        console.error("Retrying a failed run save did not succeed:", err);
+      }
+    }
+    return unsavedRuns.length === 0;
   }
 
   /**
@@ -1442,7 +1689,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    *   - Audio context warm-up on first interaction
    *   - Visual and haptic feedback on every tap
    */
-  async function executeTapAction() {
+  async function executeTapAction(eventTimeStamp) {
     // Block taps on the export screen entirely
     if (currentState === STATES.EXPORT) return;
 
@@ -1452,8 +1699,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     // re-arms pendingStart, letting the *next* run start with zero confirmation.
     if (isWarmingUp) return;
 
+    // The trial is being closed — a run must not be armed or started on it.
+    if (isFinishingTrial) return;
+
     // ── Hardware debounce ─────────────────────────────────────────────────
-    const now = Date.now();
+    const now = performance.now();
     if (now - lastTapTime < TAP_COOLDOWN_MS) return;
     lastTapTime = now;
 
@@ -1547,14 +1797,42 @@ document.addEventListener("DOMContentLoaded", async () => {
       // to has usually already closed and been scored (see the data-recording
       // pass below). Correcting a bad run means stopping/discarding it, not
       // patching a single tap.
-      // Record the tap's AudioContext timestamp for the data recording layer
-      tapTimestamps.push(getAudioTime());
+
+      // The cue loop has already stopped (the last window was scored and the
+      // run is being saved), so there is nothing left for this tap to count
+      // toward.
+      if (!activeRun) return;
+
+      // Record the tap's AudioContext timestamp for the data recording layer.
+      //
+      // Stamp it with when the input happened, not when this handler got to
+      // run: after a main-thread stall the two differ by the length of the
+      // stall, which can move the tap into the next window. The event's own
+      // timeStamp shares performance.now()'s clock, so the difference is how
+      // late we are. Anything implausible (a browser reporting an epoch-based
+      // timeStamp, or no timestamp at all) falls back to handler time.
+      let lateBySec = (performance.now() - eventTimeStamp) / 1000;
+      if (!(lateBySec > 0 && lateBySec < 5)) lateBySec = 0;
+      let tapTime = getAudioTime() - lateBySec;
+
+      // Start of the earliest window not yet scored.
+      const openWindowStart = nextDataIntervalTime - runISI;
+      // Never back-date a tap into a window that has already been scored —
+      // the scorer would consume it without counting it. Credit it to the
+      // earliest window still open instead, as an un-back-dated tap would be.
+      if (currentStimulusIndex > 0 && tapTime < openWindowStart) tapTime = openWindowStart;
+
+      tapTimestamps.push(tapTime);
       armbandTap();  // mirror navigator.vibrate(50) on the armband
 
-      // Visual indicator: "bucket fulfilled" shows the tap was registered
-      UI.Buttons.tap.classList.add("bucket-fulfilled");
-      // Use cached reference — avoids getElementById on every tap during a run
-      if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.add("fulfilled");
+      // Visual indicator: "bucket fulfilled" shows the tap was registered.
+      // A tap in the lead-in before stimulus 1 is discarded by the scorer, so
+      // it must not light the indicator for the whole of window 1.
+      if (tapTime >= openWindowStart) {
+        UI.Buttons.tap.classList.add("bucket-fulfilled");
+        // Use cached reference — avoids getElementById on every tap during a run
+        if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.add("fulfilled");
+      }
 
     } else if (isStartingNewRun) {
       // Shown for the whole warmup+run duration — see showLiveGenotypeBadge().
@@ -1586,6 +1864,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     // disabled. Previously, two taps that both passed the guard could both reach
     // startRun() concurrently, creating two runs for the same genotype.
     isWarmingUp = true;
+    const myToken    = ++warmupToken;
+    const superseded = () => myToken !== warmupToken;
+
+    // Keyboard focus left in an override-reason box would send Space to that
+    // field instead of the tap shortcut for the whole run.
+    if (document.activeElement?.matches?.(".override-reason-input")) document.activeElement.blur();
+
+    // Finish Trial must not be reachable once a run is on its way: setState()
+    // only disables it on entering RUNNING, and the warmup isn't a state.
+    UI.Buttons.finishTrial.disabled = true;
 
     // Lock genotype selection for the whole warmup+run duration. Without this,
     // currentState stays CONFIGURED/POISED during warmup (it isn't its own
@@ -1613,6 +1901,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         // the lock above instead of leaving it stuck disabled with no run active.
         UI.Inputs.genotypeSelect.disabled = false;
         syncGenotypePickerEnabled();
+        if (currentState === STATES.POISED) UI.Buttons.finishTrial.disabled = false;
+        // The label still reads "Tap again to start…" from the confirmation tap.
+        restoreStartLabel();
       }
       isWarmingUp = false;  // clear flag after the no-warmup path exits
       return;
@@ -1670,6 +1961,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         // means no run started, so genotype selection is live again.
         UI.Inputs.genotypeSelect.disabled = false;
         syncGenotypePickerEnabled();
+        // Likewise Finish Trial, which is only ever available in POISED.
+        if (currentState === STATES.POISED) UI.Buttons.finishTrial.disabled = false;
 
         // Restore the tap button label so it doesn't show the stale "Tap again…" text.
         const sel = UI.Inputs.genotypeSelect.value;
@@ -1682,6 +1975,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     };
 
     for (let i = warmupDuration; i > 0; i--) {
+      // A newer warmup owns the UI and the isWarmingUp flag now — leave both
+      // alone. Must come before the isWarmingUp checks: the newer warmup has
+      // set that flag back to true, which is exactly what used to let this
+      // cancelled loop carry on and start the run early.
+      if (superseded()) return;
+
       // Cancel if the state has changed externally (e.g. stop was clicked)
       if (!isWarmingUp || (currentState !== STATES.CONFIGURED && currentState !== STATES.POISED)) {
         _cancelWarmupUI();
@@ -1696,6 +1995,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       playWarmupTone(1200);  // High beep each countdown second
 
       await new Promise(r => setTimeout(r, 1000));
+
+      if (superseded()) return;
 
       // Re-check after the await — warmup may have been cancelled while suspended
       if (!isWarmingUp) {
@@ -1732,7 +2033,35 @@ document.addEventListener("DOMContentLoaded", async () => {
       // locked at the top of this function instead of leaving it stuck disabled.
       UI.Inputs.genotypeSelect.disabled = false;
       syncGenotypePickerEnabled();
+      if (currentState === STATES.POISED) UI.Buttons.finishTrial.disabled = false;
+      // The label still reads "Tap again to start…" from the confirmation tap.
+      restoreStartLabel();
     }
+  }
+
+  /**
+   * Puts the tap button's label back to its idle text: "Start <genotype>
+   * (Animal N)", or the select-a-genotype prompt when none is chosen.
+   *
+   * For paths that leave the assay screen idle without going through
+   * setState() — a run that fails to start never reaches RUNNING, so nothing
+   * else replaces the "Tap again to start…" text left by the confirmation tap.
+   * No-op off the assay screen, where setState() owns the label.
+   */
+  function restoreStartLabel() {
+    if (currentState !== STATES.CONFIGURED && currentState !== STATES.POISED) return;
+
+    const selectedGenotype = UI.Inputs.genotypeSelect.value;
+    if (!selectedGenotype) {
+      UI.Displays.tapLabel.textContent = "Select Genotype to Start";
+      return;
+    }
+
+    const activeTrial = getActiveTrial(currentAssay);
+    const nextIndex   = (activeTrial?.runs.filter(
+      r => r.genotype === selectedGenotype && r.status === "completed" && r.eligibleForAnalysis
+    ).length ?? 0) + 1;
+    UI.Displays.tapLabel.textContent = `Start ${selectedGenotype} (Animal ${nextIndex})`;
   }
 
 
@@ -3107,6 +3436,8 @@ document.addEventListener("DOMContentLoaded", async () => {
    *
    * The scheduler's timing gap check will stop the run when the app resumes
    * (because the gap will exceed 2×ISI), so we only need to save here, not stop.
+   * That check measures wall-clock time as well as AudioContext time, so it
+   * still fires when the context was suspended along with the page.
    *
    * Also re-requests the Wake Lock when the app returns to the foreground,
    * because Wake Locks are released automatically when the page is hidden.
@@ -3234,6 +3565,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     tapTimestamps          = [];
     tapReadIndex           = 0;
     lastSchedulerTime      = 0;
+    lastSchedulerWallMs    = 0;
+    lastSchedulerPerfMs    = 0;
+    lastAudioAdvancePerfMs = 0;
+    runOutputLatencySec    = 0;
     nextAudioScheduleTime  = 0.0;
     nextSpeechTime         = 0.0;
     nextDataIntervalTime   = 0.0;
@@ -3261,6 +3596,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Screens.savedAssays.hidden   = true;
     UI.Screens.assayDefaults.hidden = true;
     document.body.classList.remove("state-overlay");
+    // Settings may have been showing a running Test Rig. Its Stop button is
+    // gone now, so stop the loop rather than leave it ticking/vibrating.
+    stopTestRig();
     // also remove state-warming-up so the amber countdown bar and live
     // counter don't remain visible when the user navigates home mid-warmup.
     document.body.classList.remove("state-warming-up");
@@ -3303,6 +3641,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     applyAssayDefaultsToForm();
     updateBinWarning();
     updateGraceIsiWarning();
+
+    // clearChips() above dispatched a synthetic `change`, which queued a draft
+    // save of nothing but programmatic values (the auto-generated ID and the
+    // defaults). Left alone, the next page load would restore that as if the
+    // user had typed it — a stale Experiment ID and whatever the defaults were
+    // at the time. A reset is an explicit discard, so drop the draft too.
+    clearSetupDraft();
 
     // Clear progress table from the previous assay
     const progressContainer = document.getElementById("assayProgress");
@@ -3450,6 +3795,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // overwrite these if a draft exists, so defaults are only visible on
     // a truly fresh setup screen.
     applyAssayDefaultsToForm();
+    // Evaluate both warnings for those defaults now: the no-draft early
+    // returns below would otherwise skip the calls at the end of this function.
+    updateBinWarning();
+    updateGraceIsiWarning();
 
     let draft;
     try {
@@ -3494,8 +3843,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateGraceIsiWarning();
   }
 
-  /** Clears the setup draft from localStorage. Called after a successful Begin. */
+  /**
+   * Clears the setup draft from localStorage, and cancels any debounced save
+   * still pending so it can't write the draft straight back. Called after a
+   * successful Begin and when the setup form is reset.
+   */
   function clearSetupDraft() {
+    clearTimeout(_draftSaveTimer);
     try { localStorage.removeItem(LS_KEYS.SETUP_DRAFT); } catch { /* noop */ }
   }
 
@@ -3584,13 +3938,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (window.PointerEvent) {
     UI.Buttons.tap.addEventListener("pointerdown", e => {
       e.preventDefault();  // Prevents ghost click / double-fire on touch devices
-      executeTapAction();
+      executeTapAction(e.timeStamp);
     });
   } else {
     // Fallback for legacy Android WebViews that do not implement Pointer Events
     UI.Buttons.tap.addEventListener("touchstart", e => {
       e.preventDefault();  // Suppress the following 300ms-delayed click
-      executeTapAction();
+      executeTapAction(e.timeStamp);
     }, { passive: false });
   }
 
@@ -3603,6 +3957,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     // user isn't actively mid-selection. Escape still needs to fall through
     // so the check further below can close the panel.
     if (!UI.Inputs.genotypeOverlay.hidden && event.key !== "Escape") return;
+
+    // Likewise while typing in a text field (e.g. an override reason in the
+    // progress table): Space and Enter belong to the field. Without this, the
+    // assay-screen handling below swallows every space and treats it as a tap,
+    // which arms and starts a run. Escape still falls through so double-Escape
+    // stop and warmup cancel keep working.
+    const focused = document.activeElement;
+    const isTextEntry = focused instanceof HTMLElement && (
+      focused.isContentEditable ||
+      focused.tagName === "TEXTAREA" ||
+      (focused.tagName === "INPUT" &&
+        !/^(button|checkbox|radio|range|submit|reset|file|color)$/i.test(focused.type))
+    );
+    if (isTextEntry && event.key !== "Escape") return;
 
     // Prevent Space from scrolling the page while on the trial screen,
     // even during key-repeat (held key). Do this before the repeat-guard
@@ -3755,7 +4123,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // RUNNING: tap unconditionally takes priority over everything
       if (currentState === STATES.RUNNING) {
-        if (!UI.Buttons.tap.disabled) executeTapAction();
+        if (!UI.Buttons.tap.disabled) executeTapAction(event.timeStamp);
         return;
       }
 
@@ -3766,7 +4134,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Outside a run: Space dismisses the newest visible toast first
       if (dismissLatestToast()) return;
 
-      if (!UI.Buttons.tap.disabled) executeTapAction();
+      if (!UI.Buttons.tap.disabled) executeTapAction(event.timeStamp);
       return;
     }
 
@@ -3779,7 +4147,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       event.preventDefault();
       if (document.activeElement?.classList.contains("toast")) return;
       if (dismissLatestToast()) return;
-      if (!UI.Buttons.tap.disabled) executeTapAction();
+      if (!UI.Buttons.tap.disabled) executeTapAction(event.timeStamp);
     }
   });
 
@@ -4065,6 +4433,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Finish trial button ─────────────────────────────────────────────────
   UI.Buttons.finishTrial.addEventListener("click", async () => {
+    // A trial can only be finished between runs. The button is disabled
+    // outside POISED and during the warmup, but check here too: a click
+    // already in flight, or a second click while this handler is still
+    // working, must not get through.
+    if (isFinishingTrial || isWarmingUp || currentState !== STATES.POISED) return;
+
     // replace browser-native confirm() (which is blocking, cannot be
     // styled, and may be suppressed in PWA mode on some Android browsers) with a
     // lightweight async modal that respects the app's theme.
@@ -4075,35 +4449,62 @@ document.addEventListener("DOMContentLoaded", async () => {
     );
     if (!confirmed) return;
 
-    const activeTrial = getActiveTrial(currentAssay);
-
-    // Guard against null (can occur if the trial was already completed via another
-    // path, e.g. a rapid double-click or a race with the crash-guard cleanup).
-    if (!activeTrial) {
-      showToast("No active trial to finish.", "warning", 4000);
+    // The dialog doesn't block the keyboard: Space can arm and start a run
+    // while it is open. Finishing now would leave that run live behind the
+    // Export screen.
+    if (isWarmingUp || currentState !== STATES.POISED) {
+      showToast("A run started — stop it before finishing the trial.", "warning", 4000);
       return;
     }
 
-    // markTrialAbandoned/Completed rejects when the trial record is not
-    // found in IDB (e.g. a first-launch write was dropped on mobile). Without this
-    // try/catch the promise rejection is unhandled, leaving the UI frozen on the
-    // assay screen with no error feedback to the experimenter.
+    // From here until the Export screen is showing, executeTapAction() ignores
+    // taps, so nothing can start a run during the awaits below.
+    isFinishingTrial = true;
     try {
-      if (activeTrial.runs.length === 0) {
-        await markTrialAbandoned(currentAssay.assayId, activeTrial.trialId, "No runs recorded");
-      } else {
-        await markTrialCompleted(currentAssay.assayId, activeTrial.trialId);
+      // A run whose final save failed lives only in memory, and the hydrate
+      // below re-reads the trial from IDB — it would silently drop out of the
+      // export. Give the save one more go, and ask before finishing without it.
+      if (unsavedRuns.length > 0 && !(await flushUnsavedRuns())) {
+        const proceed = await showConfirmModal(
+          "Finish without the unsaved run?",
+          "A completed run still could not be saved (storage error). If you finish now it will be missing from the export.",
+          "Finish Anyway"
+        );
+        if (!proceed) return;
       }
-    } catch (err) {
-      console.error("finishTrial: IDB write failed:", err);
-      showToast("Could not save trial — please try again. If the problem persists, export your data now.", "error", 7000);
-      return;
-    }
 
-    // Hydrate FIRST so the export list reflects the updated trial status
-    currentAssay = await hydrateAssay(currentAssay.assayId);
-    populateExportDatasetList(currentAssay);
-    setState(STATES.EXPORT);
+      const activeTrial = getActiveTrial(currentAssay);
+
+      // Guard against null (can occur if the trial was already completed via another
+      // path, e.g. a rapid double-click or a race with the crash-guard cleanup).
+      if (!activeTrial) {
+        showToast("No active trial to finish.", "warning", 4000);
+        return;
+      }
+
+      // markTrialAbandoned/Completed rejects when the trial record is not
+      // found in IDB (e.g. a first-launch write was dropped on mobile). Without this
+      // try/catch the promise rejection is unhandled, leaving the UI frozen on the
+      // assay screen with no error feedback to the experimenter.
+      try {
+        if (activeTrial.runs.length === 0) {
+          await markTrialAbandoned(currentAssay.assayId, activeTrial.trialId, "No runs recorded");
+        } else {
+          await markTrialCompleted(currentAssay.assayId, activeTrial.trialId);
+        }
+      } catch (err) {
+        console.error("finishTrial: IDB write failed:", err);
+        showToast("Could not save trial — please try again. If the problem persists, export your data now.", "error", 7000);
+        return;
+      }
+
+      // Hydrate FIRST so the export list reflects the updated trial status
+      currentAssay = await hydrateAssay(currentAssay.assayId);
+      populateExportDatasetList(currentAssay);
+      setState(STATES.EXPORT);
+    } finally {
+      isFinishingTrial = false;
+    }
   });
 
   // ── Show/hide progress table ────────────────────────────────────────────
@@ -4207,6 +4608,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.overflowMenu.hidden = true;
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
     document.body.classList.add("state-overlay");
+    stopTestRig();  // Settings (and the rig's Stop button) is about to be hidden
     UI.Screens.settings.hidden      = true;
     UI.Screens.assayDefaults.hidden = false;
   });
