@@ -50,3 +50,6 @@ build/
 # ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
 logs/
+
+# ── Local bug-hunt reports (not for version control) ─────────────────────────
+bug-hunt/
