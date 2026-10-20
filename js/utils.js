@@ -65,20 +65,28 @@
 
 /**
  * Normalises a genotype label for fuzzy duplicate comparison.
- * Strips: case, whitespace, hyphens (including Unicode dash variants),
- * underscores, and all remaining non-alphanumeric characters.
  *
- * This function is the single source of truth for normalisation — the same
- * logic is mirrored in the chip-input IIFE in index.html.
+ * Ignores the typo-level differences: case, whitespace, brackets and other
+ * punctuation, and a hyphen or underscore joining two words or numbers
+ * ("Wild-Type" = "wildtype", "mec-4(u253)" = "MEC4 U253"). Keeps what carries
+ * genetic meaning: letters and digits of any script ("α-syn" ≠ "β-syn"), "+",
+ * "/", and a free-standing "-" ("lin-15/+" ≠ "lin-15", "N2 +ATR" ≠ "N2 -ATR").
+ *
+ * This function is the single source of truth for normalisation — the
+ * chip-input IIFE in index.html imports it.
  *
  * @param {string} str - Raw genotype label.
- * @returns {string} Lower-cased alphanumeric-only key.
+ * @returns {string} Lower-cased key of letters, digits, "+", "-" and "/".
  */
 export function normaliseGenotype(str) {
   return String(str)
+    .normalize('NFKC')
     .toLowerCase()
-    .replace(/[\s\-_\u2010-\u2015\u2212]+/g, '')  // Whitespace + hyphens (all Unicode dash variants).
-    .replace(/[^a-z0-9]/g, '');                    // Strip remaining punctuation / symbols.
+    .replace(/[\u2010-\u2015\u2212]/g, '-')                     // Unicode dash variants -> "-".
+    // A capture group, not a lookbehind: lookbehind is a parse error in
+    // Safari before 16.4 and would stop this module loading at all.
+    .replace(/([\p{L}\p{N}])[-_]+(?=[\p{L}\p{N}])/gu, '$1')     // Word-joining "-"/"_": "wild-type" -> "wildtype".
+    .replace(/[^\p{L}\p{N}+\-\/]/gu, '');                       // Drop spaces, brackets, other punctuation.
 }
 
 /**
@@ -116,12 +124,13 @@ export function validateInputs(values) {
       errors.push("Genotype labels must not be empty.");
     }
     // Fuzzy duplicate check — same normaliseGenotype() the chip-input UI imports.
-    // Two labels that differ only in case, spacing, hyphens, or punctuation
-    // (e.g. "Wild-Type" vs "wildtype") are treated as the same genotype because
-    // they would produce identical export column headers after normalisation.
+    // Two labels that differ only in case, spacing, brackets or a word-joining
+    // hyphen (e.g. "Wild-Type" vs "wildtype") are almost certainly the same
+    // genotype typed twice. Export keys on the raw label, so this is about
+    // catching typos, not about avoiding clashing column headers.
     const normKeys = values.genotypes.map(g => normaliseGenotype(g));
     if (new Set(normKeys).size !== values.genotypes.length) {
-      errors.push("Genotype labels must be unique (ignoring case, spaces, and punctuation).");
+      errors.push("Genotype labels must be unique (ignoring case, spaces, brackets, and hyphens between words).");
     }
   }
 

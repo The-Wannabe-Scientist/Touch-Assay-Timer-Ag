@@ -23,6 +23,26 @@ describe("normaliseGenotype", () => {
   test("distinguishes genuinely different genotypes", () => {
     assert.notEqual(normaliseGenotype("mec-4"), normaliseGenotype("mec-3"));
   });
+
+  test("keeps the symbols that carry genetic meaning", () => {
+    const distinct = [
+      ["mec-4(e1611)/+", "mec-4(e1611)"],  // heterozygote vs homozygote
+      ["lin-15/+",       "lin-15"],
+      ["N2 +ATR",        "N2 -ATR"],       // with vs without all-trans-retinal
+      ["Ex(+)",          "Ex(-)"],
+      ["+/+",            "-/-"],
+      ["α-syn",          "β-syn"],         // non-Latin letters
+      ["野生型",          "突变体"],
+    ];
+    for (const [a, b] of distinct) {
+      assert.notEqual(normaliseGenotype(a), normaliseGenotype(b), `${a} vs ${b}`);
+    }
+  });
+
+  test("still folds Unicode dashes and full-width characters", () => {
+    assert.equal(normaliseGenotype("mec\u20114"), normaliseGenotype("mec-4"));  // non-breaking hyphen
+    assert.equal(normaliseGenotype("ＷＴ"), normaliseGenotype("wt"));            // full-width letters (NFKC)
+  });
 });
 
 describe("validateInputs", () => {
