@@ -387,8 +387,12 @@ main {
   width: 100%;
   max-width: 860px;
   margin: 0 auto;
-  /* Prevent content overflow on very small screens */
+  /* Prevent content overflow on very small screens. clip, unlike hidden,
+     doesn't make <main> a scroll container — with hidden, the sticky Begin
+     Assay bar resolved against <main>, which never scrolls (the page does),
+     so it never stuck. hidden stays as the fallback for Safari < 16. */
   overflow-x: hidden;
+  overflow-x: clip;
 }
 
 section {
@@ -628,8 +632,15 @@ select option:disabled {
   border-radius: 20px;
   font-size: 0.82rem;
   font-weight: 600;
-  white-space: nowrap;
+  /* Long names wrap inside the chip rather than pushing its ✕ past the
+     edge of the screen, where it can't be tapped. */
+  white-space: normal;
+  max-width: 100%;
   animation: chipIn 0.18s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+.chip-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 @keyframes chipIn {
   from { opacity: 0; transform: scale(0.7); }
@@ -638,6 +649,7 @@ select option:disabled {
 
 .chip-remove {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   width: 16px;

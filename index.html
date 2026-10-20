@@ -1174,7 +1174,9 @@
     }
 
     function addChip(raw) {
-      const val = raw.replace(/,/g, '').trim();
+      // Collapse internal whitespace (tabs from a pasted spreadsheet row,
+      // double spaces) so a chip never holds invisible separators.
+      const val = raw.replace(/,/g, '').replace(/\s+/g, ' ').trim();
       if (!val) return;
 
       // Hard cap: refuse to add if we're already at the maximum.
@@ -1237,7 +1239,20 @@
     }
 
     textInput.addEventListener('keydown', function (e) {
-      if ((e.key === 'Enter' || e.key === ',') && textInput.value.trim()) {
+      if (e.key === 'Enter') {
+        // Never let Enter here implicitly submit #setupForm — that would
+        // create the assay before the rest of the form was reviewed.
+        e.preventDefault();
+        if (e.repeat) return;  // a held Enter adds one chip, not more
+        if (textInput.value.trim()) {
+          addChip(textInput.value);
+          textInput.value = '';
+        } else {
+          textInput.blur();  // enterkeyhint="done" on an empty box: close the keyboard
+        }
+        return;
+      }
+      if (e.key === ',' && textInput.value.trim()) {
         e.preventDefault();
         addChip(textInput.value);
         textInput.value = '';
@@ -1263,18 +1278,25 @@
       }
     });
 
-    // Paste handler: split pasted text on commas, newlines, and carriage returns,
-    // then add each non-empty token as a chip.  Splitting on \n / \r handles
-    // the common case of pasting a column from a spreadsheet (Excel, Sheets),
-    // where cells are separated by newlines rather than commas.
+    // Paste handler: split pasted text on commas, tabs, newlines and carriage
+    // returns, then add each non-empty token as a chip. Tabs and newlines
+    // cover pasting a row or a column from a spreadsheet (Excel, Sheets).
+    // The paste is merged with any text already typed around the caret, and a
+    // plain fragment with no separator is left to the browser to insert.
     // Shows a brief count toast when ≥2 chips are added in one paste action,
     // and an advisory toast when nothing was added (all duplicates or cap hit).
     textInput.addEventListener('paste', function (e) {
-      e.preventDefault();
       const raw = (e.clipboardData || window.clipboardData).getData('text');
       if (!raw) return;
+      if (!/[,\t\n\r]/.test(raw)) return;  // plain fragment: normal caret insertion
+      e.preventDefault();
+      const v = textInput.value;
+      const start = textInput.selectionStart ?? v.length;
+      const end   = textInput.selectionEnd ?? v.length;
+      const merged = v.slice(0, start) + raw + v.slice(end);
+      textInput.value = '';
       const countBefore = chipList.querySelectorAll('.chip').length;
-      raw.split(/[,\n\r]+/).forEach(function (p) { addChip(p); });
+      merged.split(/[,\t\n\r]+/).forEach(function (p) { addChip(p); });
       const countAfter = chipList.querySelectorAll('.chip').length;
       const added = countAfter - countBefore;
       if (typeof window.showToast === 'function') {
