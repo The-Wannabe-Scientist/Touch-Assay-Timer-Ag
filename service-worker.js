@@ -11,7 +11,7 @@
 // with other names belong to other apps on the same origin (e.g. a shared
 // github.io domain) and are left alone.
 const CACHE_PREFIX = "touch-assay-cache-";
-const CACHE_NAME = CACHE_PREFIX + "v2.0.0.3.19";
+const CACHE_NAME = CACHE_PREFIX + "v2.0.0.3.20";
 
 // Ensure paths match your actual directory structure!
 const ASSETS_TO_CACHE = [
