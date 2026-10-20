@@ -1463,6 +1463,12 @@
                   // document.body carries the CSS state class (e.g. "state-running")
                   // set by setState() in main.js — no import needed here.
                   const reloadAction = () => {
+                    // A completed run that couldn't be saved exists only in
+                    // memory (see unsavedRuns in main.js); a reload would lose it.
+                    if (window.__touchAssayHasUnsavedRuns?.()) {
+                      window.showToast?.("Update deferred: a completed run isn't saved yet. Export or finish the trial first.", "warning", 6000);
+                      return;
+                    }
                     if (document.body.classList.contains("state-running")) {
                       // Can't use window.showToast here safely (separate call stack),
                       // so fall back to a non-blocking console warning. The user's

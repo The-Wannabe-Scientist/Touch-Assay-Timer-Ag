@@ -87,7 +87,8 @@ const LS_KEYS = {
   TICK_PITCH:        "touchAssayTickPitch",
   PROGRESS_VISIBLE:  "touchAssayProgressVisible",
   SETUP_DRAFT:       "touchAssaySetupDraft",
-  PERSIST_WARNED:    "touchAssayPersistWarned"
+  PERSIST_WARNED:    "touchAssayPersistWarned",
+  UNSAVED_RUNS:      "touchAssayUnsavedRuns"
 };
 
 /**
@@ -453,6 +454,9 @@ let isStartingTrial = false;
  */
 const unsavedRuns = [];
 
+// The service-worker update toast in index.html checks this before reloading.
+window.__touchAssayHasUnsavedRuns = () => unsavedRuns.length > 0;
+
 /**
  * The Web Worker instance that drives the scheduling heartbeat.
  * Isolated off the main thread so browser timer throttling doesn't affect timing.
@@ -527,14 +531,15 @@ document.addEventListener("DOMContentLoaded", async () => {
         try { safeAssay   = structuredClone(currentAssay ?? {}); } catch { safeAssay   = currentAssay ?? {}; }
         try { safeRun     = structuredClone(activeRun ?? null);  } catch { safeRun     = activeRun   ?? null; }
         try { safeUnsaved = structuredClone(unsavedRuns);        } catch { safeUnsaved = unsavedRuns; }
+        // The Import Backup shape (flat assays/trials/runs), so the file can
+        // be loaded straight back through Settings → Import Backup. The
+        // completed runs whose final save failed are folded in: once
+        // currentAssay is re-read from IDB (Finish Anyway) or cleared (return
+        // to Setup), that queue is their only copy.
         const recoveryData = {
-          assay:       safeAssay,
-          activeRun:   safeRun,
-          // Completed runs whose final save failed. They may be in neither
-          // field above: once currentAssay is re-read from IDB (Finish
-          // Anyway) or cleared (return to Setup), this queue is the only copy.
-          unsavedRuns: safeUnsaved,
-          timestamp:   Date.now(),
+          ...assayToBackup(safeAssay, safeUnsaved),
+          // The run that was recording, for reference — it is also in runs.
+          activeRun: safeRun,
         };
         const dataStr = "data:text/json;charset=utf-8," +
           encodeURIComponent(JSON.stringify(recoveryData, null, 2));
@@ -546,6 +551,34 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     const reloadBtn = document.getElementById('reloadAppBtn');
     if (reloadBtn) reloadBtn.onclick = () => window.location.reload();
+  }
+
+  /**
+   * Flattens an in-memory assay (trials → runs nested) plus queued unsaved
+   * runs into the backup shape importAllDataFromJSON() accepts.
+   *
+   * @param {Object|null} assay  - Nested assay, or null/{} when there is none.
+   * @param {Array<{assayId: string, trialId: string, run: Object}>} [queued=[]]
+   * @returns {{exportedAt: number, assays: Object[], trials: Object[], runs: Object[]}}
+   */
+  function assayToBackup(assay, queued = []) {
+    const assays = [], trials = [], runs = [];
+    if (assay && assay.assayId != null) {
+      const { trials: ts = [], ...assayRecord } = assay;
+      assays.push(assayRecord);
+      for (const t of ts) {
+        const { runs: rs = [], ...trialRecord } = t;
+        trials.push({ ...trialRecord, assayId: assay.assayId });
+        for (const r of rs) runs.push({ ...r, trialId: t.trialId });
+      }
+    }
+    for (const u of queued) {
+      if (!u?.run) continue;
+      const record = { ...u.run, trialId: u.trialId };
+      const i = runs.findIndex(r => r.runId === record.runId);
+      if (i !== -1) runs[i] = record; else runs.push(record);
+    }
+    return { exportedAt: Date.now(), assays, trials, runs };
   }
 
   /**
@@ -814,6 +847,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    * that must run last so it doesn't race the primary cleanup's writes.
    */
   async function runStartupCleanup() {
+    await restorePersistedUnsavedRuns();
     await recoverCrashGuard();
     // An "active" trial or run is a leftover only if no other tab is open:
     // a second tab's would be live, and abandoning it would cut its trial
@@ -1159,8 +1193,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     run.runSeq = activeTrial.runs.length;
 
     activeTrial.runs.push(run);
+    const assay = currentAssay;
     try {
-      await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+      await saveRun(assay.assayId, activeTrial.trialId, run);
     } catch (err) {
       // Don't leave an orphan "active" run in memory: every later run in the
       // trial would otherwise be recorded into it (wrong genotype and animal
@@ -1168,6 +1203,25 @@ document.addEventListener("DOMContentLoaded", async () => {
       const orphanIndex = activeTrial.runs.indexOf(run);
       if (orphanIndex !== -1) activeTrial.runs.splice(orphanIndex, 1);
       throw err;
+    }
+
+    // The user may have left this assay (header logo, Saved Assays) or begun
+    // finishing the trial while the record was being written. Going live now
+    // would leave the app in RUNNING with no run screen and no working Stop,
+    // or record into a trial that is closing. Close the run record instead.
+    if (currentAssay !== assay || isFinishingTrial ||
+        currentState === STATES.SETUP || currentState === STATES.EXPORT) {
+      const i = activeTrial.runs.indexOf(run);
+      if (i !== -1) activeTrial.runs.splice(i, 1);
+      run.status = "stoppedEarly";
+      run.endedAt = Date.now();
+      run.eligibleForAnalysis     = false;
+      run.ineligibleReason        = "Run start cancelled";
+      run.autoEligibleForAnalysis = false;
+      run.autoIneligibleReason    = "Run start cancelled";
+      saveRun(assay.assayId, activeTrial.trialId, run)
+        .catch(err => console.warn("Saving the cancelled run start failed:", err));
+      return;
     }
 
     // An overlay screen can still be open here if the run was armed with the
@@ -1360,18 +1414,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (currentTime > lastSchedulerTime) lastAudioAdvancePerfMs = perfNowMs;
     if (lastSchedulerTime > 0) {
       const audioGap      = currentTime - lastSchedulerTime;
-      const wallGap       = Math.max(wallNowMs - lastSchedulerWallMs, perfNowMs - lastSchedulerPerfMs) / 1000;
+      const dateGap       = (wallNowMs - lastSchedulerWallMs) / 1000;
+      const perfGap       = (perfNowMs - lastSchedulerPerfMs) / 1000;
+      const wallGap       = Math.max(dateGap, perfGap);
       const stalledFor    = (perfNowMs - lastAudioAdvancePerfMs) / 1000;
       const gap           = Math.max(audioGap, wallGap, stalledFor);
       const maxAllowedGap = Math.max(runISI * 2, 1.0);
 
       if (gap > maxAllowedGap) {
+        // Only Date.now() jumped: a sleep during which the other clocks
+        // paused too (macOS) looks exactly like a system-clock change, so the
+        // run stops either way — but say that it may have been the clock.
+        const clockOnly = dateGap > maxAllowedGap && Math.max(audioGap, perfGap, stalledFor) <= maxAllowedGap;
+        const cause = clockOnly
+          ? "the device slept, or the system clock changed"
+          : "device was backgrounded or throttled";
         console.error(
           `Timing gap: ${gap.toFixed(3)}s exceeds max ${maxAllowedGap.toFixed(3)}s ` +
-          `(audio ${audioGap.toFixed(3)}s, wall ${wallGap.toFixed(3)}s, audio clock stalled ${stalledFor.toFixed(3)}s) — ` +
-          `auto-stopping run (device was backgrounded or throttled)`
+          `(audio ${audioGap.toFixed(3)}s, wall ${dateGap.toFixed(3)}s, perf ${perfGap.toFixed(3)}s, ` +
+          `audio clock stalled ${stalledFor.toFixed(3)}s) — auto-stopping run (${cause})`
         );
-        stopRunEarly("Timing interrupted — device was backgrounded or throttled");
+        stopRunEarly(`Timing interrupted — ${cause}`);
         return;
       }
     }
@@ -1700,6 +1763,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       showToast("Run complete — all stimulations recorded.", "success");
     } else {
       unsavedRuns.push({ assayId: currentAssay.assayId, trialId: activeTrial.trialId, run });
+      persistUnsavedRuns();
       showToast(
         "Run complete, but it could NOT be saved (storage error). Do not reload — " +
         "the save is retried when the next run starts and when you finish the trial.",
@@ -1737,7 +1801,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Retries the final save of every run in unsavedRuns, dropping the ones
-   * that now succeed.
+   * that now succeed. Says so when one is saved: the stored trial (and any
+   * re-export of it) changes at that moment.
    * @returns {Promise<boolean>} True when nothing is left unsaved.
    */
   async function flushUnsavedRuns() {
@@ -1746,11 +1811,70 @@ document.addEventListener("DOMContentLoaded", async () => {
       try {
         await saveRun(assayId, trialId, run);
         unsavedRuns.splice(i, 1);
+        showToast(`An earlier unsaved run (${run.genotype} Animal ${run.animalIndex}) has now been saved.`, "success", 6000);
       } catch (err) {
         console.error("Retrying a failed run save did not succeed:", err);
       }
     }
+    persistUnsavedRuns();
     return unsavedRuns.length === 0;
+  }
+
+  /**
+   * Lays the runs still in unsavedRuns over a freshly hydrated assay. IDB
+   * holds only the run's "active" start record, so without this a hydrate
+   * (Finish Trial, Saved Assays, Start New Trial) shows and exports an empty
+   * ghost instead of the values that were recorded.
+   * @param {Object} assay - From hydrateAssay(); modified in place.
+   * @returns {Object} The same assay.
+   */
+  function overlayUnsavedRuns(assay) {
+    for (const { assayId, trialId, run } of unsavedRuns) {
+      if (String(assayId) !== String(assay.assayId)) continue;
+      const trial = assay.trials.find(t => t.trialId === trialId);
+      if (!trial) continue;
+      const i = trial.runs.findIndex(r => r.runId === run.runId);
+      if (i !== -1) trial.runs[i] = run; else trial.runs.push(run);
+    }
+    return assay;
+  }
+
+  /**
+   * Mirrors unsavedRuns into localStorage (or clears it when empty), so a
+   * page unload — closing the tab, the update toast's Reload — doesn't lose
+   * them: the next startup saves them before its cleanup runs.
+   */
+  function persistUnsavedRuns() {
+    try {
+      if (unsavedRuns.length > 0) localStorage.setItem(LS_KEYS.UNSAVED_RUNS, JSON.stringify(unsavedRuns));
+      else localStorage.removeItem(LS_KEYS.UNSAVED_RUNS);
+    } catch { /* storage unavailable or full — the unload prompt still warns */ }
+  }
+
+  /**
+   * Startup: saves any runs a previous page left in unsavedRuns (see
+   * persistUnsavedRuns). Runs before the orphan cleanup, which would
+   * otherwise mark their "active" start records abandoned.
+   */
+  async function restorePersistedUnsavedRuns() {
+    let queued;
+    try { queued = JSON.parse(localStorage.getItem(LS_KEYS.UNSAVED_RUNS) || "[]"); } catch { return; }
+    if (!Array.isArray(queued) || queued.length === 0) return;
+    const left = [];
+    for (const entry of queued) {
+      try {
+        await saveRun(entry.assayId, entry.trialId, entry.run);
+      } catch (err) {
+        console.error("Restoring a queued run failed:", err);
+        left.push(entry);
+      }
+    }
+    try {
+      if (left.length > 0) localStorage.setItem(LS_KEYS.UNSAVED_RUNS, JSON.stringify(left));
+      else localStorage.removeItem(LS_KEYS.UNSAVED_RUNS);
+    } catch { /* ignore */ }
+    const saved = queued.length - left.length;
+    if (saved > 0) showToast(`${saved} run(s) that couldn't be saved last time have now been saved.`, "success", 6000);
   }
 
   /**
@@ -1808,8 +1932,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Guard against currentAssay being null (e.g. corrupted state or a
     // spurious call after resetToSetup). Without this, saveRun(currentAssay.assayId, ...)
-    // below would throw TypeError: Cannot read properties of null.
-    if (!currentAssay) return;
+    // below would throw TypeError: Cannot read properties of null. Still
+    // leave RUNNING, so Stop can always get the app out of a run.
+    if (!currentAssay) {
+      releaseWakeLock();
+      if (currentState === STATES.RUNNING) setState(STATES.SETUP);
+      return;
+    }
 
     const activeTrial = getActiveTrial(currentAssay);
     const run         = snapshotRun || activeTrial?.runs.find(r => r.status === "active");
@@ -1998,10 +2127,24 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // Start of the earliest window not yet scored.
       const openWindowStart = nextDataIntervalTime - runISI;
-      // Never back-date a tap into a window that has already been scored —
-      // the scorer would consume it without counting it. Credit it to the
-      // earliest window still open instead, as an un-back-dated tap would be.
-      if (currentStimulusIndex > 0 && tapTime < openWindowStart) tapTime = openWindowStart;
+      if (currentStimulusIndex > 0) {
+        // A back-dated tap can belong to the window scored last (k): the
+        // scorer credits every tap before k's grace end to k. It ran before
+        // this tap was handled, so correct k's value in place — carrying the
+        // tap forward would also mark window k+1 as "no response".
+        const lastStart    = openWindowStart - runISI;
+        const lastGraceEnd = openWindowStart + runGraceSec;
+        if (tapTime >= lastStart && tapTime < lastGraceEnd) {
+          activeRun.values[currentStimulusIndex - 1] = 0;
+          armbandTap();  // mirror navigator.vibrate(50) on the armband
+          return;
+        }
+        // Older still: never back-date a tap into a window that has already
+        // been scored — the scorer would consume it without counting it.
+        // Credit it to the earliest window still open instead, as an
+        // un-back-dated tap would be.
+        if (tapTime < openWindowStart) tapTime = openWindowStart;
+      }
 
       tapTimestamps.push(tapTime);
       armbandTap();  // mirror navigator.vibrate(50) on the armband
@@ -2192,8 +2335,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     }
 
-    // Countdown finished — tear down warmup state and start the run
-    isWarmingUp = false;
+    // Countdown finished — tear down warmup state and start the run.
+    // isWarmingUp stays true until startRun() is done, as in the no-warmup
+    // branch: Finish Trial and the header logo check it, and startRun()
+    // awaits a write before the run goes live.
     document.body.classList.remove("state-warming-up");
     if (bar) {
       bar.classList.remove("warmup");
@@ -2225,6 +2370,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // The label still reads "Tap again to start…" from the confirmation tap.
       restoreStartLabel();
     }
+    isWarmingUp = false;
   }
 
   /**
@@ -3392,7 +3538,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     await Promise.all(assays.map(async assay => {
       let hydrated;
       try {
-        hydrated = await hydrateAssay(assay.assayId);
+        hydrated = overlayUnsavedRuns(await hydrateAssay(assay.assayId));
       } catch {
         return;  // assay may have been deleted while this was in flight
       }
@@ -3799,6 +3945,13 @@ document.addEventListener("DOMContentLoaded", async () => {
    * cleanup on next launch catches any that slip through.
    */
   window.addEventListener("beforeunload", e => {
+    // A completed run that couldn't be saved exists only in memory: ask
+    // before leaving, and keep a copy the next startup can save.
+    if (unsavedRuns.length > 0) {
+      e.preventDefault();
+      e.returnValue = "";
+      persistUnsavedRuns();
+    }
     if (currentState !== STATES.RUNNING || !currentAssay) return;
 
     // Show the browser's native "Leave site?" dialog when a run is active.
@@ -4895,7 +5048,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (unsavedRuns.length > 0 && !(await flushUnsavedRuns())) {
         const proceed = await showConfirmModal(
           "Finish without the unsaved run?",
-          "A completed run still could not be saved (storage error). If you finish now it will be missing from the export.",
+          "A completed run still could not be saved (storage error). If you finish now it is included in this session's exports, " +
+          "but it exists only in memory: export now, and don't reload or close the app.",
           "Finish Anyway"
         );
         if (!proceed) return;
@@ -4928,7 +5082,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
 
       // Hydrate FIRST so the export list reflects the updated trial status
-      currentAssay = await hydrateAssay(currentAssay.assayId);
+      currentAssay = overlayUnsavedRuns(await hydrateAssay(currentAssay.assayId));
       populateExportDatasetList(currentAssay);
       setState(STATES.EXPORT);
     } finally {
@@ -4976,6 +5130,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // ── New assay ────────────────────────────────────────────────────
   // replace blocking confirm() with async showConfirmModal.
   UI.Buttons.newAssay.addEventListener("click", async () => {
+    if (!(await confirmLeavingUnsavedRuns())) return;
     if (currentAssay) {
       const completedTrials = (currentAssay.trials || []).filter(t => t.status === "completed");
       if (completedTrials.length > 0) {
@@ -4989,6 +5144,33 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     resetToSetup();
   });
+
+  /**
+   * The number for a new trial: one past the highest existing trialIndex,
+   * not trials.length + 1, which repeats a number when the indices have a
+   * gap or a legacy record has none — and the Excel export names a sheet
+   * after each trial.
+   * @param {Object} assay
+   * @returns {number}
+   */
+  function nextTrialIndex(assay) {
+    return Math.max(0, ...assay.trials.map(t => Number(t.trialIndex) || 0)) + 1;
+  }
+
+  /**
+   * Before leaving the assay: retry any unsaved run, and if one still can't
+   * be saved, ask — once the assay is left, nothing shows it again.
+   * @returns {Promise<boolean>} True to go ahead.
+   */
+  async function confirmLeavingUnsavedRuns() {
+    if (unsavedRuns.length === 0 || (await flushUnsavedRuns())) return true;
+    return showConfirmModal(
+      "Leave without the unsaved run?",
+      "A completed run could not be saved (storage error). It is kept on this device and saved when the app next starts, " +
+      "but it won't appear in this assay until then. Export now if you need it.",
+      "Leave Anyway"
+    );
+  }
 
   // ── Start new trial (from export screen) ───────────────────────────────
   UI.Buttons.backToAssay.addEventListener("click", async () => {
@@ -5004,7 +5186,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // run records written since the last hydrateAssay() call.
       let assay;
       try {
-        assay = await hydrateAssay(currentAssay.assayId);
+        assay = overlayUnsavedRuns(await hydrateAssay(currentAssay.assayId));
       } catch (err) {
         // e.g. the assay was deleted in another tab. Stay on the Export
         // screen: its in-memory copy can still be exported.
@@ -5024,7 +5206,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           abandonTrial(stale, reason);
         }
 
-        const trial = createTrial(assay.trials.length + 1);
+        const trial = createTrial(nextTrialIndex(assay));
         await saveTrial(assay.assayId, trial);  // await: run start must not race DB write
         assay.trials.push(trial);
       } catch (err) {
@@ -5069,10 +5251,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         );
         // Re-check: the state can change while the dialog is open.
         if (!go || currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) return;
-        // A run whose final save failed is retried before the trial closes,
-        // so the abandoned trial at least holds it.
-        if (unsavedRuns.length > 0) await flushUnsavedRuns();
       }
+      // A run whose final save failed is retried before the trial closes,
+      // so the abandoned trial at least holds it; ask if it still can't be.
+      if (!(await confirmLeavingUnsavedRuns()) ||
+          currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) return;
       const reason = runCount > 0 ? "Left the trial from the header" : "No runs recorded";
       try {
         await markTrialAbandoned(currentAssay.assayId, active.trialId, reason);
@@ -5090,6 +5273,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         );
         if (!leaveAnyway || currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) return;
       }
+    } else if (!(await confirmLeavingUnsavedRuns()) ||
+               currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) {
+      return;
     }
     resetToSetup();
   });
@@ -5195,6 +5381,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         return;
       }
 
+      // A recovery file from an older version nests the trials and runs
+      // inside one assay; flatten it into the backup shape.
+      if (data && !Array.isArray(data.assays) && data.assay && Array.isArray(data.assay.trials)) {
+        data = assayToBackup(data.assay, Array.isArray(data.unsavedRuns) ? data.unsavedRuns : []);
+      }
+
       if (!data || !Array.isArray(data.assays) || !Array.isArray(data.trials) || !Array.isArray(data.runs)) {
         showToast("This file doesn't look like a valid Touch Assay Timer backup.", "error", 5000);
         return;
@@ -5225,7 +5417,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         // trials and runs just imported for that assay. Re-read it.
         if (currentAssay && currentState === STATES.EXPORT) {
           try {
-            currentAssay = await hydrateAssay(currentAssay.assayId);
+            currentAssay = overlayUnsavedRuns(await hydrateAssay(currentAssay.assayId));
             populateExportDatasetList(currentAssay);
           } catch (err) {
             console.error("Failed to refresh the open assay after import:", err);
@@ -5358,7 +5550,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       try {
         let assay;
         try {
-          assay = await hydrateAssay(assayId);
+          assay = overlayUnsavedRuns(await hydrateAssay(assayId));
         } catch (err) {
           reportUnloadableAssay(err);
           return;
@@ -5377,7 +5569,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             abandonTrial(stale, reason);
           }
 
-          const newTrial = createTrial(assay.trials.length + 1);
+          const newTrial = createTrial(nextTrialIndex(assay));
           await saveTrial(assay.assayId, newTrial);
           assay.trials.push(newTrial);
         } catch (err) {
@@ -5411,7 +5603,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // on top of this screen and closing it returns straight to the list.
       let assay;
       try {
-        assay = await hydrateAssay(assayId);
+        assay = overlayUnsavedRuns(await hydrateAssay(assayId));
       } catch (err) {
         reportUnloadableAssay(err);
         return;
@@ -5442,7 +5634,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     } else if (action === "export") {
       let assay;
       try {
-        assay = await hydrateAssay(assayId);
+        assay = overlayUnsavedRuns(await hydrateAssay(assayId));
       } catch (err) {
         reportUnloadableAssay(err);
         return;
