@@ -10,7 +10,8 @@ import {
   escapeHTML,
   collectPooledRuns,
   collectTouchIndexExclusions,
-  summarizeTrialRunsByGenotype
+  summarizeTrialRunsByGenotype,
+  isRunEligible
 } from "../js/utils.js";
 
 describe("normaliseGenotype", () => {
@@ -261,6 +262,45 @@ describe("collectTouchIndexExclusions", () => {
     };
     assert.deepEqual(collectTouchIndexExclusions(assay), []);
   });
+
+  test("says 'No complete bin' for an eligible run shorter than one bin", () => {
+    const assay = {
+      binSize: 10,
+      trials: [{
+        trialIndex: 1,
+        status: "completed",
+        runs: [{ genotype: "WT", animalIndex: 1, eligibleForAnalysis: true, values: [1, 1, 1] }]
+      }]
+    };
+    const [row] = collectTouchIndexExclusions(assay);
+    assert.equal(row[3], "No complete bin (3 of 10 stimuli recorded)");
+  });
+
+  test("scans exactly the exported trials when trialIds is given", () => {
+    const run = { genotype: "WT", animalIndex: 1, eligibleForAnalysis: true, values: [0, 0] };
+    const assay = {
+      binSize: 2,
+      trials: [
+        { trialId: "done",  trialIndex: 1, status: "completed", runs: [run] },
+        { trialId: "gone",  trialIndex: 2, status: "abandoned", runs: [run] }
+      ]
+    };
+    assert.deepEqual(collectTouchIndexExclusions(assay, { trialIds: new Set() }), []);
+    assert.deepEqual(
+      collectTouchIndexExclusions(assay, { trialIds: new Set(["gone"]) }).map(r => r[0]),
+      [2]
+    );
+  });
+});
+
+describe("isRunEligible", () => {
+  test("counts any finished run marked eligible, including a manual override", () => {
+    assert.equal(isRunEligible({ status: "completed",    eligibleForAnalysis: true }), true);
+    assert.equal(isRunEligible({ status: "stoppedEarly", eligibleForAnalysis: true }), true);
+    assert.equal(isRunEligible({ status: "completed",    eligibleForAnalysis: false }), false);
+    assert.equal(isRunEligible({ status: "active",       eligibleForAnalysis: true }), false);
+    assert.equal(isRunEligible({ status: "completed",    eligibleForAnalysis: null }), false);
+  });
 });
 
 describe("summarizeTrialRunsByGenotype", () => {
@@ -270,7 +310,7 @@ describe("summarizeTrialRunsByGenotype", () => {
     assert.deepEqual(summary["WT"], { total: 0, eligible: 0, ineligible: 0, runs: [] });
   });
 
-  test("tallies completed+eligible runs as eligible, everything else as ineligible", () => {
+  test("tallies finished runs marked eligible (including overrides) as eligible, the rest as ineligible", () => {
     const trial = {
       runs: [
         { genotype: "WT", status: "completed",    eligibleForAnalysis: true  },
@@ -280,8 +320,10 @@ describe("summarizeTrialRunsByGenotype", () => {
       ]
     };
     const summary = summarizeTrialRunsByGenotype(["WT"], trial);
+    // The stopped-early run was manually marked Eligible: the export
+    // includes it, so the progress table counts it too.
     assert.deepEqual(summary["WT"], {
-      total: 4, eligible: 1, ineligible: 3,
+      total: 4, eligible: 2, ineligible: 2,
       runs: trial.runs
     });
   });

@@ -51,8 +51,19 @@ import {
 export const RUN_STATUS_LABELS = {
   completed:    "Completed",
   stoppedEarly: "Stopped Early",
-  abandoned:    "Abandoned"
+  abandoned:    "Abandoned",
+  // A run whose final save failed is still "active" in IDB until the queue
+  // saves it; never let the raw status string reach a sheet.
+  active:       "Incomplete (unsaved)"
 };
+
+
+/**
+ * Orders two runs by when they started: runSeq (the run's position in its
+ * trial, which doesn't depend on the wall clock), then startedAt for older
+ * runs that have no runSeq.
+ */
+const byStartOrder = (a, b) => (a.runSeq ?? -1) - (b.runSeq ?? -1) || (a.startedAt || 0) - (b.startedAt || 0);
 
 
 /* ==========================================================================
@@ -107,11 +118,13 @@ function groupAndSortRuns(runs, genotypes, isPooled = false) {
   genotypes.forEach(g => {
     if (isPooled) {
       runsByGenotype[g].sort((a, b) =>
-        a.trialIndex - b.trialIndex || a.animalIndex - b.animalIndex
+        a.trialIndex - b.trialIndex || a.animalIndex - b.animalIndex || byStartOrder(a, b)
       );
       runsByGenotype[g].forEach((run, i) => { run.globalAnimalIndex = i + 1; });
     } else {
-      runsByGenotype[g].sort((a, b) => a.animalIndex - b.animalIndex);
+      // Start order breaks ties, so which attempt gets "(retry N)" doesn't
+      // depend on the order the runs arrived in.
+      runsByGenotype[g].sort((a, b) => a.animalIndex - b.animalIndex || byStartOrder(a, b));
       // A failed attempt and its successful retry share the same animalIndex
       // by design (see startRun() — only completed && eligibleForAnalysis
       // runs advance the counter), so both would otherwise render as
@@ -1287,12 +1300,17 @@ export function buildAllSections(assay, exportConfigs, options = {}) {
     data2D:         buildMetadata2D(assay)
   });
 
+  // Every trial whose runs reach this export, so the Touch Index exclusions
+  // below list exactly those.
+  const exportedTrialIds = new Set();
+
   exportConfigs.forEach(config => {
 
     // ── Per-trial sections ─────────────────────────────────────────────────
     if (config.type === "trial") {
       const trial = assay.trials.find(t => String(t.trialId) === String(config.trialId));
       if (!trial) return;
+      exportedTrialIds.add(String(trial.trialId));
 
       sections.push({
         name:           `Trial ${trial.trialIndex} - Raw`,
@@ -1346,6 +1364,9 @@ export function buildAllSections(assay, exportConfigs, options = {}) {
       const suffix   = config.includeAbandoned ? "All Trials"  : "Completed Trials";
       const xlSuffix = config.includeAbandoned ? "AllTrials"   : "CompletedTrials";
       const poolOpt  = { includeAbandoned: config.includeAbandoned };
+      assay.trials
+        .filter(t => config.includeAbandoned || t.status === "completed")
+        .forEach(t => exportedTrialIds.add(String(t.trialId)));
 
       // Collect runs once and build a shared binning cache for this config.
       const runs  = collectPooledRuns(assay, poolOpt);
@@ -1397,7 +1418,7 @@ export function buildAllSections(assay, exportConfigs, options = {}) {
   });
 
   // ── Touch Index exclusions (appended only if any runs were excluded) ──────
-  const tiExclusions = collectTouchIndexExclusions(assay);
+  const tiExclusions = collectTouchIndexExclusions(assay, { trialIds: exportedTrialIds });
   if (tiExclusions.length > 0) {
     sections.push({
       name:           "Touch Index Exclusions",
@@ -1677,7 +1698,14 @@ export function performExcelExport(currentAssay, exportConfigs, options = {}) {
     const wb       = XLSX.utils.book_new();
     const sections = buildAllSections(currentAssay, exportConfigs, options);
 
+    // Sheet names must be unique in a workbook — book_append_sheet throws on
+    // a repeat, which two trials sharing a trialIndex (e.g. from an older
+    // backup merge) would otherwise cause. Excel caps names at 31 chars.
+    const usedNames = new Set();
     sections.forEach(({ excelSheetName, data2D }) => {
+      let sheetName = excelSheetName;
+      for (let n = 2; usedNames.has(sheetName); n++) sheetName = `${excelSheetName.slice(0, 28)}_${n}`;
+      usedNames.add(sheetName);
       const sheet = XLSX.utils.aoa_to_sheet(data2D);
 
       if (excelSheetName === "Assay_Metadata") {
@@ -1692,7 +1720,7 @@ export function performExcelExport(currentAssay, exportConfigs, options = {}) {
         blankEmptyTextCells(sheet);
       }
 
-      XLSX.utils.book_append_sheet(wb, sheet, excelSheetName);
+      XLSX.utils.book_append_sheet(wb, sheet, sheetName);
     });
 
     XLSX.writeFile(wb, `${currentAssay.assayName || "Assay"}_Export.xlsx`);
@@ -1709,18 +1737,27 @@ export function performExcelExport(currentAssay, exportConfigs, options = {}) {
    CSV Fallback Export (No External Dependencies)
    ========================================================================== */
 
+/** Leading characters that make Excel/LibreOffice read a CSV cell as a formula. */
+const CSV_FORMULA_TRIGGER = /^[=+\-@\t\r]/;
+
 /**
  * Converts a single 2D row into a valid CSV line.
  * Cells containing commas, newlines, or quotes are wrapped in double-quotes,
  * and any existing double-quotes within those cells are escaped as "".
+ * Text that starts like a formula (e.g. a genotype or reason typed as
+ * "=…", "+…", "-…" or "@…") gets a leading apostrophe so a spreadsheet
+ * shows it as text instead of evaluating it; real numbers are left alone.
  *
  * @param {any[]} row - Array of cell values.
  * @returns {string} A properly escaped CSV line (no trailing newline).
  */
-function arrayToCSVRow(row) {
+export function arrayToCSVRow(row) {
   return row.map(cell => {
-    const val = (cell === null || cell === undefined) ? "" : String(cell);
-    if (val.includes(",") || val.includes("\n") || val.includes('"')) {
+    let val = (cell === null || cell === undefined) ? "" : String(cell);
+    if (typeof cell === "string" && CSV_FORMULA_TRIGGER.test(val) && isNaN(Number(val))) {
+      val = "'" + val;
+    }
+    if (/[",\n\r]/.test(val)) {
       return `"${val.replace(/"/g, '""')}"`;
     }
     return val;
@@ -1759,7 +1796,10 @@ export function performCSVExport(currentAssay, exportConfigs, options = {}) {
     });
 
     // Trigger file download — no DOM append/remove needed in modern browsers.
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    // A leading U+FEFF (written by Blob as EF BB BF) makes Excel decode the
+    // file as UTF-8 instead of the system code page; without it the en dash
+    // in every bin label, "°C" and non-ASCII genotype names come out garbled.
+    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8;" });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
     a.href     = url;

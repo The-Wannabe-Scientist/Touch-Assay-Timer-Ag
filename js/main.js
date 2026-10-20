@@ -37,7 +37,7 @@
  */
 
 
-import { validateInputs, generateAutoID, binRunValues, escapeHTML, formatDateTime, summarizeTrialRunsByGenotype } from "./utils.js";  // escapeHTML is shared from utils.js
+import { validateInputs, generateAutoID, binRunValues, escapeHTML, formatDateTime, summarizeTrialRunsByGenotype, isRunEligible } from "./utils.js";  // escapeHTML is shared from utils.js
 import {
   createAssay, createTrial, createRun,
   getActiveTrial, completeRun, abandonTrial
@@ -2545,11 +2545,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!badge || !currentAssay) { if (badge) badge.hidden = true; return; }
     const trial = getActiveTrial(currentAssay);
     if (!trial) { badge.hidden = true; return; }
-    // Count only eligible completed runs — consistent with the genotype-dropdown
-    // counter and what the experimenter actually cares about (usable data points).
-    // stoppedEarly runs are intentionally excluded so the badge isn't inflated
-    // by cancelled or interrupted recordings.
-    const count = trial.runs.filter(r => r.status === "completed" && r.eligibleForAnalysis).length;
+    // Count only eligible runs — consistent with the genotype-dropdown counter
+    // and the export (usable data points). A stopped-early run counts only if
+    // the experimenter manually marked it Eligible.
+    const count = trial.runs.filter(isRunEligible).length;
     if (count === 0) {
       badge.hidden = true;
     } else {
@@ -2688,7 +2687,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // Count only eligible (completed + eligible for analysis) runs for this genotype
       const count   = trial
-        ? trial.runs.filter(r => r.genotype === g && r.status === "completed" && r.eligibleForAnalysis).length
+        ? trial.runs.filter(r => r.genotype === g && isRunEligible(r)).length
         : 0;
 
       option.textContent = count > 0 ? `${g} (${count} eligible)` : g;
@@ -2795,7 +2794,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const colors   = assignGenotypeColors(genotypes);
 
     const eligibleCount = g => trial
-      ? trial.runs.filter(r => r.genotype === g && r.status === "completed" && r.eligibleForAnalysis).length
+      ? trial.runs.filter(r => r.genotype === g && isRunEligible(r)).length
       : 0;
 
     const usePills = genotypes.length > 0

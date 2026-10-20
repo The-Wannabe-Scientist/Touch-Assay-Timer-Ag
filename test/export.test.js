@@ -18,7 +18,8 @@ import {
   applySheetLayout,
   injectLiveFormulas,
   blankEmptyTextCells,
-  extractBinSeries
+  extractBinSeries,
+  arrayToCSVRow
 } from "../js/export.js";
 
 /**
@@ -490,6 +491,24 @@ describe("buildAllSections", () => {
     }
   });
 
+  test("lists Touch Index exclusions only for the trials being exported", () => {
+    const zeroRun = { genotype: "WT", animalIndex: 1, status: "completed", eligibleForAnalysis: true, values: [0, 0, 1, 1] };
+    const two = {
+      ...assay,
+      trials: [
+        { trialId: "t1", trialIndex: 1, status: "completed", runs: [zeroRun] },
+        { trialId: "t2", trialIndex: 2, status: "abandoned", runs: [zeroRun] }
+      ]
+    };
+    const exclusionsFor = configs => {
+      const s = buildAllSections(two, configs).find(x => x.excelSheetName === "TouchIndex_Exclusions");
+      return s ? s.data2D.slice(1).map(r => r[0]) : [];
+    };
+    assert.deepEqual(exclusionsFor([{ type: "trial", trialId: "t2" }]), [2]);
+    assert.deepEqual(exclusionsFor([{ type: "pooled", includeAbandoned: false }]), [1]);
+    assert.deepEqual(exclusionsFor([{ type: "pooled", includeAbandoned: true }]), [1, 2]);
+  });
+
   test("omits tidy sections entirely when includeTidy is not set", () => {
     const sections = buildAllSections(assay, [{ type: "trial", trialId: "t1" }]);
     assert.ok(!sections.some(s => s.name.includes("Tidy")));
@@ -551,5 +570,16 @@ describe("applySheetLayout", () => {
     applySheetLayout(sheet, [["Genotype", "WT", "mut"]]);
     assert.equal(sheet["!cols"][0].wch, 22);
     assert.equal(sheet["!cols"][1].wch, 10);
+  });
+});
+
+describe("arrayToCSVRow", () => {
+  test("makes text that starts like a formula read as text, leaving numbers alone", () => {
+    assert.equal(arrayToCSVRow(["- x", "=1+1", "@SUM(A1)", "+3 worms"]), "'- x,'=1+1,'@SUM(A1),'+3 worms");
+    assert.equal(arrayToCSVRow([-0.5, "-0.50", "WT"]), "-0.5,-0.50,WT");
+  });
+
+  test("still quotes cells with commas, quotes or newlines", () => {
+    assert.equal(arrayToCSVRow(['a,b', 'say "hi"', "x\ny"]), '"a,b","say ""hi""","x\ny"');
   });
 });

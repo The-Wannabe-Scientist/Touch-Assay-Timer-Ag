@@ -392,14 +392,17 @@ export function collectPooledRuns(assay, options = {}) {
  * whether preview, export, or CSV functions have been called beforehand.
  *
  * @param {Assay} assay - The full assay object (needs assay.binSize).
+ * @param {Object} [options]
+ * @param {Set<string>|null} [options.trialIds=null] - The trials being
+ *   exported (as strings). When omitted, every completed trial is scanned.
  * @returns {Array<[number, string, number|string, string]>}
  *   Each row: [trialIndex, genotype, animalIndex, exclusionReason]
  */
-export function collectTouchIndexExclusions(assay) {
-  // Only scan completed trials — abandoned or still-active trials must not
-  // produce spurious exclusion rows in the export output.
+export function collectTouchIndexExclusions(assay, { trialIds = null } = {}) {
+  // Only scan the trials in the export — an unselected trial must not add
+  // rows, and an exported abandoned trial must not be left out.
   return assay.trials
-    .filter(t => t.status === "completed")
+    .filter(t => trialIds ? trialIds.has(String(t.trialId)) : t.status === "completed")
     .flatMap(trial =>
       trial.runs
         // Only eligible runs can be TI-excluded. Ineligible runs (stopped early,
@@ -407,20 +410,32 @@ export function collectTouchIndexExclusions(assay) {
         // which causes computeTouchIndexBins to return null, producing spurious
         // exclusion rows in the export sheet.
         .filter(run => run.eligibleForAnalysis)
-        .filter(run => {
+        .flatMap(run => {
           // A run is excluded if its Touch Index cannot be computed —
-          // i.e. computeTouchIndexBins returns null (baseline bin = 0).
+          // computeTouchIndexBins returns null when there is no complete bin
+          // or the baseline bin is 0.
           const binned = binRunValues(run.values, assay.binSize);
-          return computeTouchIndexBins(binned) === null;
+          if (computeTouchIndexBins(binned) !== null) return [];
+          const n = Array.isArray(run.values) ? run.values.length : 0;
+          const reason = binned.length === 0
+            ? `No complete bin (${n} of ${assay.binSize} stimuli recorded)`
+            : "Baseline bin = 0 (animal had no responses in the first bin)";
+          return [[trial.trialIndex, run.genotype, run.animalIndex, reason]];
         })
-        .map(run => [
-          trial.trialIndex,
-          run.genotype,
-          run.animalIndex,
-          "Baseline bin = 0 (animal had no responses in the first bin)"
-        ])
     );
 }
+
+/**
+ * Whether a run counts as eligible for analysis: it has finished, and its
+ * eligibility — automatic or a manual override — is "eligible". The one rule
+ * the progress table, the counters, animal numbering and the export share,
+ * so a stopped-early run that the experimenter marked Eligible counts
+ * everywhere it is exported.
+ *
+ * @param {Run} r
+ * @returns {boolean}
+ */
+export const isRunEligible = r => r.status !== "active" && r.eligibleForAnalysis === true;
 
 /**
  * Tallies a single trial's runs into per-genotype totals for the live
@@ -448,7 +463,7 @@ export function summarizeTrialRunsByGenotype(genotypes, trial) {
       if (!summary[r.genotype]) return;
       if (r.status === "active") return;  // Don't count in-progress runs
       summary[r.genotype].total++;
-      if (r.status === "completed" && r.eligibleForAnalysis) {
+      if (isRunEligible(r)) {
         summary[r.genotype].eligible++;
       } else {
         summary[r.genotype].ineligible++;
