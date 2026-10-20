@@ -256,36 +256,62 @@ describe("saveTrial / markTrialCompleted / markTrialAbandoned", () => {
   });
 });
 
-describe("saveRun", () => {
-  // The timeout matters: without the abort handler this promise never settles,
-  // and the run would hang instead of reporting a failure.
-  test("rejects, rather than never settling, when the transaction aborts at commit", { timeout: 2000 }, async (t) => {
-    // A commit-time failure (e.g. QuotaExceededError) fires `abort` on the
-    // transaction with no `error` event: every request has already succeeded.
-    // Reproduce that by aborting from inside the put request's success handler.
-    const db = await openDB();
-    const realTransaction = db.transaction;
-    // Un-shadow the prototype method afterwards — in a hook, so it also runs
-    // if this test times out and the connection isn't left aborting every
-    // later test's writes.
-    t.after(() => { delete db.transaction; });
-    db.transaction = function (...args) {
-      const tx = realTransaction.apply(this, args);
-      const realObjectStore = tx.objectStore.bind(tx);
-      tx.objectStore = name => {
-        const store = realObjectStore(name);
-        const realPut = store.put.bind(store);
-        store.put = (...putArgs) => {
-          const request = realPut(...putArgs);
-          request.addEventListener("success", () => tx.abort());
-          return request;
-        };
-        return store;
+/**
+ * Makes every write transaction on the shared connection abort at commit, for
+ * the rest of test `t`.
+ *
+ * A commit-time failure (e.g. QuotaExceededError) fires `abort` on the
+ * transaction with no `error` event: every request has already succeeded.
+ * Reproduce that by aborting from inside each put request's success handler.
+ */
+async function abortWritesAtCommit(t) {
+  const db = await openDB();
+  const realTransaction = db.transaction;
+  // Un-shadow the prototype method afterwards — in a hook, so it also runs
+  // if the test times out and the connection isn't left aborting every
+  // later test's writes.
+  t.after(() => { delete db.transaction; });
+  db.transaction = function (...args) {
+    const tx = realTransaction.apply(this, args);
+    const realObjectStore = tx.objectStore.bind(tx);
+    tx.objectStore = name => {
+      const store = realObjectStore(name);
+      const realPut = store.put.bind(store);
+      store.put = (...putArgs) => {
+        const request = realPut(...putArgs);
+        request.addEventListener("success", () => tx.abort());
+        return request;
       };
-      return tx;
+      return store;
     };
+    return tx;
+  };
+}
 
+// The timeouts matter: without an abort handler these promises never settle,
+// and the caller would hang instead of reporting a failure.
+describe("writes that abort at commit", () => {
+  test("saveRun rejects, rather than never settling", { timeout: 2000 }, async (t) => {
+    await abortWritesAtCommit(t);
     await assert.rejects(() => saveRun("any-assay", uid("trial"), makeRun()), /aborted/i);
+  });
+
+  test("saveAssay rejects, rather than never settling", { timeout: 2000 }, async (t) => {
+    await abortWritesAtCommit(t);
+    await assert.rejects(() => saveAssay(makeAssay()), /aborted/i);
+  });
+
+  test("saveTrial rejects, rather than never settling", { timeout: 2000 }, async (t) => {
+    await abortWritesAtCommit(t);
+    await assert.rejects(() => saveTrial(uid("assay"), makeTrial()), /aborted/i);
+  });
+
+  test("importAllDataFromJSON rejects, rather than never settling", { timeout: 2000 }, async (t) => {
+    await abortWritesAtCommit(t);
+    await assert.rejects(
+      () => importAllDataFromJSON({ assays: [makeAssay()], trials: [], runs: [] }),
+      /aborted/i
+    );
   });
 });
 
@@ -342,6 +368,42 @@ describe("exportAllDataAsJSON / importAllDataFromJSON", () => {
   test("rejects a backup object missing required arrays", async () => {
     await assert.rejects(() => importAllDataFromJSON({ assays: [] }), /valid Touch Assay Timer backup/i);
     await assert.rejects(() => importAllDataFromJSON(null), /valid Touch Assay Timer backup/i);
+  });
+
+  test("rejects a backup with a malformed record and writes nothing from it", async () => {
+    const good = makeAssay();
+    // A string where an array belongs is stored without complaint by IDB, but
+    // then breaks every screen that lists assays.
+    const bad  = makeAssay({ genotypes: "N2" });
+    await assert.rejects(
+      () => importAllDataFromJSON({ assays: [good, bad], trials: [], runs: [] }),
+      /malformed record \(assay #2\)/
+    );
+    await assert.rejects(
+      () => importAllDataFromJSON({ assays: [makeAssay({ assayName: { toString: 0 } })], trials: [], runs: [] }),
+      /malformed record/
+    );
+    await assert.rejects(
+      () => importAllDataFromJSON({ assays: [], trials: [makeTrial()], runs: [] }),  // no assayId
+      /malformed record \(trial #1\)/
+    );
+    await assert.rejects(
+      () => importAllDataFromJSON({ assays: [], trials: [], runs: [makeRun({ runId: undefined })] }),
+      /malformed record \(run #1\)/
+    );
+
+    const all = await loadAllAssays();
+    assert.ok(!all.some(a => a.assayId === good.assayId), "a rejected backup must not be partly imported");
+  });
+
+  test("accepts records with numeric IDs from older databases", async () => {
+    const assay = makeAssay({ assayId: Date.now() + 0.5 });
+    const counts = await importAllDataFromJSON({
+      assays: [assay],
+      trials: [makeTrial({ assayId: assay.assayId })],
+      runs:   []
+    });
+    assert.equal(counts.trials, 1);
   });
 
   test("upserts records from a valid backup without touching unrelated existing data", async () => {

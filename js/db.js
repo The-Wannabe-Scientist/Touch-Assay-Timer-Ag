@@ -135,6 +135,23 @@ export function openDB() {
   });
 }
 
+/**
+ * The reason to reject with when a write transaction's `error` event fires.
+ *
+ * That event is a failed request bubbling up, and it fires before the
+ * transaction aborts — so `tx.error` is still null at that point. Rejecting
+ * with it would hand callers a null reason, which the app's unhandled-
+ * rejection filter discards and no catch block can describe.
+ *
+ * @param {Event}          event - The `error` event received by tx.onerror.
+ * @param {IDBTransaction} tx    - The transaction it bubbled to.
+ * @param {string}         label - Operation name for the fallback message.
+ * @returns {Error|DOMException}
+ */
+function requestError(event, tx, label) {
+  return event?.target?.error ?? tx.error ?? new Error(`${label}: request failed`);
+}
+
 
 /* ==========================================================================
    Assay Operations
@@ -153,7 +170,10 @@ export async function saveAssay(assay) {
   tx.objectStore(STORES.ASSAYS).put(assay);
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "saveAssay"));
+    // A commit-time failure (e.g. QuotaExceededError) fires only `abort` —
+    // see saveRun().
+    tx.onabort    = () => reject(tx.error ?? new Error("saveAssay: transaction aborted"));
   });
 }
 
@@ -341,7 +361,7 @@ export async function deleteAssay(assayId) {
       "readwrite"
     );
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "deleteAssay"));
     tx.onabort    = () => reject(tx.error ?? new Error("deleteAssay: transaction aborted"));
 
     const runStore   = tx.objectStore(STORES.RUNS);
@@ -381,7 +401,8 @@ export async function saveTrial(assayId, trial) {
   tx.objectStore(STORES.TRIALS).put({ ...trialData, assayId });
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "saveTrial"));
+    tx.onabort    = () => reject(tx.error ?? new Error("saveTrial: transaction aborted"));
   });
 }
 
@@ -415,8 +436,10 @@ export async function markTrialCompleted(_assayId, trialId) {
 
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
-    tx.onabort    = () => reject(new Error(`markTrialCompleted: trial ${trialId} not found`));
+    tx.onerror    = e => reject(requestError(e, tx, "markTrialCompleted"));
+    // tx.error is null after our own tx.abort() above (trial not found) and
+    // set when the commit itself failed (e.g. QuotaExceededError).
+    tx.onabort    = () => reject(tx.error ?? new Error(`markTrialCompleted: trial ${trialId} not found`));
   });
 }
 
@@ -450,8 +473,8 @@ export async function markTrialAbandoned(_assayId, trialId, reason = "App closed
 
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
-    tx.onabort    = () => reject(new Error(`markTrialAbandoned: trial ${trialId} not found`));
+    tx.onerror    = e => reject(requestError(e, tx, "markTrialAbandoned"));
+    tx.onabort    = () => reject(tx.error ?? new Error(`markTrialAbandoned: trial ${trialId} not found`));
   });
 }
 
@@ -480,7 +503,7 @@ export async function saveRun(_assayId, trialId, run) {
   tx.objectStore(STORES.RUNS).put({ ...run, trialId });
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "saveRun"));
     // A failure at commit time (e.g. QuotaExceededError) fires only `abort`,
     // never `error`. Without this the promise would never settle and callers
     // awaiting the save would hang.
@@ -561,7 +584,7 @@ export async function abandonAllActiveTrialsInDB() {
 
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "abandonAllActiveTrials"));
     tx.onabort    = () => reject(tx.error ?? new Error("abandonAllActiveTrials: transaction aborted"));
   });
 }
@@ -621,7 +644,8 @@ export async function markOrphanRunsStopped() {
     const tx    = db.transaction(STORES.RUNS, "readwrite");
     const store = tx.objectStore(STORES.RUNS);
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "markOrphanRunsStopped"));
+    tx.onabort    = () => reject(tx.error ?? new Error("markOrphanRunsStopped: transaction aborted"));
 
     activeRuns.forEach(run => {
       run.status              = "stoppedEarly";
@@ -669,7 +693,8 @@ export async function recoverCrashGuard() {
       const tx    = db.transaction(STORES.RUNS, "readwrite");
       const store = tx.objectStore(STORES.RUNS);
       tx.oncomplete = resolve;
-      tx.onerror    = () => reject(tx.error);
+      tx.onerror    = e => reject(requestError(e, tx, "recoverCrashGuard"));
+      tx.onabort    = () => reject(tx.error ?? new Error("recoverCrashGuard: transaction aborted"));
 
       const req = store.get(guard.runId);
       req.onerror = () => reject(req.error);
@@ -756,6 +781,29 @@ export async function importAllDataFromJSON(data) {
     throw new Error("This file doesn't look like a valid Touch Assay Timer backup.");
   }
 
+  // Check every record before writing any. A record with a missing key makes
+  // put() throw part-way through a store, and an assay whose genotypes or name
+  // has the wrong type is stored fine but then breaks every screen that lists
+  // assays. Older databases used numeric IDs, so numbers are accepted too.
+  const isKey   = v => (typeof v === "string" && v !== "") || Number.isFinite(v);
+  const isPlain = v => v !== null && typeof v === "object" && !Array.isArray(v);
+  const badAssay = data.assays.findIndex(a =>
+    !isPlain(a) || !isKey(a.assayId) ||
+    (a.assayName != null && typeof a.assayName !== "string") ||
+    (a.genotypes != null && !(Array.isArray(a.genotypes) && a.genotypes.every(g => typeof g === "string")))
+  );
+  const badTrial = data.trials.findIndex(t => !isPlain(t) || !isKey(t.trialId) || !isKey(t.assayId));
+  const badRun   = data.runs.findIndex(r =>
+    !isPlain(r) || !isKey(r.runId) || !isKey(r.trialId) ||
+    (r.values != null && !Array.isArray(r.values))
+  );
+  if (badAssay !== -1 || badTrial !== -1 || badRun !== -1) {
+    const where = badAssay !== -1 ? `assay #${badAssay + 1}`
+                : badTrial !== -1 ? `trial #${badTrial + 1}`
+                :                   `run #${badRun + 1}`;
+    throw new Error(`This backup contains a malformed record (${where}), so nothing was imported.`);
+  }
+
   const db = await openDB();
 
   const putAllInto = (storeName, records) => new Promise((resolve, reject) => {
@@ -764,7 +812,8 @@ export async function importAllDataFromJSON(data) {
     const store = tx.objectStore(storeName);
     records.forEach(r => store.put(r));
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "importAllDataFromJSON"));
+    tx.onabort    = () => reject(tx.error ?? new Error("importAllDataFromJSON: transaction aborted"));
   });
 
   // Sequential, one store per transaction — matches the file's existing
