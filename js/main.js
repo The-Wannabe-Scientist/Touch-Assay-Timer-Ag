@@ -85,7 +85,8 @@ const LS_KEYS = {
   VOICE_MODE:        "touchAssayVoiceMode",
   TICK_PITCH:        "touchAssayTickPitch",
   PROGRESS_VISIBLE:  "touchAssayProgressVisible",
-  SETUP_DRAFT:       "touchAssaySetupDraft"
+  SETUP_DRAFT:       "touchAssaySetupDraft",
+  PERSIST_WARNED:    "touchAssayPersistWarned"
 };
 
 /**
@@ -570,6 +571,37 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
   checkStorageQuota();
+
+  /**
+   * Asks the browser to make this origin's storage persistent, so assays
+   * (the only copy — there is no server) are not evicted under storage
+   * pressure along with ordinary site data.
+   *
+   * Chrome and Edge decide silently (engagement, installed app); Firefox may
+   * ask the user. Called at startup and again on Begin Assay, since a later
+   * call can be granted once the app is installed or used more. If it's
+   * refused, says once (ever) what that means and what to do about it.
+   */
+  async function requestPersistentStorage() {
+    if (!(navigator.storage && navigator.storage.persist && navigator.storage.persisted)) return;
+    try {
+      if (await navigator.storage.persisted()) return;
+      if (await navigator.storage.persist()) return;
+      let warned = false;
+      try { warned = localStorage.getItem(LS_KEYS.PERSIST_WARNED) === "1"; } catch { /* storage unavailable */ }
+      if (warned) return;
+      try { localStorage.setItem(LS_KEYS.PERSIST_WARNED, "1"); } catch { /* storage unavailable */ }
+      showToast(
+        "This browser may delete saved assays if the device runs low on storage. " +
+        "Install the app (Add to Home Screen) and export a backup regularly: ☰ → Saved Assays → Export Full Backup.",
+        "warning",
+        10000
+      );
+    } catch (e) {
+      console.warn("Persistent storage request failed", e);
+    }
+  }
+  requestPersistentStorage();
 
 
   /* -----------------------------------------------------------------------
@@ -4104,6 +4136,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // Clear the draft now that the assay has been saved
       clearSetupDraft();
+      requestPersistentStorage();
 
       populateGenotypeSelect(setupValues.genotypes);
       updateProgressTable();

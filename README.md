@@ -280,7 +280,8 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
 - All assay data is stored **locally** in your browser's **IndexedDB** (`touch-assay-db`).
 - **No data is ever sent to a server.** There is no backend, no analytics, no telemetry.
 - Data persists across sessions but is **browser-local** — it will not sync between devices.
-- Clearing your browser's site data deletes all saved assays. Back up regularly from **☰ → Saved Assays → Export Full Backup** — a re-importable JSON snapshot of every assay/trial/run, separate from the analysis Excel/CSV export.
+- Clearing your browser's site data deletes all saved assays. The browser can also evict that data itself when the device runs low on storage; the app asks for persistent storage to prevent this, and says once if the browser refuses. Installing the app (Add to Home Screen) makes the request more likely to be granted. Safari can also clear the data of a site not used for a while when it is opened in a tab rather than installed.
+- Back up regularly from **☰ → Saved Assays → Export Full Backup** — a re-importable JSON snapshot of every assay/trial/run, separate from the analysis Excel/CSV export.
 - A banner will appear if IndexedDB is unavailable (e.g. private/incognito mode) — in that case, data is **not** saved and you should export immediately after each trial.
 
 ---
