@@ -103,6 +103,23 @@ describe("getIdbAvailable", () => {
   });
 });
 
+describe("openDB when storage is blocked", () => {
+  test("a synchronous open() throw rejects and clears idbAvailable", async () => {
+    const realIDB = globalThis.indexedDB;
+    globalThis.indexedDB = {
+      open() { throw new DOMException("The user denied permission to access the database.", "SecurityError"); }
+    };
+    try {
+      // A fresh module instance: the flag and the cached connection are module-level.
+      const fresh = await import("../js/db.js?blocked-storage");
+      await assert.rejects(() => fresh.openDB(), { name: "SecurityError" });
+      assert.equal(fresh.getIdbAvailable(), false);
+    } finally {
+      globalThis.indexedDB = realIDB;
+    }
+  });
+});
+
 describe("saveAssay / loadAllAssays", () => {
   test("a saved assay appears in loadAllAssays()", async () => {
     const assay = makeAssay();
@@ -134,6 +151,20 @@ describe("hydrateAssay", () => {
       hydrated.trials[0].runs.map(r => r.runId),
       [runEarlier.runId, runLater.runId]
     );
+  });
+
+  test("orders runs by runSeq before startedAt, so a backward clock step can't swap them", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+    const trial = makeTrial();
+    await saveTrial(assay.assayId, trial);
+    const first  = makeRun({ runId: uid("z-run"), runSeq: 0, startedAt: 2_000 });
+    const second = makeRun({ runId: uid("a-run"), runSeq: 1, startedAt: 1_000 });  // clock stepped back
+    await saveRun(assay.assayId, trial.trialId, second);
+    await saveRun(assay.assayId, trial.trialId, first);
+
+    const hydrated = await hydrateAssay(assay.assayId);
+    assert.deepEqual(hydrated.trials[0].runs.map(r => r.runId), [first.runId, second.runId]);
   });
 
   test("returns trials sorted by trialIndex, not primary-key (trialId) order", async () => {
@@ -421,6 +452,66 @@ describe("exportAllDataAsJSON / importAllDataFromJSON", () => {
       runs:   []
     });
     assert.equal(counts.trials, 1);
+  });
+
+  test("keeps newer records already on this device and never re-activates a finished trial", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+    const t0 = Date.now() - 60_000;
+    const trial = makeTrial({ status: "completed", startedAt: t0, endedAt: t0 + 30_000 });
+    await saveTrial(assay.assayId, trial);
+    const run = makeRun({ status: "completed", values: [1, 1, 1], startedAt: t0, endedAt: t0 + 20_000 });
+    await saveRun(assay.assayId, trial.trialId, run);
+
+    // An older backup taken mid-trial: trial and run still "active".
+    const counts = await importAllDataFromJSON({
+      assays: [],
+      trials: [{ ...trial, assayId: assay.assayId, status: "active", endedAt: null, runs: undefined }],
+      runs:   [{ ...run, trialId: trial.trialId, status: "active", values: [1], endedAt: null }]
+    });
+    assert.equal(counts.trials, 0);
+    assert.equal(counts.runs, 0);
+    assert.equal(counts.keptNewer, 2);
+
+    const hydrated = await hydrateAssay(assay.assayId);
+    assert.equal(hydrated.trials[0].status, "completed");
+    assert.deepEqual(hydrated.trials[0].runs[0].values, [1, 1, 1]);
+  });
+
+  test("replaces an older local copy with the backup's newer one", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+    const trial = makeTrial({ status: "completed", endedAt: Date.now() });
+    await saveTrial(assay.assayId, trial);
+    const run = makeRun({ status: "completed", eligibleForAnalysis: true, endedAt: Date.now() - 1000 });
+    await saveRun(assay.assayId, trial.trialId, run);
+
+    const overridden = { ...run, trialId: trial.trialId, eligibleForAnalysis: false, overrideAt: Date.now() + 1000 };
+    const counts = await importAllDataFromJSON({ assays: [], trials: [], runs: [overridden] });
+    assert.equal(counts.runs, 1);
+    assert.equal(counts.keptNewer, 0);
+
+    const hydrated = await hydrateAssay(assay.assayId);
+    assert.equal(hydrated.trials[0].runs[0].eligibleForAnalysis, false);
+  });
+
+  test("renumbers trials that end up sharing a trialIndex", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+    const t0 = Date.now();
+    const local = makeTrial({ trialIndex: 1, status: "completed", startedAt: t0, endedAt: t0 + 10 });
+    const localSecond = makeTrial({ trialIndex: 2, status: "completed", startedAt: t0 + 20, endedAt: t0 + 30 });
+    await saveTrial(assay.assayId, local);
+    await saveTrial(assay.assayId, localSecond);
+
+    // Another device's "Trial 2" for the same assay, started later.
+    const other = { ...makeTrial({ trialIndex: 2, status: "completed", startedAt: t0 + 40, endedAt: t0 + 50 }), assayId: assay.assayId };
+    delete other.runs;
+    await importAllDataFromJSON({ assays: [], trials: [other], runs: [] });
+
+    const hydrated = await hydrateAssay(assay.assayId);
+    assert.deepEqual(hydrated.trials.map(t => t.trialIndex), [1, 2, 3]);
+    assert.deepEqual(hydrated.trials.map(t => t.trialId), [local.trialId, localSecond.trialId, other.trialId]);
   });
 
   test("upserts records from a valid backup without touching unrelated existing data", async () => {

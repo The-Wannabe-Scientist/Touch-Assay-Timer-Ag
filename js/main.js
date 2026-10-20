@@ -46,7 +46,8 @@ import {
   saveAssay, loadAllAssays, hydrateAssay, deleteAssay,
   saveTrial, markTrialCompleted, markTrialAbandoned,
   saveRun, abandonAllActiveTrialsInDB, markOrphanRunsStopped, getIdbAvailable,
-  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON, isWellFormedAssay
+  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON, isWellFormedAssay,
+  consumeDbRecreated
 }                                                      from "./db.js";
 import {
   isAudioReady, setVoiceMode, getVoiceMode, loadVoices, speak, stopSpeech,
@@ -815,8 +816,25 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   async function runStartupCleanup() {
     await recoverCrashGuard();
-    await abandonAllActiveTrialsInDB();
-    await markOrphanRunsStopped();
+    // An "active" trial or run is a leftover only if no other tab is open:
+    // a second tab's would be live, and abandoning it would cut its trial
+    // short. Each tab holds a shared lock for its lifetime, so the exclusive
+    // ifAvailable request is granted only to a tab that is alone.
+    if (!navigator.locks?.request) {
+      await abandonAllActiveTrialsInDB();
+      await markOrphanRunsStopped();
+      return;
+    }
+    try {
+      await navigator.locks.request("touch-assay-live", { ifAvailable: true }, async lock => {
+        if (!lock) return;
+        await abandonAllActiveTrialsInDB();
+        await markOrphanRunsStopped();
+      });
+    } finally {
+      navigator.locks.request("touch-assay-live", { mode: "shared" }, () => new Promise(() => {}))
+        .catch(() => { /* lock manager unavailable — cleanup already ran or was skipped */ });
+    }
   }
 
   Promise.allSettled([
@@ -1098,6 +1116,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       await flushUnsavedRuns();
       if (!currentAssay) return;
     }
+    await repersistIfWiped();
+    if (!currentAssay) return;
 
     const activeTrial = getActiveTrial(currentAssay);
     if (!activeTrial) return;
@@ -1135,6 +1155,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       animalIndex,
       expectedStimCount: currentAssay.stimCount
     });
+    // Start order within the trial, independent of the wall clock — hydrate
+    // sorts by it, so a clock step can't swap a failed attempt and its retry.
+    run.runSeq = activeTrial.runs.length;
 
     activeTrial.runs.push(run);
     try {
@@ -1648,6 +1671,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     }
 
+    if (saved) await repersistIfWiped();
+
     // Update last-modified timestamp so metadata exports reflect the latest activity
     currentAssay.lastModifiedAt = Date.now();
     saveAssay(currentAssay).catch(err => console.error("Failed to update assay metadata:", err));
@@ -1680,6 +1705,32 @@ document.addEventListener("DOMContentLoaded", async () => {
         "error",
         12000
       );
+    }
+  }
+
+  /**
+   * If the browser wiped the database while the app was open (site data
+   * cleared, eviction), saves the assay still held in memory again — every
+   * trial and run — and tells the user. Without this the next save writes
+   * into an empty database: the run looks saved, but Finish Trial can't find
+   * its trial and the trial's earlier runs are gone.
+   */
+  async function repersistIfWiped() {
+    if (!(await consumeDbRecreated()) || !currentAssay) return;
+    const assay = currentAssay;
+    try {
+      await saveAssay(assay);
+      for (const t of assay.trials) {
+        await saveTrial(assay.assayId, t);
+        for (const r of t.runs) await saveRun(assay.assayId, t.trialId, r);
+      }
+      showToast(
+        "Browser storage was cleared while the app was open. The data still in memory has been saved again — export a backup now.",
+        "warning", 12000
+      );
+    } catch (err) {
+      console.error("Re-saving after a storage wipe failed:", err);
+      showToast("Browser storage was cleared while the app was open, and saving it again failed. Export your data now.", "error", 0);
     }
   }
 
@@ -4753,6 +4804,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // found in IDB (e.g. a first-launch write was dropped on mobile). Without this
       // try/catch the promise rejection is unhandled, leaving the UI frozen on the
       // assay screen with no error feedback to the experimenter.
+      await repersistIfWiped();
       try {
         if (activeTrial.runs.length === 0) {
           await markTrialAbandoned(currentAssay.assayId, activeTrial.trialId, "No runs recorded");
@@ -5043,8 +5095,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       const confirmed = await showConfirmModal(
         "Import backup?",
         `This file contains ${data.assays.length} assay(s), ${data.trials.length} trial(s), and ` +
-        `${data.runs.length} run(s). Importing will add/update matching records on this device — ` +
-        `nothing already here will be deleted. Continue?`,
+        `${data.runs.length} run(s). Importing adds records that aren't on this device and updates ` +
+        `older copies of ones that are — newer records already here are kept, and nothing is deleted. Continue?`,
         "Import",
         "primary"
       );
@@ -5053,8 +5105,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       try {
         const counts = await importAllDataFromJSON(data);
         showToast(
-          `Backup imported: ${counts.assays} assay(s), ${counts.trials} trial(s), ${counts.runs} run(s).`,
-          "success", 4000
+          `Backup imported: ${counts.assays} assay(s), ${counts.trials} trial(s), ${counts.runs} run(s).` +
+          (counts.keptNewer > 0
+            ? ` ${counts.keptNewer} record(s) on this device were newer and were kept.`
+            : ""),
+          "success", counts.keptNewer > 0 ? 7000 : 4000
         );
         // The Export screen can be underneath (Saved Assays opens over it).
         // Its assay and dataset list are an in-memory snapshot from before
