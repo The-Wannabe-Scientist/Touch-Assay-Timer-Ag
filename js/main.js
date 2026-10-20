@@ -4215,7 +4215,9 @@ document.addEventListener("DOMContentLoaded", async () => {
          !UI.Screens.settings.hidden    || !UI.Screens.guidelines.hidden
       || !UI.Screens.savedAssays.hidden || !UI.Screens.assayDefaults.hidden
       || !UI.Displays.previewModal.hidden
-      || document.querySelector(".modal-overlay") !== null;
+      // showConfirmModal()'s dialogs. :not([hidden]) because #previewModal
+      // carries the same class permanently and is only hidden.
+      || document.querySelector(".modal-overlay:not([hidden])") !== null;
     if (overlayOrModalOpen && currentState !== STATES.RUNNING && event.key !== "Escape") return;
 
     // Prevent Space from scrolling the page while on the trial screen,
@@ -4882,7 +4884,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         const go = await showConfirmModal(
           "Leave this trial?",
           `It will be marked abandoned and can't take any more runs. Its ${runCount} run${runCount !== 1 ? "s are" : " is"} ` +
-          `kept, but the default export (completed trials only) leaves them out. To keep them in, use Finish Trial instead.`,
+          `kept, but the default export (completed trials only) leaves ${runCount !== 1 ? "them" : "it"} out. ` +
+          `To keep ${runCount !== 1 ? "them" : "it"} in, use Finish Trial instead.`,
           "Leave Trial"
         );
         // Re-check: the state can change while the dialog is open.
