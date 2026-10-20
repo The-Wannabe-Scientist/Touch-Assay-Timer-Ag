@@ -420,6 +420,20 @@ let warmupToken = 0;
 let isFinishingTrial = false;
 
 /**
+ * True while Begin Assay is writing the new assay and its first trial, so a
+ * second submit can't create a duplicate assay.
+ * @type {boolean}
+ */
+let isCreatingAssay = false;
+
+/**
+ * True while a Start New Trial (Export screen or Saved Assays) is writing,
+ * so a double activation can't create two new trials.
+ * @type {boolean}
+ */
+let isStartingTrial = false;
+
+/**
  * Completed runs whose final IDB save failed. They exist only in memory, and
  * finishing the trial re-reads it from IDB, so they would be dropped from the
  * export. flushUnsavedRuns() retries them before the next run starts and
@@ -3676,6 +3690,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
 
     currentAssay = null;
+    updateProgressBadge();  // hides it: no assay, so no count to show
     UI.Forms.setup.reset();
     UI.Inputs.assayName.value     = generateAutoID();
     UI.Displays.binWarning.hidden = true;
@@ -3967,21 +3982,46 @@ document.addEventListener("DOMContentLoaded", async () => {
       validation.warnings.forEach(w => showToast(w, "warning", 7000));
     }
 
-    // Create and persist the assay and its first trial
-    currentAssay = createAssay(setupValues);
-    await saveAssay(currentAssay);
+    // A second Begin while the writes below are in flight would create a
+    // duplicate assay.
+    if (isCreatingAssay) return;
+    isCreatingAssay = true;
+    try {
+      // Create and persist the assay and its first trial. currentAssay is
+      // only set once both are stored, so a failed write leaves the Setup
+      // screen as it was, ready to try again.
+      const assay = createAssay(setupValues);
+      const firstTrial = createTrial(1);
+      try {
+        await saveAssay(assay);
+      } catch (err) {
+        console.error("Begin Assay: could not save the assay:", err);
+        showToast("Could not save the new assay (storage error). Please try again.", "error", 6000);
+        return;
+      }
+      try {
+        await saveTrial(assay.assayId, firstTrial);
+      } catch (err) {
+        console.error("Begin Assay: could not save its first trial:", err);
+        // Don't leave an assay with no trial behind in Saved Assays.
+        deleteAssay(assay.assayId).catch(() => {});
+        showToast("Could not save the new assay (storage error). Please try again.", "error", 6000);
+        return;
+      }
+      assay.trials.push(firstTrial);
+      currentAssay = assay;
 
-    const firstTrial = createTrial(1);
-    currentAssay.trials.push(firstTrial);
-    await saveTrial(currentAssay.assayId, firstTrial);
+      // Clear the draft now that the assay has been saved
+      clearSetupDraft();
 
-    // Clear the draft now that the assay has been saved
-    clearSetupDraft();
-
-    populateGenotypeSelect(setupValues.genotypes);
-    updateProgressTable();
-    applyProgressVisibilityPreference();
-    setState(STATES.CONFIGURED);
+      populateGenotypeSelect(setupValues.genotypes);
+      updateProgressTable();
+      updateProgressBadge();
+      applyProgressVisibilityPreference();
+      setState(STATES.CONFIGURED);
+    } finally {
+      isCreatingAssay = false;
+    }
   });
 
   // ── Bin warning live update ─────────────────────────────────────────────
@@ -4654,25 +4694,93 @@ document.addEventListener("DOMContentLoaded", async () => {
     // guard against currentAssay being null — rapid navigation or state
     // corruption could leave it null, causing .assayId to throw TypeError.
     if (!currentAssay) return;
-    // Re-hydrate from IDB so trialIndex is always correct, even if the user has
-    // looped through export → backToAssay multiple times, and to pick up any
-    // run records written since the last hydrateAssay() call.
-    currentAssay = await hydrateAssay(currentAssay.assayId);
-    const trial = createTrial(currentAssay.trials.length + 1);
-    currentAssay.trials.push(trial);
-    await saveTrial(currentAssay.assayId, trial);  // await: run start must not race DB write
-    populateGenotypeSelect(currentAssay.genotypes);
-    updateProgressTable();
-    // POISED (not CONFIGURED): this assay already exists; Finish Trial must be
-    // immediately available in case the experimenter only needs one run.
-    setState(STATES.POISED);
+    // A double activation would create two new trials.
+    if (isStartingTrial) return;
+    isStartingTrial = true;
+    try {
+      // Re-hydrate from IDB so trialIndex is always correct, even if the user has
+      // looped through export → backToAssay multiple times, and to pick up any
+      // run records written since the last hydrateAssay() call.
+      let assay;
+      try {
+        assay = await hydrateAssay(currentAssay.assayId);
+      } catch (err) {
+        // e.g. the assay was deleted in another tab. Stay on the Export
+        // screen: its in-memory copy can still be exported.
+        console.error("Start New Trial: could not re-read the assay:", err);
+        showToast("This assay could not be loaded from storage, so no new trial was started.", "error", 6000);
+        return;
+      }
+
+      try {
+        // A trial can still be active here (a reload whose startup cleanup
+        // didn't run, or an older build's header-logo exit). Close it, as the
+        // Saved Assays "Start New Trial" does, or new runs would be recorded
+        // into it instead of the new trial.
+        const reason = "Started new trial from export screen";
+        for (const stale of assay.trials.filter(t => t.status === "active")) {
+          await markTrialAbandoned(assay.assayId, stale.trialId, reason);
+          abandonTrial(stale, reason);
+        }
+
+        const trial = createTrial(assay.trials.length + 1);
+        await saveTrial(assay.assayId, trial);  // await: run start must not race DB write
+        assay.trials.push(trial);
+      } catch (err) {
+        console.error("Start New Trial: storage write failed:", err);
+        showToast("Could not start a new trial (storage error). Please try again.", "error", 6000);
+        return;
+      }
+
+      currentAssay = assay;
+      populateGenotypeSelect(currentAssay.genotypes);
+      updateProgressTable();
+      updateProgressBadge();
+      // POISED (not CONFIGURED): this assay already exists; Finish Trial must be
+      // immediately available in case the experimenter only needs one run.
+      setState(STATES.POISED);
+    } finally {
+      isStartingTrial = false;
+    }
   });
 
 
   // ── Header home (logo / title) → back to setup ─────────────────────────
-  UI.Buttons.headerHome.addEventListener("click", () => {
-    // Do not navigate away while a run is actively recording data
-    if (currentState === STATES.RUNNING) return;
+  UI.Buttons.headerHome.addEventListener("click", async () => {
+    // Do not navigate away while a run is recording, its warmup is counting
+    // down, or a trial is being finished.
+    if (currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) return;
+
+    // Nothing can resume or finish the trial in progress once the assay
+    // screen is left, so close it here, explicitly, rather than leaving it
+    // "active" for a later cleanup to abandon without a word.
+    const onAssayScreen = currentState === STATES.CONFIGURED || currentState === STATES.POISED;
+    const active = onAssayScreen ? getActiveTrial(currentAssay) : null;
+    if (active) {
+      const runCount = active.runs.length;
+      if (runCount > 0) {
+        const go = await showConfirmModal(
+          "Leave this trial?",
+          `It will be marked abandoned and can't take any more runs. Its ${runCount} run${runCount !== 1 ? "s are" : " is"} ` +
+          `kept, but the default export (completed trials only) leaves them out. To keep them in, use Finish Trial instead.`,
+          "Leave Trial"
+        );
+        // Re-check: the state can change while the dialog is open.
+        if (!go || currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) return;
+        // A run whose final save failed is retried before the trial closes,
+        // so the abandoned trial at least holds it.
+        if (unsavedRuns.length > 0) await flushUnsavedRuns();
+      }
+      const reason = runCount > 0 ? "Left the trial from the header" : "No runs recorded";
+      try {
+        await markTrialAbandoned(currentAssay.assayId, active.trialId, reason);
+        abandonTrial(active, reason);
+      } catch (err) {
+        console.error("Header home: could not close the trial:", err);
+        showToast("Could not close the trial (storage error). Use Finish Trial, or try again.", "error", 6000);
+        return;
+      }
+    }
     resetToSetup();
   });
 
@@ -4932,48 +5040,55 @@ document.addEventListener("DOMContentLoaded", async () => {
     const assayId = btn.dataset.assayId;
 
     if (action === "start") {
-      let assay;
+      // A double activation would create two new trials.
+      if (isStartingTrial) return;
+      isStartingTrial = true;
       try {
-        assay = await hydrateAssay(assayId);
-      } catch (err) {
-        reportUnloadableAssay(err);
-        return;
-      }
-
-      // Nothing below touches currentAssay until every write has succeeded,
-      // so a failure leaves whatever screen is underneath consistent.
-      try {
-        // Close every trial still active (one is left behind if a reload's
-        // startup cleanup didn't run), so the new trial is the only one.
-        const reason = "Started new trial from saved assays";
-        for (const stale of assay.trials.filter(t => t.status === "active")) {
-          await markTrialAbandoned(assay.assayId, stale.trialId, reason);
-          // Mirror the write in memory, or getActiveTrial() would still find
-          // this trial and shadow the new one created below.
-          abandonTrial(stale, reason);
+        let assay;
+        try {
+          assay = await hydrateAssay(assayId);
+        } catch (err) {
+          reportUnloadableAssay(err);
+          return;
         }
 
-        const newTrial = createTrial(assay.trials.length + 1);
-        await saveTrial(assay.assayId, newTrial);
-        assay.trials.push(newTrial);
-      } catch (err) {
-        console.error("Saved Assays: could not start a new trial:", err);
-        showToast("Could not start a new trial (storage error). Please try again.", "error", 5000);
-        return;
+        // Nothing below touches currentAssay until every write has succeeded,
+        // so a failure leaves whatever screen is underneath consistent.
+        try {
+          // Close every trial still active (one is left behind if a reload's
+          // startup cleanup didn't run), so the new trial is the only one.
+          const reason = "Started new trial from saved assays";
+          for (const stale of assay.trials.filter(t => t.status === "active")) {
+            await markTrialAbandoned(assay.assayId, stale.trialId, reason);
+            // Mirror the write in memory, or getActiveTrial() would still find
+            // this trial and shadow the new one created below.
+            abandonTrial(stale, reason);
+          }
+
+          const newTrial = createTrial(assay.trials.length + 1);
+          await saveTrial(assay.assayId, newTrial);
+          assay.trials.push(newTrial);
+        } catch (err) {
+          console.error("Saved Assays: could not start a new trial:", err);
+          showToast("Could not start a new trial (storage error). Please try again.", "error", 5000);
+          return;
+        }
+
+        currentAssay = assay;
+        // Built only now that the new trial is the active one, so the picker's
+        // per-genotype counts are the new trial's, not the abandoned one's.
+        populateGenotypeSelect(currentAssay.genotypes);
+
+        // Initialize progress table for the new trial and apply visibility preference
+        updateProgressTable();
+        updateProgressBadge();
+        applyProgressVisibilityPreference();
+
+        hideScreenAndRestore(UI.Screens.savedAssays);
+        setState(STATES.POISED);
+      } finally {
+        isStartingTrial = false;
       }
-
-      currentAssay = assay;
-      // Built only now that the new trial is the active one, so the picker's
-      // per-genotype counts are the new trial's, not the abandoned one's.
-      populateGenotypeSelect(currentAssay.genotypes);
-
-      // Initialize progress table for the new trial and apply visibility preference
-      updateProgressTable();
-      updateProgressBadge();
-      applyProgressVisibilityPreference();
-
-      hideScreenAndRestore(UI.Screens.savedAssays);
-      setState(STATES.POISED);
 
     } else if (action === "preview") {
       // Quick preview without leaving the saved-assays list. Side-effect
