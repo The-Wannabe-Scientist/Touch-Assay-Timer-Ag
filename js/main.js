@@ -792,10 +792,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         await navigator.serviceWorker.ready;
       }
       const names = await caches.keys();
-      // Mirrors CACHE_NAME's prefix in service-worker.js. Falls back to
-      // whatever's there if the prefix ever changes, rather than showing
-      // nothing; there should only ever be one cache for this origin.
-      const current = names.find(n => n.startsWith("touch-assay-cache-")) ?? names[0];
+      // Mirrors CACHE_PREFIX in service-worker.js. Other apps on a shared
+      // origin can have caches too, so never fall back to one of theirs.
+      const current = names.find(n => n.startsWith("touch-assay-cache-"));
       if (current) UI.Displays.swVersionFooter.textContent = current;
     } catch {
       // Cache API / service worker unavailable in this context — leave the
