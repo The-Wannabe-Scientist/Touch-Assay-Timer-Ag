@@ -37,7 +37,7 @@
  */
 
 
-import { validateInputs, generateAutoID, binRunValues, escapeHTML, formatDateTime, summarizeTrialRunsByGenotype, isRunEligible } from "./utils.js";  // escapeHTML is shared from utils.js
+import { validateInputs, generateAutoID, binRunValues, escapeHTML, formatDateTime, summarizeTrialRunsByGenotype, isRunEligible, collectPooledRuns } from "./utils.js";  // escapeHTML is shared from utils.js
 import {
   createAssay, createTrial, createRun,
   getActiveTrial, completeRun, abandonTrial
@@ -2766,6 +2766,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   function closeGenotypeOverlay() {
     UI.Inputs.genotypeOverlay.hidden = true;
     UI.Inputs.genotypeTrigger.setAttribute("aria-expanded", "false");
+    // Clear the dropdown geometry positionGenotypePanel() set while wide, or
+    // a later narrow (bottom-sheet) open inherits it and comes out shrunk.
+    const p = UI.Inputs.genotypeListbox.style;
+    p.width = p.left = p.top = p.maxHeight = "";
   }
 
   /**
@@ -3036,6 +3040,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateProgressTable();
     refreshGenotypeDropdownCounts();
     updateProgressBadge();
+    // The eligible-run count drives the next animal index; keep the tap
+    // label in step. Not while the "Tap again" prompt or the countdown owns
+    // the label — those paths recompute it themselves.
+    if (!pendingStart && !isWarmingUp) restoreStartLabel();
     showToast(`Run manually marked ${newEligible ? "eligible" : "ineligible"}.`, "info", 3000);
   }
 
@@ -3058,6 +3066,33 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
     }
   }
+
+  /**
+   * Whether any completed trial has runs — i.e. whether the default
+   * "Pooled (completed trials only)" selection holds any data.
+   * @param {Object} assay
+   * @returns {boolean}
+   */
+  function hasCompletedRuns(assay) {
+    return assay.trials.some(t => t.status === "completed" && t.runs.length > 0);
+  }
+
+  /**
+   * Whether the selected datasets contain at least one run, so Export,
+   * CSV and Preview can refuse a selection that would produce no data.
+   * @param {Object}   assay
+   * @param {Object[]} configs - From getExportConfigs().
+   * @returns {boolean}
+   */
+  function selectionHasRuns(assay, configs) {
+    return configs.some(c => c.type === "trial"
+      ? (assay.trials.find(t => String(t.trialId) === String(c.trialId))?.runs.length ?? 0) > 0
+      : collectPooledRuns(assay, { includeAbandoned: c.includeAbandoned }).length > 0);
+  }
+
+  /** Toast shown when the selected datasets hold no runs. */
+  const NO_RUNS_SELECTED_MSG =
+    "The selected datasets contain no runs. Tick an abandoned or unfinished trial, or 'Pooled (all trials…)'.";
 
   /**
    * Populates the export dataset list with checkboxes for each trial and
@@ -3083,6 +3118,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     assay.trials.forEach(trial => {
       const isCompleted = trial.status === "completed";
       const isAbandoned = trial.status === "abandoned";
+      // Still in progress (e.g. left via the header logo, or restored from
+      // a backup): its runs are partial, so say so rather than look finished.
+      const isActive    = trial.status === "active";
       const total       = trial.runs.length;
       const eligible    = trial.runs.filter(r => r.eligibleForAnalysis).length;
 
@@ -3105,22 +3143,26 @@ document.addEventListener("DOMContentLoaded", async () => {
       html +=
         `<label>` +
         `<input type="checkbox" data-dataset-type="trial" data-trial-id="${escapeHTML(String(trial.trialId))}"` +
-        ` aria-label="Trial ${Number(trial.trialIndex)}, ${eligible} eligible of ${total} total${isAbandoned ? ', abandoned' : ''}"` +
+        ` aria-label="Trial ${Number(trial.trialIndex)}, ${eligible} eligible of ${total} total${isAbandoned ? ', abandoned' : ''}${isActive ? ', not finished' : ''}"` +
         ` ${isCompleted ? "checked" : ""}>` +
         ` Trial ${Number(trial.trialIndex)}` +
         ` — ${eligibleDisplay} eligible (${total} total)` +
         (genotypeSummary ? ` &middot; ${genotypeSummary}` : "") +
         (isAbandoned ? " <em>(abandoned)</em>" : "") +
+        (isActive ? " <em>(not finished)</em>" : "") +
         `</label>`;
     });
 
+    // Tick the completed-trials pool only when it holds runs — ticked over
+    // an empty pool, Export would write a workbook with no data in it.
     html +=
       `<label><input type="checkbox" data-dataset-type="pooled" ` +
-      `data-include-abandoned="false" checked> Pooled (completed trials only)</label>`;
+      `data-include-abandoned="false" ${hasCompletedRuns(assay) ? "checked" : ""}> Pooled (completed trials only)</label>`;
 
+    // includeAbandoned pools every trial, unfinished ones included.
     html +=
       `<label><input type="checkbox" data-dataset-type="pooled" ` +
-      `data-include-abandoned="true"> Pooled (include abandoned)</label>`;
+      `data-include-abandoned="true"> Pooled (all trials, incl. abandoned / unfinished)</label>`;
 
     // Single assignment — all trial rows are parsed in one pass
     container.innerHTML = html;
@@ -3212,6 +3254,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   async function populateSavedAssaysList() {
     dismissBulkDeleteConfirm();
+    // Reset the bulk-selection controls before any exit path — the error and
+    // empty-list branches return early, and would otherwise leave Delete
+    // Selected enabled for rows that are gone.
+    UI.Buttons.deleteSelectedAssays.disabled  = true;
+    UI.Inputs.selectAllAssays.checked         = false;
+    UI.Inputs.selectAllAssays.indeterminate   = false;
     // Show a loading indicator while IDB is read
     UI.Displays.savedAssaysList.innerHTML = `<p class="saved-assays-loading">Loading\u2026</p>`;
 
@@ -3310,9 +3358,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     UI.Displays.savedAssaysList.innerHTML = html;
-    UI.Buttons.deleteSelectedAssays.disabled  = true;
-    UI.Inputs.selectAllAssays.checked         = false;
-    UI.Inputs.selectAllAssays.indeterminate   = false;  // clear indeterminate on every rebuild
 
     // Charts are filled in progressively after the list itself is already
     // interactive — each one needs a full hydrate + pooled-binning pass,
@@ -3488,6 +3533,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (yMin === yMax) { yMin -= 1; yMax += 1; }  // guard perfectly flat data
 
     const numBins = Math.max(...genotypes.map(g => seriesByGenotype[g].bins.length));
+    // A mini sparkline has no point markers, and a one-point polyline paints
+    // nothing; return no chart so the caller doesn't reserve space for it.
+    if (mini && numBins <= 1) return "";
     const xFor = i => numBins <= 1 ? width / 2 : padL + (i / (numBins - 1)) * (width - padL - padR);
     const yFor = v => height - padB - ((v - yMin) / (yMax - yMin)) * (height - padT - padB);
 
@@ -3995,17 +4043,23 @@ document.addEventListener("DOMContentLoaded", async () => {
       // removeEventListener moved into cleanup() so it fires on
       // every close path (OK, Cancel, backdrop, Escape) — not just Escape.
       const cleanup = result => {
-        document.removeEventListener("keydown", onKey);
+        window.removeEventListener("keydown", onKey, true);
         document.body.removeChild(overlay);
         resolve(result);
       };
       overlay.querySelector("[data-modal-ok]").addEventListener("click",     () => cleanup(true));
       overlay.querySelector("[data-modal-cancel]").addEventListener("click", () => cleanup(false));
       overlay.addEventListener("click", e => { if (e.target === overlay) cleanup(false); });
+      // Capture phase on window runs before every document listener, so this
+      // Escape closes only the dialog — not also the Saved Assays/Settings
+      // screen beneath it (main handler) or a toast (toast.js).
       const onKey = e => {
-        if (e.key === "Escape") cleanup(false);
+        if (e.key !== "Escape") return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        cleanup(false);
       };
-      document.addEventListener("keydown", onKey);
+      window.addEventListener("keydown", onKey, true);
     });
   }
 
@@ -4713,6 +4767,12 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   let testRigInterval = null;
 
+  /** True while startTestRig() is awaiting the AudioContext resume. */
+  let testRigStarting = false;
+
+  /** Bumped by stopTestRig() so a start still awaiting warmUpAudio() gives up. */
+  let testRigStartToken = 0;
+
   /**
    * Starts a 1 Hz loop that plays a tick tone, flashes a visual indicator,
    * and (if the armband is connected) sends a test haptic pulse — all in
@@ -4723,7 +4783,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Writes nothing to IDB and requires no assay/genotype selection.
    */
   async function startTestRig() {
-    if (testRigInterval !== null) return;  // already running
+    if (testRigInterval !== null || testRigStarting) return;  // running or starting
 
     if (currentState === STATES.RUNNING) {
       showToast("Stop the current run before using the Test Rig.", "info", 3000);
@@ -4732,6 +4792,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Test Rig is started by a real user gesture (button click), so this is a
     // valid place to resume the AudioContext if it isn't already.
+    const token = ++testRigStartToken;
+    testRigStarting = true;
     try {
       await warmUpAudio();
     } catch {
@@ -4741,7 +4803,16 @@ document.addEventListener("DOMContentLoaded", async () => {
         5000
       );
       return;
+    } finally {
+      testRigStarting = false;
     }
+
+    // Anything may have changed during that await: a Stop click, Settings
+    // closed, the page hidden, or a run started. Starting anyway would leave
+    // a loop running that nothing stops.
+    if (token !== testRigStartToken || testRigInterval !== null ||
+        UI.Screens.settings.hidden || document.visibilityState === "hidden" ||
+        currentState === STATES.RUNNING) return;
 
     const pulse = () => {
       playTick();
@@ -4766,6 +4837,8 @@ document.addEventListener("DOMContentLoaded", async () => {
    * run-start paths without checking state first.
    */
   function stopTestRig() {
+    testRigStartToken++;       // cancel a start still awaiting warmUpAudio()
+    testRigStarting = false;
     if (testRigInterval === null) return;
     clearInterval(testRigInterval);
     testRigInterval = null;
@@ -4780,7 +4853,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (UI.Buttons.testRigBtn) {
     UI.Buttons.testRigBtn.addEventListener("click", () => {
-      if (testRigInterval === null) startTestRig();
+      // A second click while the first is still starting cancels it.
+      if (testRigInterval === null && !testRigStarting) startTestRig();
       else stopTestRig();
     });
   }
@@ -5073,7 +5147,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (UI.Buttons.exportBackup) {
     UI.Buttons.exportBackup.addEventListener("click", async () => {
       const btn = UI.Buttons.exportBackup;
-      const original = btn.textContent;
       try {
         btn.disabled = true;
         const data = await exportAllDataAsJSON();
@@ -5098,7 +5171,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         showToast("Backup export failed: " + err.message, "error", 6000);
       } finally {
         btn.disabled = false;
-        btn.textContent = original;
       }
     });
   }
@@ -5204,10 +5276,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Reposition (or switch dropdown<->sheet mode) if the viewport crosses the
-  // wide/narrow breakpoint while the app is open — e.g. a tablet rotation —
-  // and re-render so pills<->trigger mode stays correct for the new width.
+  // If the viewport crosses the wide/narrow breakpoint while the app is open
+  // — e.g. a tablet rotation — close the panel (the next open picks the mode
+  // for the new width) and re-render so pills<->trigger mode stays correct.
   GENOTYPE_WIDE_MQ.addEventListener("change", () => {
+    closeGenotypeOverlay();
     if (currentAssay) renderGenotypePicker(currentAssay.genotypes);
   });
   window.addEventListener("resize", () => {
@@ -5344,7 +5417,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         return;
       }
       // The same defaults populateExportDatasetList() ticks: every completed
-      // trial, plus pooled (completed trials only).
+      // trial, plus pooled (completed trials only) when that pool has runs.
+      if (!hasCompletedRuns(assay)) {
+        showToast("No completed trials to preview. Open Export and tick the abandoned or unfinished trial, or 'Pooled (all trials…)'.", "info", 6000);
+        return;
+      }
       const configs = [
         ...assay.trials
           .filter(t => t.status === "completed")
@@ -5846,14 +5923,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function runWithSpinner(btn, label, fn) {
-    const original = btn.textContent;
+    // Keep the child nodes, not just the text: these buttons carry an SVG
+    // icon that a textContent round-trip would strip for good.
+    const originalNodes = Array.from(btn.childNodes, n => n.cloneNode(true));
     btn.textContent = label;
     btn.classList.add("btn-loading");
     try {
       await new Promise(r => setTimeout(r, 0));  // yield one frame
       await fn();
     } finally {
-      btn.textContent = original;
+      btn.replaceChildren(...originalNodes);
       btn.classList.remove("btn-loading");
     }
   }
@@ -5866,6 +5945,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       showToast("Please select a dataset.", "info", 3000);
       return;
     }
+    if (!selectionHasRuns(currentAssay, configs)) {
+      showToast(NO_RUNS_SELECTED_MSG, "info", 5000);
+      return;
+    }
     exportExcelWithFallback(UI.Buttons.exportExcel, currentAssay, configs, getExportOptions());
   });
 
@@ -5876,6 +5959,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       const configs = getExportConfigs();
       if (configs.length === 0) {
         showToast("Please select a dataset.", "info", 3000);
+        return;
+      }
+      if (!selectionHasRuns(currentAssay, configs)) {
+        showToast(NO_RUNS_SELECTED_MSG, "info", 5000);
         return;
       }
       runWithSpinner(UI.Buttons.exportCSV, "Exporting…", () => {
@@ -5891,6 +5978,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     const configs = getExportConfigs();
     if (configs.length === 0) {
       showToast("Please select a dataset to preview.", "info", 3000);
+      return;
+    }
+    if (!selectionHasRuns(currentAssay, configs)) {
+      showToast(NO_RUNS_SELECTED_MSG, "info", 5000);
       return;
     }
 
