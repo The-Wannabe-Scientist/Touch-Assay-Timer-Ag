@@ -836,6 +836,13 @@ document.addEventListener("DOMContentLoaded", async () => {
         // it was showing.
         UI.Displays.overflowMenu.hidden = true;
         UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
+        // Don't carry focus from a run-details override box into the run:
+        // its controls are inert while running (see styles.css), and Space
+        // must reach the tap handler.
+        if (document.activeElement instanceof HTMLElement &&
+            document.activeElement.closest("#assayProgress")) {
+          document.activeElement.blur();
+        }
         // The "do not leave" beforeunload dialog is handled by the event listener
         // registered below — no additional setup is needed here.
         break;
@@ -3978,6 +3985,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     // assay-screen handling below swallows every space and treats it as a tap,
     // which arms and starts a run. Escape still falls through so double-Escape
     // stop and warmup cancel keep working.
+    //
+    // Not during a run, though: then Space is the experimenter scoring the
+    // animal. If focus was left in such a field, every press would type a
+    // space instead of recording a tap, and each missed window would be
+    // stored as a response. Letter keys still reach the field.
     const focused = document.activeElement;
     const isTextEntry = focused instanceof HTMLElement && (
       focused.isContentEditable ||
@@ -3985,7 +3997,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       (focused.tagName === "INPUT" &&
         !/^(button|checkbox|radio|range|submit|reset|file|color)$/i.test(focused.type))
     );
-    if (isTextEntry && event.key !== "Escape") return;
+    if (isTextEntry && event.key !== "Escape" && currentState !== STATES.RUNNING) return;
+
+    // Outside a run, an open overlay screen, preview or confirm dialog owns
+    // Space and Enter (its own toggles and buttons). Without this, the
+    // assay-screen handling below blocks them there and Space arms and
+    // starts a run hidden behind the overlay. Escape still falls through so
+    // it can close the overlay. During a run Space must keep tapping.
+    const overlayOrModalOpen =
+         !UI.Screens.settings.hidden    || !UI.Screens.guidelines.hidden
+      || !UI.Screens.savedAssays.hidden || !UI.Screens.assayDefaults.hidden
+      || !UI.Displays.previewModal.hidden
+      || document.querySelector(".modal-overlay") !== null;
+    if (overlayOrModalOpen && currentState !== STATES.RUNNING && event.key !== "Escape") return;
 
     // Prevent Space from scrolling the page while on the trial screen,
     // even during key-repeat (held key). Do this before the repeat-guard
@@ -4004,12 +4028,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     // First Escape press: show a confirmation toast. Second press within 2 s
     // (after the first) calls stopRunEarly(). This prevents accidental stops.
     if (event.key === "Escape" && currentState === STATES.RUNNING && !isWarmingUp) {
+      // Escape during a run belongs to this double-Escape stop alone. Stop
+      // propagation on BOTH presses: toast.js's document-level Escape
+      // listener is registered after this one whenever a toast is already
+      // on screen, and would otherwise dismiss the newest toast in the same
+      // dispatch — on the first press that is the "Press Esc again" prompt
+      // posted below, so the second press would stop the run unwarned.
+      event.stopImmediatePropagation();
       const now = Date.now();
       if (lastEscapeTime > 0 && now - lastEscapeTime <= 2000) {
-        // Second press within window — stop propagation so toast.js's global
-        // Escape listener doesn't fire after us and immediately dismiss
-        // whichever toast is newest once stopRunEarly() posts its own below.
-        event.stopImmediatePropagation();
         lastEscapeTime = 0;
         // dismissLatestToast() dismisses whatever toast is currently newest,
         // so it must come BEFORE stopRunEarly(): at this point the newest

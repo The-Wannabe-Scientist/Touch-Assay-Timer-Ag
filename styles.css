@@ -2012,6 +2012,15 @@ body.state-running #overflowMenuButton {
   visibility: hidden;
 }
 
+/* The run-details eligibility overrides are for between runs. During a run
+   or its warmup, a click would put focus in a reason box (where Space used
+   to type instead of tap) or change an animal's eligibility mid-run. */
+body.state-running #assayProgress .run-override-cell,
+body.state-warming-up #assayProgress .run-override-cell {
+  pointer-events: none;
+  opacity: 0.55;
+}
+
 body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):not(#savedAssaysScreen):not(#assayDefaultsScreen) {
   display: none !important;
 }
