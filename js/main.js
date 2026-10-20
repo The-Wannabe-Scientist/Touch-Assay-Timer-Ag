@@ -831,6 +831,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Buttons.progress.disabled      = true;
         UI.Buttons.tap.disabled           = false;
         UI.Buttons.stopRun.disabled       = false;
+        // The ⋮ button is hidden during a run (see styles.css); don't leave
+        // its menu open, with nothing usable in it, if the run started while
+        // it was showing.
+        UI.Displays.overflowMenu.hidden = true;
+        UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
         // The "do not leave" beforeunload dialog is handled by the event listener
         // registered below — no additional setup is needed here.
         break;
@@ -874,6 +879,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   function showScreen(screenElement) {
     UI.Displays.overflowMenu.hidden = true;
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");  // M9: reset aria-expanded
+
+    // Every overlay screen hides the assay screen, so no tap could be
+    // recorded while one is open and each window would be stored as a
+    // response. The menu items are hidden during a run; this catches any
+    // other path in.
+    if (currentState === STATES.RUNNING) {
+      showToast("Stop the run before opening this screen — taps can't be recorded while it is open.", "warning", 3500);
+      return;
+    }
+
     document.body.classList.add("state-overlay");
 
     // Switching from Settings to another overlay hides the Test Rig's Stop

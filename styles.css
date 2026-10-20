@@ -1998,6 +1998,20 @@ body.state-running #openSavedAssays {
   display: none;
 }
 
+/* Settings and User Guidelines cover the assay screen, so the tap button is
+   unreachable while they are open — during a run every window would be
+   scored as "responded". Between runs and during the warmup they stay
+   available (startRun() closes them). With Saved Assays hidden too the menu
+   would be empty, so the ⋮ button is hidden as well; visibility, not display,
+   so the header doesn't reflow when a run starts. */
+body.state-running #openSettings,
+body.state-running #openGuidelines {
+  display: none;
+}
+body.state-running #overflowMenuButton {
+  visibility: hidden;
+}
+
 body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):not(#savedAssaysScreen):not(#assayDefaultsScreen) {
   display: none !important;
 }
@@ -2032,9 +2046,16 @@ body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):
  * we attach the animation to the section and let it play whenever the
  * section enters the visual tree.
  *
- * The `animation-fill-mode: both` keeps the element invisible
+ * The `animation-fill-mode: backwards` keeps the element invisible
  * (opacity:0 / translateY offset) before the animation begins, which
  * prevents the "flash of visible content" on slow devices.
+ *
+ * Not `both`: a forwards fill keeps `transform: translateY(0)` on the section
+ * after the animation ends, and any transform makes the section the
+ * containing block for its position:fixed descendants. The genotype picker's
+ * fixed overlay/panel inside #assayScreen was then placed relative to the
+ * section instead of the viewport — shifted and clipped on wide screens.
+ * The end frame equals the default styles, so dropping the fill is invisible.
  */
 
 @keyframes screenSlideUp {
@@ -2056,14 +2077,14 @@ body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):
 /* Primary screens — slide up */
 body.state-setup #setupScreen,
 body.state-export #exportScreen {
-  animation: screenSlideUp 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: screenSlideUp 0.32s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 /* Assay screen — used across configured/poised/running, slides up once */
 body.state-configured #assayScreen,
 body.state-poised #assayScreen,
 body.state-running #assayScreen {
-  animation: screenSlideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: screenSlideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 /* Overlay screens (settings, guidelines, saved assays, assay defaults) — gentle slide */
@@ -2071,7 +2092,7 @@ body.state-running #assayScreen {
 #guidelinesScreen:not([hidden]),
 #savedAssaysScreen:not([hidden]),
 #assayDefaultsScreen:not([hidden]) {
-  animation: screenSlideUp 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: screenSlideUp 0.25s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 /* Live progress counter fades in when the run/warmup starts */
