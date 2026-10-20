@@ -863,8 +863,15 @@ const recordStamp = r => Math.max(
 
 /**
  * Whether the record already on this device should be kept instead of the
- * backup's copy: it is newer, or the backup would send a finished trial or
- * run back to "active" (which the next startup would then abandon).
+ * backup's copy.
+ *
+ * A completed copy beats any other: it carries the real outcome (a run's
+ * values, a trial's completion), while another copy of the same record was
+ * left open, or was closed by the startup cleanup ("App closed
+ * unexpectedly") — which stamps it with the time of that later startup, so
+ * timestamps alone would pick the empty copy. Otherwise the backup must not
+ * send a finished record back to "active" (the next startup would abandon
+ * it), and the newer copy wins.
  *
  * @param {Object|undefined} existing - The stored record, if any.
  * @param {Object}           incoming - The backup's record.
@@ -872,6 +879,8 @@ const recordStamp = r => Math.max(
  */
 function keepExistingRecord(existing, incoming) {
   if (!existing) return false;
+  const done = r => r.status === "completed";
+  if (done(existing) !== done(incoming)) return done(existing);
   if (incoming.status === "active" && existing.status && existing.status !== "active") return true;
   return recordStamp(existing) > recordStamp(incoming);
 }
@@ -879,9 +888,9 @@ function keepExistingRecord(existing, incoming) {
 /**
  * Restores assays/trials/runs from a backup object produced by
  * exportAllDataAsJSON(). Records not already present are added; a record
- * that already exists is replaced only if the backup's copy is not older
- * (see keepExistingRecord), so importing an old backup can't revert newer
- * work. Deliberately non-destructive: nothing already in the database that
+ * that already exists is replaced only if the backup's copy is the better
+ * one (see keepExistingRecord), so importing an old backup can't revert
+ * newer work. Deliberately non-destructive: nothing already in the database that
  * ISN'T in the backup is ever touched or deleted.
  *
  * All-or-nothing: every write happens in one transaction, so a failure part

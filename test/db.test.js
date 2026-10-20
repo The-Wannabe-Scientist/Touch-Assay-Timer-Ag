@@ -478,6 +478,35 @@ describe("exportAllDataAsJSON / importAllDataFromJSON", () => {
     assert.deepEqual(hydrated.trials[0].runs[0].values, [1, 1, 1]);
   });
 
+  test("a completed copy beats one the startup cleanup closed later, in either direction", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+    const trial = makeTrial({ status: "completed", endedAt: Date.now() });
+    await saveTrial(assay.assayId, trial);
+    const t0 = Date.now() - 60_000;
+    // Its final save failed: IDB holds the empty start record, which the
+    // next startup's cleanup closed — with a LATER endedAt than the real run.
+    const stub = makeRun({ status: "active", values: [], startedAt: t0 });
+    await saveRun(assay.assayId, trial.trialId, stub);
+    await abandonAllActiveTrialsInDB();
+    await markOrphanRunsStopped();
+
+    const completed = { ...stub, trialId: trial.trialId, status: "completed", values: [1, 0, 1], eligibleForAnalysis: true, endedAt: t0 + 30_000 };
+    const counts = await importAllDataFromJSON({ assays: [], trials: [], runs: [completed] });
+    assert.equal(counts.runs, 1);
+    let hydrated = await hydrateAssay(assay.assayId);
+    assert.equal(hydrated.trials[0].runs[0].status, "completed");
+    assert.deepEqual(hydrated.trials[0].runs[0].values, [1, 0, 1]);
+
+    // And the other way round: another device's cleaned-up copy can't
+    // replace the completed one here.
+    const closed = { ...completed, status: "abandoned", values: [], eligibleForAnalysis: false, endedAt: Date.now() + 60_000 };
+    const again = await importAllDataFromJSON({ assays: [], trials: [], runs: [closed] });
+    assert.equal(again.keptNewer, 1);
+    hydrated = await hydrateAssay(assay.assayId);
+    assert.deepEqual(hydrated.trials[0].runs[0].values, [1, 0, 1]);
+  });
+
   test("replaces an older local copy with the backup's newer one", async () => {
     const assay = makeAssay();
     await saveAssay(assay);

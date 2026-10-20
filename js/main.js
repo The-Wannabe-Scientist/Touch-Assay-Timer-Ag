@@ -47,7 +47,7 @@ import {
   saveTrial, markTrialCompleted, markTrialAbandoned,
   saveRun, abandonAllActiveTrialsInDB, markOrphanRunsStopped, getIdbAvailable,
   recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON, isWellFormedAssay,
-  consumeDbRecreated
+  consumeDbRecreated, openDB
 }                                                      from "./db.js";
 import {
   isAudioReady, setVoiceMode, getVoiceMode, loadVoices, speak, stopSpeech,
@@ -847,23 +847,38 @@ document.addEventListener("DOMContentLoaded", async () => {
    * that must run last so it doesn't race the primary cleanup's writes.
    */
   async function runStartupCleanup() {
+    // Probe storage first. Every step below can finish without opening the
+    // database (nothing queued, no crash guard, another tab holds the lock),
+    // and the "Storage unavailable" banner relies on openDB() having failed.
+    try { await openDB(); } catch { return; }  // idbAvailable is false now
+
     await restorePersistedUnsavedRuns();
     await recoverCrashGuard();
+
+    const cleanUp = async () => {
+      await abandonAllActiveTrialsInDB();
+      await markOrphanRunsStopped();
+    };
     // An "active" trial or run is a leftover only if no other tab is open:
     // a second tab's would be live, and abandoning it would cut its trial
     // short. Each tab holds a shared lock for its lifetime, so the exclusive
     // ifAvailable request is granted only to a tab that is alone.
     if (!navigator.locks?.request) {
-      await abandonAllActiveTrialsInDB();
-      await markOrphanRunsStopped();
+      await cleanUp();
       return;
     }
+    let lockAnswered = false;
     try {
       await navigator.locks.request("touch-assay-live", { ifAvailable: true }, async lock => {
-        if (!lock) return;
-        await abandonAllActiveTrialsInDB();
-        await markOrphanRunsStopped();
+        lockAnswered = true;
+        if (lock) await cleanUp();
       });
+    } catch (err) {
+      // The cleanup itself failed — report it as before.
+      if (lockAnswered) throw err;
+      // The lock manager refused (e.g. SecurityError in a restricted
+      // context): clean up as a browser without Web Locks would.
+      await cleanUp();
     } finally {
       navigator.locks.request("touch-assay-live", { mode: "shared" }, () => new Promise(() => {}))
         .catch(() => { /* lock manager unavailable — cleanup already ran or was skipped */ });
@@ -1859,22 +1874,33 @@ document.addEventListener("DOMContentLoaded", async () => {
   async function restorePersistedUnsavedRuns() {
     let queued;
     try { queued = JSON.parse(localStorage.getItem(LS_KEYS.UNSAVED_RUNS) || "[]"); } catch { return; }
-    if (!Array.isArray(queued) || queued.length === 0) return;
-    const left = [];
-    for (const entry of queued) {
-      try {
-        await saveRun(entry.assayId, entry.trialId, entry.run);
-      } catch (err) {
-        console.error("Restoring a queued run failed:", err);
-        left.push(entry);
-      }
-    }
+    if (!Array.isArray(queued)) return;
+    queued = queued.filter(e => e && e.run && e.run.runId != null && e.trialId != null);
+    if (queued.length === 0) return;
     try {
-      if (left.length > 0) localStorage.setItem(LS_KEYS.UNSAVED_RUNS, JSON.stringify(left));
-      else localStorage.removeItem(LS_KEYS.UNSAVED_RUNS);
-    } catch { /* ignore */ }
-    const saved = queued.length - left.length;
-    if (saved > 0) showToast(`${saved} run(s) that couldn't be saved last time have now been saved.`, "success", 6000);
+      // Through the import's merge rule rather than a blind put: the stored
+      // copy may be newer (an eligibility override that did reach IDB), and
+      // a completed queued run must beat its empty "active" start record.
+      await importAllDataFromJSON({
+        assays: [], trials: [],
+        runs: queued.map(e => ({ ...e.run, trialId: e.trialId }))
+      });
+      try { localStorage.removeItem(LS_KEYS.UNSAVED_RUNS); } catch { /* ignore */ }
+      showToast(`${queued.length} run(s) that couldn't be saved last time have now been saved.`, "success", 6000);
+    } catch (err) {
+      console.error("Restoring queued runs failed:", err);
+      // Keep them in this session's queue — retried with the others,
+      // overlaid on hydrates, prompted for on unload, and persisted again
+      // with the rest (a later persist would otherwise overwrite them).
+      for (const e of queued) {
+        if (!unsavedRuns.some(u => u.run.runId === e.run.runId)) unsavedRuns.push(e);
+      }
+      persistUnsavedRuns();
+      showToast(
+        `${queued.length} run(s) from last time still couldn't be saved (storage error). They are kept and retried — export a backup when you can.`,
+        "warning", 10000
+      );
+    }
   }
 
   /**
@@ -3168,6 +3194,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       console.error("Eligibility override save failed:", err);
       const queued = unsavedRuns.some(u => u.run === run);
       if (!queued) Object.assign(run, before);
+      else persistUnsavedRuns();  // keep the on-disk copy of the queue in step
       updateProgressTable();
       refreshGenotypeDropdownCounts();
       updateProgressBadge();
@@ -3180,6 +3207,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       );
       return;
     }
+    // A queued unsaved run is the same object: its on-disk copy must carry
+    // the override too, or the next startup's restore would write the old one.
+    if (unsavedRuns.some(u => u.run === run)) persistUnsavedRuns();
     currentAssay.lastModifiedAt = Date.now();
     saveAssay(currentAssay).catch(err => console.error("Failed to update assay metadata:", err));
 
@@ -5387,8 +5417,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // A recovery file from an older version nests the trials and runs
       // inside one assay; flatten it into the backup shape.
-      if (data && !Array.isArray(data.assays) && data.assay && Array.isArray(data.assay.trials)) {
-        data = assayToBackup(data.assay, Array.isArray(data.unsavedRuns) ? data.unsavedRuns : []);
+      // (Saved after returning to Setup, it holds only "assay": {} and the
+      // unsaved runs.)
+      if (data && !Array.isArray(data.assays) && (data.assay || Array.isArray(data.unsavedRuns))) {
+        data = assayToBackup(data.assay ?? null, Array.isArray(data.unsavedRuns) ? data.unsavedRuns : []);
       }
 
       if (!data || !Array.isArray(data.assays) || !Array.isArray(data.trials) || !Array.isArray(data.runs)) {
