@@ -17,6 +17,7 @@ import {
   buildAllSections,
   applySheetLayout,
   injectLiveFormulas,
+  blankEmptyTextCells,
   extractBinSeries
 } from "../js/export.js";
 
@@ -216,6 +217,26 @@ describe("injectLiveFormulas", () => {
 
     test("does not touch cells outside any tracked block (e.g. the Genotype header row itself)", () => {
       assert.equal(sheet["A1"].f, undefined);
+    });
+
+    // WT run 3 stopped after bin 1, so its bin-2 raw cell (D6) is "". Left as
+    // a zero-length text cell, Excel evaluates ""-mean as #VALUE! inside
+    // C12's SEM and counts it in D12's COUNTIFS(...,"<>").
+    test("blankEmptyTextCells removes the empty raw cells the SEM/N formulas reference", () => {
+      const s2 = mockSheetFromData2D(data2D);
+      injectLiveFormulas(s2, data2D);
+      assert.deepEqual(s2["D6"], { t: "s", v: "" }, "sanity: the stopped run's missing bin starts out as a text cell");
+      blankEmptyTextCells(s2);
+
+      assert.equal(s2["D6"], undefined);
+      for (const [addr, cell] of Object.entries(s2)) {
+        assert.ok(!(cell.t === "s" && cell.v === "" && !cell.f), `${addr} is still a formula-less "" cell`);
+      }
+      // Summary cells that are "" but carry a formula (mut's N=1 SEM) stay.
+      assert.equal(s2["F11"].v, "");
+      assert.match(s2["F11"].f, /SUMPRODUCT/);
+      // Real values are untouched.
+      assert.deepEqual(s2["B5"], sheet["B5"]);
     });
   });
 

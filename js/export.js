@@ -1625,6 +1625,29 @@ export function injectLiveFormulas(sheet, data2D) {
   });
 }
 
+/**
+ * Deletes every formula-less empty-string cell from a SheetJS sheet, so
+ * Excel sees a true blank there.
+ *
+ * aoa_to_sheet stores "" as a zero-length TEXT cell, and Excel treats that
+ * differently from a blank inside the live formulas: `"" - mean` is #VALUE!
+ * in the SEM's SUMPRODUCT, and COUNTIFS(..., "<>") counts it. A run with no
+ * value in a bin (e.g. one stopped early) then breaks that bin's SEM and
+ * inflates its N as soon as Excel recalculates.
+ *
+ * Must run AFTER injectLiveFormulas(), which attaches formulas to the ""
+ * summary cells — those keep their .f and are left in place.
+ *
+ * @param {Object} sheet - SheetJS worksheet (mutated in place).
+ */
+export function blankEmptyTextCells(sheet) {
+  Object.keys(sheet).forEach(addr => {
+    if (addr[0] === "!") return;  // Sheet metadata (!ref, !cols, !merges, ...), not a cell.
+    const cell = sheet[addr];
+    if (cell && cell.t === "s" && cell.v === "" && !cell.f) delete sheet[addr];
+  });
+}
+
 
 /* ==========================================================================
    Master Export Functions
@@ -1666,6 +1689,7 @@ export function performExcelExport(currentAssay, exportConfigs, options = {}) {
         // rows (Assay Metadata is already excluded above; Touch Index
         // Exclusions has neither and is left untouched by the scan itself).
         injectLiveFormulas(sheet, data2D);
+        blankEmptyTextCells(sheet);
       }
 
       XLSX.utils.book_append_sheet(wb, sheet, excelSheetName);
