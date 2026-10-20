@@ -47,7 +47,8 @@ let _hbChar             = null;
 let _battChar           = null;   // Battery Level characteristic (0x2A19)
 let _hbTimer            = null;
 let _connected          = false;
-let _hbWasActive        = false;  // Track if HB was running before disconnect
+let _hbWanted           = false;  // A run wants the heartbeat — survives BLE dropouts
+let _writeChain         = Promise.resolve();  // Serialises every GATT write (see _write)
 let _onDisconnectCb     = null;
 let _onReconnectCb      = null;  // () => void — fired after a successful auto-reconnect
 let _onBatteryUpdateCb  = null;  // (level: 0-100) => void
@@ -106,8 +107,10 @@ export async function armbandConnect(onDisconnect, onBatteryUpdate = null, onRec
  * Disconnects from the armband cleanly and stops the heartbeat timer.
  */
 export async function armbandDisconnect() {
+  _hbWanted = false;
   _stopHeartbeat();
   _connected = false;
+  _writeChain = Promise.resolve();
   if (_battChar) {
     _battChar.removeEventListener("characteristicvaluechanged", _handleBatteryUpdate);
     try { await _battChar.stopNotifications(); } catch { /* Ignore */ }
@@ -148,6 +151,8 @@ export function armbandRunComplete() {
  * Intended for the Settings screen "Test Vibration" button only.
  * Sends CMD_TAP (0x01) — identical payload to armbandTap() but kept as a
  * separate export so call-sites remain semantically distinct.
+ * @returns {Promise<boolean>} Whether the write went out (false when not
+ *   connected or the write failed).
  */
 export function armbandTest() {
   return _write(_hapticChar, CMD_TAP);
@@ -158,6 +163,7 @@ export function armbandTest() {
  * Call immediately after timerWorker.postMessage("start").
  */
 export function armbandStartHeartbeat() {
+  _hbWanted = true;
   _stopHeartbeat(); // Guard against double-start on rapid stop→start.
   _hbTimer = setInterval(() => {
     if (!_connected) { _stopHeartbeat(); return; }
@@ -175,19 +181,41 @@ export function armbandStartHeartbeat() {
  * false "connection lost" stutter warning after every single run.
  */
 export function armbandStopHeartbeat() {
-  _write(_hbChar, CMD_HEARTBEAT_STOP);
+  // The run ended on purpose, even if the link is down right now — an
+  // auto-reconnect must not restart the heartbeat.
+  _hbWanted = false;
+  // Clear the timer first so no new 0x03 can be queued behind the stop, and
+  // retry the stop: a lost one leaves the firmware stuttering between runs.
   _stopHeartbeat();
+  _write(_hbChar, CMD_HEARTBEAT_STOP, 3);
 }
 
 // ── Private helpers ────────────────────────────────────────────────────────────
 
-function _write(char, data) {
-  if (!_connected || !char) return Promise.resolve();
-  return char.writeValueWithoutResponse(data).catch(err => {
+/**
+ * Queues a GATT write behind every earlier one. A device handles one GATT
+ * operation at a time (Android rejects a second with "GATT operation already
+ * in progress"), so unserialised fire-and-forget writes could be dropped.
+ * Queueing delays a tap buzz by at most one pending write — a few ms.
+ *
+ * @param {BluetoothRemoteGATTCharacteristic|null} char
+ * @param {Uint8Array} data
+ * @param {number} [retries=0] - Extra attempts after a failed write.
+ * @returns {Promise<boolean>} Whether the write went out. Never rejects, so
+ *   the chain never breaks.
+ */
+function _write(char, data, retries = 0) {
+  if (!_connected || !char) return Promise.resolve(false);
+  const attempt = n => char.writeValueWithoutResponse(data).then(() => true, err => {
+    if (n > 0 && _connected) return _delay(50).then(() => attempt(n - 1));
     // A failed write does not imply a disconnect — BLE can recover from
     // transient radio congestion without dropping the GATT connection.
     console.warn("[HapticArmband] Write failed:", err.message);
+    return false;
   });
+  const p = _writeChain.then(() => (_connected ? attempt(retries) : false));
+  _writeChain = p;
+  return p;
 }
 
 function _stopHeartbeat() {
@@ -259,13 +287,12 @@ async function _attemptReconnect(attempt = 0) {
     _hbChar       = await service.getCharacteristic(HEARTBEAT_UUID);
     await _subscribeBattery(server);  // Re-subscribe after reconnect
     _connected    = true;
-    // Restart heartbeat if it was running before the dropout. Without this, a
-    // brief BLE disconnect during an active run stops the heartbeat permanently,
-    // and the firmware watchdog fires stutter warnings every 3s for the rest of the run.
-    if (_hbWasActive) {
-      _hbWasActive = false;
-      armbandStartHeartbeat();
-    }
+    // Restart the heartbeat if a run still wants it. Without this, a brief
+    // BLE disconnect during an active run stops the heartbeat permanently,
+    // and the firmware watchdog fires stutter warnings every 3s for the rest
+    // of the run. A run that ended during the dropout cleared _hbWanted, and
+    // the firmware resets its own heartbeat state on every new connection.
+    if (_hbWanted) armbandStartHeartbeat();
     console.log(`[HapticArmband] Auto-reconnected (attempt ${attempt + 1}).`);
     _onReconnectCb?.();  // Notify the UI so it can restore the "connected" appearance.
   } catch (err) {
@@ -284,7 +311,7 @@ async function _attemptReconnect(attempt = 0) {
 
 function _handleDisconnect() {
   _connected = false;
-  _hbWasActive = _hbTimer !== null;  // Remember if heartbeat was running.
+  _writeChain = Promise.resolve();  // queued writes can't go out on a dead link
   _stopHeartbeat();
   _battChar = null;  // GATT handles are invalid after disconnect.
   _onDisconnectCb?.();

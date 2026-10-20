@@ -4487,6 +4487,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Track last-alerted battery threshold so toasts fire only once per crossing.
     // 100 = "haven't warned yet"; reset to 100 on reconnect so warnings re-arm.
     let _lastBattWarnLevel = 100;
+    // Most recent battery reading, or null when unknown. The first reading
+    // arrives during armbandConnect(), before _setArmbandConnectedUI() runs,
+    // which must show it rather than overwrite it.
+    let _lastArmbandLevel = null;
 
     /**
      * Handles battery level updates pushed by the armband BLE notification.
@@ -4495,6 +4499,7 @@ document.addEventListener("DOMContentLoaded", async () => {
      * @param {number} level  Battery percentage 0-100.
      */
     function _handleArmbandBattery(level) {
+      _lastArmbandLevel = level;
       // -- Header badge ----------------------------------------------------
       const badge = UI.Displays.armbandBatteryLevel;
       badge.textContent = level + "%";
@@ -4538,7 +4543,9 @@ document.addEventListener("DOMContentLoaded", async () => {
      * Called from both the normal connect path and the auto-reconnect callback.
      */
     function _setArmbandConnectedUI() {
-      UI.Displays.armbandStatusSettings.textContent = "Connected \u2713";
+      const lvl = _lastArmbandLevel;
+      UI.Displays.armbandStatusSettings.textContent =
+        lvl === null ? "Connected \u2713" : "Connected \u2713  \u00b7  " + lvl + "%";
       UI.Displays.armbandStatusSettings.className   = "armband-status armband-connected";
       // Restore header icon button — remove the "connecting" pending class and
       // re-enable it (it was disabled during the picker/GATT handshake).
@@ -4546,8 +4553,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       UI.Buttons.armbandHeaderBtn.disabled = false;
       UI.Buttons.armbandHeaderBtn.classList.add("armband-connected");
       UI.Buttons.armbandHeaderBtn.classList.remove("armband-disconnected");
-      UI.Buttons.armbandHeaderBtn.setAttribute("title", "Armband Connected");
-      UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Armband Connected");
+      UI.Buttons.armbandHeaderBtn.setAttribute("title",
+        lvl === null ? "Armband Connected" : "Armband connected \u2014 " + lvl + "%");
+      UI.Buttons.armbandHeaderBtn.setAttribute("aria-label",
+        lvl === null ? "Armband Connected" : "Armband connected \u2014 " + lvl + "% battery");
       UI.Buttons.connectArmband.textContent = "Connected \u2713";
       UI.Buttons.connectArmband.disabled    = true;
       // Show disconnect button so user can cleanly switch armbands
@@ -4567,6 +4576,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (isArmbandConnected()) return;
 
       const isHeaderBtn = btn === UI.Buttons.armbandHeaderBtn;
+      const prevLabel = isHeaderBtn ? null : btn.textContent;  // "Connect" or "Reconnect"
       btn.disabled = true;
       if (isHeaderBtn) {
         // Do NOT set textContent here — it would destroy the SVG icon child node.
@@ -4585,11 +4595,14 @@ document.addEventListener("DOMContentLoaded", async () => {
             UI.Buttons.armbandHeaderBtn.classList.remove("armband-connected");
             UI.Buttons.armbandHeaderBtn.classList.add("armband-disconnected");
             UI.Buttons.armbandHeaderBtn.setAttribute("title", "Reconnect Armband");
+            UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Reconnect haptic armband");
             UI.Displays.armbandBatteryLevel.setAttribute("hidden", "");
             UI.Buttons.connectArmband.disabled    = false;
             UI.Buttons.connectArmband.textContent = "Reconnect";
             UI.Buttons.disconnectArmband.setAttribute("hidden", "");  // hide disconnect btn
+            UI.Buttons.testArmband.disabled = true;  // nothing to test until it reconnects
             _lastBattWarnLevel = 100;  // re-arm threshold warnings after reconnect
+            _lastArmbandLevel  = null; // a reconnect without Battery Service shows none
             showToast("Haptic armband disconnected", "warning", 4000);
           },
           // onBatteryUpdate callback
@@ -4606,15 +4619,22 @@ document.addEventListener("DOMContentLoaded", async () => {
         showToast("Haptic armband connected", "success", 3000);
 
       } catch (err) {
+        // A background auto-reconnect may have succeeded while the picker
+        // was open; show that rather than a "Connect" button that does nothing.
+        if (isArmbandConnected()) {
+          if (isHeaderBtn) btn.classList.remove("armband-connecting");
+          _setArmbandConnectedUI();
+          return;
+        }
         // NotFoundError = user cancelled the browser picker -- silent
         if (err.name !== "NotFoundError") {
           showToast("Could not connect armband: " + err.message, "error");
         }
         btn.disabled = false;
-        if (btn === UI.Buttons.armbandHeaderBtn) {
+        if (isHeaderBtn) {
           btn.classList.remove("armband-connecting");
         } else {
-          btn.textContent = "Connect";
+          btn.textContent = prevLabel || "Connect";
         }
       }
     }
@@ -4634,12 +4654,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       UI.Buttons.armbandHeaderBtn.classList.remove("armband-connected");
       UI.Buttons.armbandHeaderBtn.classList.add("armband-disconnected");
       UI.Buttons.armbandHeaderBtn.setAttribute("title", "Connect Armband");
+      UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Connect haptic armband");
       UI.Displays.armbandBatteryLevel.setAttribute("hidden", "");
       UI.Buttons.connectArmband.disabled    = false;
       UI.Buttons.connectArmband.textContent = "Connect";
       UI.Buttons.disconnectArmband.setAttribute("hidden", "");
       UI.Buttons.testArmband.disabled = true;  // disable test btn — no armband connected
       _lastBattWarnLevel = 100;
+      _lastArmbandLevel  = null;
       showToast("Haptic armband disconnected", "info", 3000);
     });
 
@@ -4648,7 +4670,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       const btn = UI.Buttons.testArmband;
       btn.disabled = true;  // prevent BLE spam by disabling during operation
       const t0 = performance.now();
-      await armbandTest();
+      if (!(await armbandTest())) {
+        // Not connected (e.g. it dropped and hasn't reconnected), or the
+        // write failed — don't report a dispatch that never happened.
+        showToast(
+          isArmbandConnected() ? "Test vibration could not be sent — try again" : "Armband not connected — reconnect first",
+          "warning", 3000
+        );
+        btn.disabled = !isArmbandConnected();
+        return;
+      }
       // writeValueWithoutResponse resolves when the packet enters the
       // BLE radio transmit buffer (~1 ms), NOT when the armband actually vibrates.
       // The value is therefore the BLE stack dispatch latency, not a round-trip
@@ -4667,7 +4698,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Previous value of 1500ms was shorter than the toast, contrary to the comment.
       setTimeout(() => {
         btn.classList.remove("armband-test-active");
-        btn.disabled = false;
+        btn.disabled = !isArmbandConnected();
       }, 2000);
     });
   }
