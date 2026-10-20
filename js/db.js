@@ -759,6 +759,25 @@ export async function exportAllDataAsJSON() {
   };
 }
 
+const isKey   = v => (typeof v === "string" && v !== "") || Number.isFinite(v);
+const isPlain = v => v !== null && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * Whether an assay record has the shape the app relies on: a string (or,
+ * from older databases, numeric) assayId, and — when present — a string name
+ * and an array of string genotypes. Used to refuse malformed backups, and by
+ * the Saved Assays list to set aside a damaged record that is already stored
+ * instead of failing to render the whole list.
+ *
+ * @param {any} a - A record from the assays store or a backup file.
+ * @returns {boolean}
+ */
+export function isWellFormedAssay(a) {
+  return isPlain(a) && isKey(a.assayId) &&
+    (a.assayName == null || typeof a.assayName === "string") &&
+    (a.genotypes == null || (Array.isArray(a.genotypes) && a.genotypes.every(g => typeof g === "string")));
+}
+
 /**
  * Restores assays/trials/runs from a backup object produced by
  * exportAllDataAsJSON(). Uses put() (upsert) per record — existing records
@@ -785,13 +804,7 @@ export async function importAllDataFromJSON(data) {
   // put() throw part-way through a store, and an assay whose genotypes or name
   // has the wrong type is stored fine but then breaks every screen that lists
   // assays. Older databases used numeric IDs, so numbers are accepted too.
-  const isKey   = v => (typeof v === "string" && v !== "") || Number.isFinite(v);
-  const isPlain = v => v !== null && typeof v === "object" && !Array.isArray(v);
-  const badAssay = data.assays.findIndex(a =>
-    !isPlain(a) || !isKey(a.assayId) ||
-    (a.assayName != null && typeof a.assayName !== "string") ||
-    (a.genotypes != null && !(Array.isArray(a.genotypes) && a.genotypes.every(g => typeof g === "string")))
-  );
+  const badAssay = data.assays.findIndex(a => !isWellFormedAssay(a));
   const badTrial = data.trials.findIndex(t => !isPlain(t) || !isKey(t.trialId) || !isKey(t.assayId));
   const badRun   = data.runs.findIndex(r =>
     !isPlain(r) || !isKey(r.runId) || !isKey(r.trialId) ||

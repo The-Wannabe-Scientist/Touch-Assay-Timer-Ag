@@ -46,7 +46,7 @@ import {
   saveAssay, loadAllAssays, hydrateAssay, deleteAssay,
   saveTrial, markTrialCompleted, markTrialAbandoned,
   saveRun, abandonAllActiveTrialsInDB, markOrphanRunsStopped, getIdbAvailable,
-  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON
+  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON, isWellFormedAssay
 }                                                      from "./db.js";
 import {
   isAudioReady, setVoiceMode, getVoiceMode, loadVoices, speak, stopSpeech,
@@ -918,6 +918,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function hideScreenAndRestore(screenElement) {
     screenElement.hidden = true;
+    if (screenElement === UI.Screens.savedAssays) dismissBulkDeleteConfirm();
     document.body.classList.remove("state-overlay");
     // Stop any running Test Rig loop so it never keeps ticking/vibrating in
     // the background after Settings is closed. No-ops if it wasn't running.
@@ -2892,7 +2893,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       html +=
         `<label>` +
-        `<input type="checkbox" data-dataset-type="trial" data-trial-id="${trial.trialId}"` +
+        `<input type="checkbox" data-dataset-type="trial" data-trial-id="${escapeHTML(String(trial.trialId))}"` +
         ` aria-label="Trial ${Number(trial.trialIndex)}, ${eligible} eligible of ${total} total${isAbandoned ? ', abandoned' : ''}"` +
         ` ${isCompleted ? "checked" : ""}>` +
         ` Trial ${Number(trial.trialIndex)}` +
@@ -2988,7 +2989,18 @@ document.addEventListener("DOMContentLoaded", async () => {
    * in the Saved Assays overlay. Each entry shows the assay name, date,
    * and action buttons (Start New Trial, Export, Delete).
    */
+  /**
+   * Removes the bulk-delete "Permanently delete N assays?" bar, if showing.
+   * The bar's count describes the selection when it opened, so it must not
+   * outlive that selection: the list being rebuilt, a checkbox changing, or
+   * the screen closing all dismiss it.
+   */
+  function dismissBulkDeleteConfirm() {
+    document.querySelector(".bulk-delete-confirm")?.remove();
+  }
+
   async function populateSavedAssaysList() {
+    dismissBulkDeleteConfirm();
     // Show a loading indicator while IDB is read
     UI.Displays.savedAssaysList.innerHTML = `<p class="saved-assays-loading">Loading\u2026</p>`;
 
@@ -3024,9 +3036,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
+    // One damaged record (e.g. from a hand-edited backup imported before
+    // backups were validated) must not blank the whole list. It gets a row of
+    // its own with only Delete, so it can be removed, and every other assay
+    // stays reachable.
+    const listed = assays.filter(isWellFormedAssay);
+    const damaged = assays.filter(a => !isWellFormedAssay(a));
+
     // Sort newest first
     let html = "";
-    assays.sort((a, b) => b.createdAt - a.createdAt).forEach(assay => {
+    listed.sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)).forEach(assay => {
       // Name is the primary identifier and gets its own line; genotypes + date
       // are secondary metadata on a muted line underneath — previously all
       // three were run together in one sentence-like string that wrapped
@@ -3056,6 +3075,29 @@ document.addEventListener("DOMContentLoaded", async () => {
       `;
     });
 
+    damaged.forEach(assay => {
+      // A record only reaches the store with a valid IDB key, but it may not
+      // be one a data-attribute can carry back to deleteAssay() (e.g. an
+      // array key) — then there is nothing the row could delete.
+      const id = assay?.assayId;
+      const deletable = typeof id === "string" || Number.isFinite(id);
+      console.warn("Saved Assays: damaged assay record", assay);
+      html += `
+        <div class="saved-assay-row">
+          <div class="assay-row-header">
+            <div class="assay-info">
+              <div class="assay-info-name">Unreadable assay record</div>
+              <div class="assay-info-meta">This record is damaged and can't be opened.${deletable ? " Delete it to tidy the list." : ""}</div>
+            </div>
+          </div>
+          ${deletable ? `<div class="assay-actions">
+            <button class="btn-danger-outline" data-action="delete" data-assay-id="${escapeHTML(String(id))}"
+              data-assay-name="unreadable assay record">Delete</button>
+          </div>` : ""}
+        </div>
+      `;
+    });
+
     UI.Displays.savedAssaysList.innerHTML = html;
     UI.Buttons.deleteSelectedAssays.disabled  = true;
     UI.Inputs.selectAllAssays.checked         = false;
@@ -3065,7 +3107,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     // interactive — each one needs a full hydrate + pooled-binning pass,
     // which is too slow to block the initial render on for lists with many
     // saved assays.
-    enrichSavedAssayRowsWithSparklines(assays);
+    enrichSavedAssayRowsWithSparklines(listed)
+      .catch(err => console.warn("Saved Assays: sparklines failed:", err));
   }
 
   // Bumped on every populateSavedAssaysList() call so an in-flight
@@ -3342,7 +3385,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    *
    * @param {Array<{ name: string, data2D: any[][], large?: boolean, charts?: Object }>} sections
    */
-  function renderPreviewModal(sections) {
+  function renderPreviewModal(sections, assay = currentAssay) {
     const nav       = UI.Displays.previewNav;
     const container = UI.Displays.previewContainer;
     nav.innerHTML       = "";
@@ -3357,7 +3400,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // the same color everywhere in this modal — and matches the same
     // adjacency-guarded palette already used by the assay screen's
     // genotype picker (assignGenotypeColors), not a separate chart palette.
-    const genotypeColors = assignGenotypeColors(currentAssay?.genotypes || []);
+    const genotypeColors = assignGenotypeColors(assay?.genotypes || []);
 
     sections.forEach((section, i) => {
       const sectionId = `preview-section-${i}`;
@@ -4757,6 +4800,18 @@ document.addEventListener("DOMContentLoaded", async () => {
           `Backup imported: ${counts.assays} assay(s), ${counts.trials} trial(s), ${counts.runs} run(s).`,
           "success", 4000
         );
+        // The Export screen can be underneath (Saved Assays opens over it).
+        // Its assay and dataset list are an in-memory snapshot from before
+        // the import, so Export and Preview would silently leave out any
+        // trials and runs just imported for that assay. Re-read it.
+        if (currentAssay && currentState === STATES.EXPORT) {
+          try {
+            currentAssay = await hydrateAssay(currentAssay.assayId);
+            populateExportDatasetList(currentAssay);
+          } catch (err) {
+            console.error("Failed to refresh the open assay after import:", err);
+          }
+        }
         // Refresh the list if it's currently open so the imported assays appear immediately.
         if (!UI.Screens.savedAssays.hidden) {
           populateSavedAssaysList().catch(err => console.error("Failed to refresh saved assays list:", err));
@@ -4840,6 +4895,35 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // ── Saved assays list — event delegation ───────────────────────────────
+  /**
+   * Whether `assayId` (a data-attribute string) is the assay currently
+   * loaded — the one the Export screen under Saved Assays is showing.
+   */
+  function isLoadedAssay(assayId) {
+    return currentAssay !== null && String(currentAssay.assayId) === String(assayId);
+  }
+
+  /**
+   * Called once the loaded assay has been deleted from Saved Assays. Its
+   * in-memory copy is now stale: Start New Trial on the Export screen would
+   * re-read a record that no longer exists, and Export would write out
+   * deleted data. Go back to Setup, keeping Saved Assays open on top.
+   */
+  function leaveDeletedAssay() {
+    resetToSetup();
+    showScreen(UI.Screens.savedAssays);
+  }
+
+  /**
+   * Reports a Saved Assays row whose assay could not be read (typically
+   * deleted in another tab), and refreshes the list so the row goes away.
+   */
+  function reportUnloadableAssay(err) {
+    console.error("Saved Assays: could not load assay:", err);
+    showToast("That assay could not be loaded. It may have been deleted in another tab.", "error", 5000);
+    populateSavedAssaysList().catch(e => console.error("Failed to refresh saved assays list:", e));
+  }
+
   UI.Displays.savedAssaysList.addEventListener("click", async e => {
     const btn = e.target.closest("button[data-action]");
     if (!btn) return;
@@ -4848,51 +4932,73 @@ document.addEventListener("DOMContentLoaded", async () => {
     const assayId = btn.dataset.assayId;
 
     if (action === "start") {
-      currentAssay = await hydrateAssay(assayId);
-      populateGenotypeSelect(currentAssay.genotypes);
-
-      // Abandon any previously active trial (shouldn't exist, but guard anyway)
-      const active = getActiveTrial(currentAssay);
-      if (active) {
-        await markTrialAbandoned(currentAssay.assayId, active.trialId, "Started new trial from saved assays");
-        // update the in-memory trial object to match what was
-        // just written to IDB. Without this, getActiveTrial() would still
-        // find this trial (status is "active" in memory), causing the new
-        // trial created below to be shadowed.
-        abandonTrial(active, "Started new trial from saved assays");
+      let assay;
+      try {
+        assay = await hydrateAssay(assayId);
+      } catch (err) {
+        reportUnloadableAssay(err);
+        return;
       }
 
-      const newTrial = createTrial(currentAssay.trials.length + 1);
-      currentAssay.trials.push(newTrial);
-      await saveTrial(currentAssay.assayId, newTrial);
+      // Nothing below touches currentAssay until every write has succeeded,
+      // so a failure leaves whatever screen is underneath consistent.
+      try {
+        // Close every trial still active (one is left behind if a reload's
+        // startup cleanup didn't run), so the new trial is the only one.
+        const reason = "Started new trial from saved assays";
+        for (const stale of assay.trials.filter(t => t.status === "active")) {
+          await markTrialAbandoned(assay.assayId, stale.trialId, reason);
+          // Mirror the write in memory, or getActiveTrial() would still find
+          // this trial and shadow the new one created below.
+          abandonTrial(stale, reason);
+        }
+
+        const newTrial = createTrial(assay.trials.length + 1);
+        await saveTrial(assay.assayId, newTrial);
+        assay.trials.push(newTrial);
+      } catch (err) {
+        console.error("Saved Assays: could not start a new trial:", err);
+        showToast("Could not start a new trial (storage error). Please try again.", "error", 5000);
+        return;
+      }
+
+      currentAssay = assay;
+      // Built only now that the new trial is the active one, so the picker's
+      // per-genotype counts are the new trial's, not the abandoned one's.
+      populateGenotypeSelect(currentAssay.genotypes);
 
       // Initialize progress table for the new trial and apply visibility preference
       updateProgressTable();
+      updateProgressBadge();
       applyProgressVisibilityPreference();
 
       hideScreenAndRestore(UI.Screens.savedAssays);
       setState(STATES.POISED);
 
     } else if (action === "preview") {
-      // Quick preview without leaving the saved-assays list: hydrate the
-      // assay, populate the (offscreen) export dataset list to get sensible
-      // default configs — same defaults the Export screen starts with — then
-      // open the preview modal directly. Since #previewModal is a fixed,
-      // full-viewport overlay, it renders fine on top of this screen and
-      // closing it returns straight to the list, no navigation round-trip.
-      currentAssay = await hydrateAssay(assayId);
-      populateExportDatasetList(currentAssay);
-      const configs = getExportConfigs();
-      if (configs.length === 0) {
-        showToast("No data available to preview.", "info", 3000);
+      // Quick preview without leaving the saved-assays list. Side-effect
+      // free: the previewed assay is NOT loaded into currentAssay or the
+      // Export screen's dataset list — doing so made a later Export or Start
+      // New Trial on the Export screen underneath act on the previewed assay.
+      // Since #previewModal is a fixed, full-viewport overlay, it renders fine
+      // on top of this screen and closing it returns straight to the list.
+      let assay;
+      try {
+        assay = await hydrateAssay(assayId);
+      } catch (err) {
+        reportUnloadableAssay(err);
         return;
       }
+      // The same defaults populateExportDatasetList() ticks: every completed
+      // trial, plus pooled (completed trials only).
+      const configs = [
+        ...assay.trials
+          .filter(t => t.status === "completed")
+          .map(t => ({ type: "trial", trialId: String(t.trialId), includeAbandoned: false })),
+        { type: "pooled", includeAbandoned: false }
+      ];
       try {
-        await runWithSpinner(btn, "Loading…", () => {
-          const sections = buildAllSections(currentAssay, configs, getExportOptions());
-          renderPreviewModal(sections);
-          UI.Displays.previewModal.hidden = false;
-        });
+        await runWithSpinner(btn, "Loading…", () => openPreview(assay, configs, getExportOptions()));
       } catch (err) {
         // Without this catch, a data-shape edge case in buildAllSections/
         // renderPreviewModal becomes an unhandled rejection that the global
@@ -4903,7 +5009,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
 
     } else if (action === "export") {
-      currentAssay = await hydrateAssay(assayId);
+      let assay;
+      try {
+        assay = await hydrateAssay(assayId);
+      } catch (err) {
+        reportUnloadableAssay(err);
+        return;
+      }
+      currentAssay = assay;
       hideScreenAndRestore(UI.Screens.savedAssays);
       populateExportDatasetList(currentAssay);
       setState(STATES.EXPORT);
@@ -4919,6 +5032,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (confirmed) {
         try {
           await deleteAssay(assayId);
+          if (isLoadedAssay(assayId)) leaveDeletedAssay();
           await populateSavedAssaysList();
           showToast(`"${name}" deleted.`, "success", 3000);
         } catch (err) {
@@ -4932,6 +5046,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // ── Saved assays bulk selection ─────────────────────────────────────────
   UI.Displays.savedAssaysList.addEventListener("change", e => {
     if (!e.target.classList.contains("assay-select-checkbox")) return;
+    dismissBulkDeleteConfirm();
 
     const all     = document.querySelectorAll(".assay-select-checkbox");
     const checked = document.querySelectorAll(".assay-select-checkbox:checked");
@@ -4946,6 +5061,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   UI.Inputs.selectAllAssays.addEventListener("change", e => {
+    dismissBulkDeleteConfirm();
     const isChecked = e.target.checked;
     document.querySelectorAll(".assay-select-checkbox").forEach(cb => {
       cb.checked = isChecked;
@@ -4979,20 +5095,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     confirmRow.querySelector(".confirm-yes").addEventListener("click", async () => {
       confirmRow.remove();
 
-      const idsToDelete = Array.from(checked).map(cb => cb.dataset.assayId);
+      // Read the selection now, not the snapshot from when the bar opened.
+      // (Any change to it dismisses the bar too — see dismissBulkDeleteConfirm.)
+      const idsToDelete = Array.from(
+        document.querySelectorAll(".assay-select-checkbox:checked")
+      ).map(cb => cb.dataset.assayId);
+      if (idsToDelete.length === 0) return;
       UI.Buttons.deleteSelectedAssays.textContent = "Deleting...";
       UI.Buttons.deleteSelectedAssays.disabled    = true;
       let failCount = 0;
 
       try {
+        let deletedLoaded = false;
         for (const id of idsToDelete) {
           try {
             await deleteAssay(id);
+            if (isLoadedAssay(id)) deletedLoaded = true;
           } catch (err) {
             console.error(`Failed to delete assay ${id}:`, err);
             failCount++;
           }
         }
+        if (deletedLoaded) leaveDeletedAssay();
 
         if (failCount > 0) {
           showToast(`${failCount} assay(s) could not be deleted. The rest were removed.`, "error", 5000);
@@ -5303,6 +5427,56 @@ document.addEventListener("DOMContentLoaded", async () => {
    * synchronous export to ensure the spinner appears before blocking.
    *
    */
+  /**
+   * What the open preview modal shows, so its "Export to Excel" button
+   * exports exactly that: the assay, dataset selection and options it was
+   * built from. A preview opened from Saved Assays is of an assay that is
+   * not loaded, so the Export screen's own handler can't be reused for it.
+   * @type {{assay: Object, configs: Object[], options: Object}|null}
+   */
+  let previewContext = null;
+
+  /**
+   * Builds the preview for `assay` and opens the modal. Throws if the
+   * sections can't be built; callers report that.
+   */
+  function openPreview(assay, configs, options) {
+    const sections = buildAllSections(assay, configs, options);
+    renderPreviewModal(sections, assay);
+    previewContext = { assay, configs, options };
+    UI.Displays.previewModal.hidden = false;
+  }
+
+  /**
+   * Exports `assay` to Excel, falling back to CSV when SheetJS isn't loaded
+   * (offline / CDN failure) and offering CSV when the Excel build fails.
+   *
+   * @param {HTMLButtonElement} btn - Button that shows the busy state.
+   */
+  function exportExcelWithFallback(btn, assay, configs, exportOptions) {
+    if (typeof XLSX === "undefined") {
+      return runWithSpinner(btn, "Exporting…", () => {
+        const result = performCSVExport(assay, configs, exportOptions);
+        if (!result.success) showToast("Export failed: " + result.error, "error", 6000);
+      });
+    }
+
+    return runWithSpinner(btn, "Exporting…", async () => {
+      const result = performExcelExport(assay, configs, exportOptions);
+      if (!result.success) {
+        // Non-destructive alternative-format offer — "primary" styling (not "danger")
+        // since accepting isn't a destructive action, unlike the modal's other call-sites.
+        const useCSV = await showConfirmModal(
+          "Excel export failed",
+          `${result.error} Would you like to export as CSV instead?`,
+          "Export CSV",
+          "primary"
+        );
+        if (useCSV) performCSVExport(assay, configs, exportOptions);
+      }
+    });
+  }
+
   async function runWithSpinner(btn, label, fn) {
     const original = btn.textContent;
     btn.textContent = label;
@@ -5324,31 +5498,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       showToast("Please select a dataset.", "info", 3000);
       return;
     }
-    const exportOptions = getExportOptions();
-
-    // If SheetJS isn't loaded (offline / CDN failure), fall back to CSV silently
-    if (typeof XLSX === "undefined") {
-      runWithSpinner(UI.Buttons.exportExcel, "Exporting…", () => {
-        const result = performCSVExport(currentAssay, configs, exportOptions);
-        if (!result.success) showToast("Export failed: " + result.error, "error", 6000);
-      });
-      return;
-    }
-
-    runWithSpinner(UI.Buttons.exportExcel, "Exporting…", async () => {
-      const result = performExcelExport(currentAssay, configs, exportOptions);
-      if (!result.success) {
-        // Non-destructive alternative-format offer — "primary" styling (not "danger")
-        // since accepting isn't a destructive action, unlike the modal's other call-sites.
-        const useCSV = await showConfirmModal(
-          "Excel export failed",
-          `${result.error} Would you like to export as CSV instead?`,
-          "Export CSV",
-          "primary"
-        );
-        if (useCSV) performCSVExport(currentAssay, configs, exportOptions);
-      }
-    });
+    exportExcelWithFallback(UI.Buttons.exportExcel, currentAssay, configs, getExportOptions());
   });
 
   // Dedicated CSV export button
@@ -5377,9 +5527,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     runWithSpinner(UI.Buttons.previewExcel, "Loading…", () => {
-      const sections = buildAllSections(currentAssay, configs, getExportOptions());
-      renderPreviewModal(sections);
-      UI.Displays.previewModal.hidden = false;
+      openPreview(currentAssay, configs, getExportOptions());
     }).catch(err => {
       // Without this catch, a data-shape edge case in buildAllSections/
       // renderPreviewModal becomes an unhandled rejection that the global
@@ -5402,8 +5550,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   UI.Buttons.exportFromPreview.addEventListener("click", () => {
-    UI.Buttons.exportExcel.click();       // Delegate to the main export handler
+    const ctx = previewContext;
     UI.Displays.previewModal.hidden = true;
+    if (!ctx) return;
+    // The Export screen's button shows the busy state: this one is in the
+    // modal that just closed.
+    exportExcelWithFallback(UI.Buttons.exportExcel, ctx.assay, ctx.configs, ctx.options);
   });
 
   // ── Export dataset list — checkbox delegation ────────────────────────────

@@ -10,7 +10,7 @@ import {
   saveAssay, loadAllAssays, hydrateAssay, deleteAssay,
   saveTrial, markTrialCompleted, markTrialAbandoned,
   saveRun, abandonAllActiveTrialsInDB, markOrphanRunsStopped,
-  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON
+  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON, isWellFormedAssay
 } from "../js/db.js";
 
 // db.js caches a single IDBDatabase connection at module scope (by design —
@@ -351,6 +351,23 @@ describe("markOrphanRunsStopped", () => {
     assert.equal(hydrated.trials[0].runs[0].status, "stoppedEarly");
     assert.equal(hydrated.trials[0].runs[0].eligibleForAnalysis, false);
     assert.equal(hydrated.trials[0].runs[0].ineligibleReason, "App restarted unexpectedly");
+  });
+});
+
+describe("isWellFormedAssay", () => {
+  test("accepts the records the app writes, including legacy numeric IDs", () => {
+    assert.equal(isWellFormedAssay(makeAssay()), true);
+    assert.equal(isWellFormedAssay(makeAssay({ assayId: 1686731847000 })), true);
+    assert.equal(isWellFormedAssay(makeAssay({ assayName: undefined, genotypes: undefined })), true);
+  });
+
+  test("rejects the shapes that used to blank the Saved Assays list", () => {
+    assert.equal(isWellFormedAssay(makeAssay({ genotypes: "N2" })), false);
+    assert.equal(isWellFormedAssay(makeAssay({ genotypes: ["N2", 4] })), false);
+    assert.equal(isWellFormedAssay(makeAssay({ assayName: { toString: 0 } })), false);
+    assert.equal(isWellFormedAssay(makeAssay({ assayId: "" })), false);
+    assert.equal(isWellFormedAssay(null), false);
+    assert.equal(isWellFormedAssay([makeAssay()]), false);
   });
 });
 
