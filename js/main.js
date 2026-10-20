@@ -480,6 +480,23 @@ document.addEventListener("DOMContentLoaded", async () => {
       console.warn("[Unhandled Rejection — non-fatal, skipped overlay]", reason);
       return;
     }
+    // A storage write that failed (full disk or quota, a broken IDB backend)
+    // is not a bug in the app, and the fatal overlay's only way out is
+    // Reload, which throws away any queued unsaved runs. Say so instead.
+    const isStorageFailure =
+      reason.name === "QuotaExceededError" ||
+      reason.name === "UnknownError"       ||
+      /: transaction aborted$|: request failed$/.test(reason.message);
+    if (isStorageFailure) {
+      console.error("[Unhandled storage failure — skipped overlay]", reason);
+      showToast(
+        `A change could not be saved (${reason.name === "Error" ? "storage error" : reason.name}). ` +
+        "If this keeps happening, free up storage and export a backup.",
+        "error",
+        7000
+      );
+      return;
+    }
     handleFatalError(reason);
   });
 
@@ -504,12 +521,18 @@ document.addEventListener("DOMContentLoaded", async () => {
         // structuredClone is available in all modern browsers (Chrome 98+, FF 94+, Safari 15.4+).
         let safeAssay   = null;
         let safeRun     = null;
-        try { safeAssay = structuredClone(currentAssay ?? {}); } catch { safeAssay = currentAssay ?? {}; }
-        try { safeRun   = structuredClone(activeRun ?? null);  } catch { safeRun   = activeRun   ?? null; }
+        let safeUnsaved = [];
+        try { safeAssay   = structuredClone(currentAssay ?? {}); } catch { safeAssay   = currentAssay ?? {}; }
+        try { safeRun     = structuredClone(activeRun ?? null);  } catch { safeRun     = activeRun   ?? null; }
+        try { safeUnsaved = structuredClone(unsavedRuns);        } catch { safeUnsaved = unsavedRuns; }
         const recoveryData = {
-          assay:     safeAssay,
-          activeRun: safeRun,
-          timestamp: Date.now(),
+          assay:       safeAssay,
+          activeRun:   safeRun,
+          // Completed runs whose final save failed. They may be in neither
+          // field above: once currentAssay is re-read from IDB (Finish
+          // Anyway) or cleared (return to Setup), this queue is the only copy.
+          unsavedRuns: safeUnsaved,
+          timestamp:   Date.now(),
         };
         const dataStr = "data:text/json;charset=utf-8," +
           encodeURIComponent(JSON.stringify(recoveryData, null, 2));
@@ -2865,6 +2888,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     const activeTrial = getActiveTrial(currentAssay);
     if (!activeTrial) return;
 
+    // What to put back if the save fails (see below).
+    const before = {
+      eligibleForAnalysis: run.eligibleForAnalysis,
+      manuallyOverridden:  run.manuallyOverridden,
+      overrideReason:      run.overrideReason,
+      overrideAt:          run.overrideAt,
+      ineligibleReason:    run.ineligibleReason,
+    };
+
     run.eligibleForAnalysis = newEligible;
     run.manuallyOverridden  = true;
     run.overrideReason      = reasonText.trim() || null;
@@ -2874,7 +2906,29 @@ document.addEventListener("DOMContentLoaded", async () => {
     // autoIneligibleReason regardless of what happens here.
     run.ineligibleReason    = newEligible ? null : (run.overrideReason || "Manually marked ineligible");
 
-    await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+    try {
+      await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+    } catch (err) {
+      // An unsaved override must not look applied: Finish Trial re-reads the
+      // trial from IDB, so the export would silently score the run with its
+      // old eligibility. Undo it in memory — unless the run is still queued
+      // in unsavedRuns (its final save failed), in which case this same
+      // object goes out with the queue's next retry, override included.
+      console.error("Eligibility override save failed:", err);
+      const queued = unsavedRuns.some(u => u.run === run);
+      if (!queued) Object.assign(run, before);
+      updateProgressTable();
+      refreshGenotypeDropdownCounts();
+      updateProgressBadge();
+      showToast(
+        queued
+          ? "Eligibility changed, but not saved yet: it will be saved together with the unsaved run."
+          : "Could not save the eligibility change (storage error), so nothing was changed. Please try again.",
+        "error",
+        6000
+      );
+      return;
+    }
     currentAssay.lastModifiedAt = Date.now();
     saveAssay(currentAssay).catch(err => console.error("Failed to update assay metadata:", err));
 
@@ -2898,7 +2952,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         const run   = trial?.runs.find(r => r.runId === runId);
         if (!run) return;
         const reasonInput = btn.closest("tr")?.querySelector(".override-reason-input");
-        toggleRunEligibilityOverride(run, !run.eligibleForAnalysis, reasonInput?.value ?? "");
+        toggleRunEligibilityOverride(run, !run.eligibleForAnalysis, reasonInput?.value ?? "")
+          .catch(err => console.error("Override toggle failed:", err));
       });
     }
   }
