@@ -167,8 +167,11 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
   // Dismiss on close button click.
   toast.querySelector(".toast__close").addEventListener("click", () => dismiss(toast));
 
-  // Enter / Space dismisses a focused toast.
+  // Enter / Space dismisses a focused toast. Keys on its inner buttons
+  // (Reload, ✕) belong to those buttons — dismissing here would swallow
+  // their click, so an action like Reload would never run.
   toast.addEventListener("keydown", e => {
+    if (e.target !== toast) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault(); // Prevent Space from scrolling the page.
       dismiss(toast);
@@ -221,6 +224,9 @@ export function showToast(message, type = "info", duration = 3500, actionText = 
  */
 function dismiss(toast) {
   if (toast.classList.contains("toast--exiting")) return;
+  // Pin the height so the exit animation's max-height collapse has a length
+  // to interpolate from.
+  toast.style.maxHeight = toast.offsetHeight + "px";
   toast.classList.add("toast--exiting");
 
   function cleanup() {
@@ -240,10 +246,17 @@ function dismiss(toast) {
   // Fallback timeout in case the CSS exit animation is missing or instant
   // (e.g. prefers-reduced-motion: reduce without a duration override).
   const fallback = setTimeout(cleanup, 500);
-  toast.addEventListener("animationend", () => {
+  // Only the toast's own exit animation counts: animationend bubbles, and
+  // the progress bar's finishing at auto-dismiss would otherwise remove the
+  // toast before its exit has played (and, with { once: true }, use up the
+  // listener).
+  const onEnd = e => {
+    if (e.target !== toast || e.animationName !== "toastExit") return;
+    toast.removeEventListener("animationend", onEnd);
     clearTimeout(fallback);
     cleanup();
-  }, { once: true });
+  };
+  toast.addEventListener("animationend", onEnd);
 }
 
 // Expose to window for index.html PWA update logic.

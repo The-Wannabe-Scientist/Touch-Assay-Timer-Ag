@@ -4458,8 +4458,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     // ── Non-assay screens ─────────────────────────────────────────────────
-    // Allow normal keyboard input in form fields (text inputs, selects, etc.)
-    if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "SELECT") return;
+    // Let focused form fields and activatable controls (including a toast's
+    // Reload button) keep their native Space/Enter behaviour — Space clicks
+    // a focused button on keyup, which preventDefault() here would cancel.
+    // (`focused` is document.activeElement, read at the top of this handler.)
+    if (focused && focused !== document.body &&
+        focused.matches("input, select, textarea, button, a[href], summary, [role='button'], [contenteditable]")) return;
 
     // Space only: dismiss toast or trigger tap
     if (event.key === " ") {

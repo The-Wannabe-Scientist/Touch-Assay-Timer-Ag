@@ -2216,8 +2216,14 @@ body.state-warming-up #visualMetronomeContainer {
   animation: toastEnter 0.28s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
-/* Exit state */
+/* Exit state. The explicit start matters: swapping in this animation drops
+   toastEnter's fill, and without a "from" the toast would snap back to the
+   enter animation's invisible starting style instead of fading out. */
 @keyframes toastExit {
+  from {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
   to {
     opacity: 0;
     transform: translateX(32px) scale(0.95);
