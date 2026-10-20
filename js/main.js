@@ -202,6 +202,15 @@ let runBinSize = 10;
  */
 let runGraceSec = 0;
 
+/**
+ * Cue mode ("tick"/"count"/"tens"/"bins") for the current run, frozen by
+ * startCueLoop(). Each stimulus's tick is scheduled ~200 ms early and its
+ * speech fires on time; reading the live setting for each could leave a
+ * stimulus with no cue at all — while its window is still scored.
+ * @type {"tick"|"count"|"tens"|"bins"}
+ */
+let runVoiceMode = "tick";
+
 /** @type {number} AudioContext time when the next speech/UI update should fire. */
 let nextSpeechTime = 0.0;
 
@@ -828,10 +837,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         {
           const _pSel = UI.Inputs.genotypeSelect.value;
           if (_pSel && currentAssay) {
-            const _pAt = getActiveTrial(currentAssay);
-            const _pN  = (_pAt?.runs.filter(
-              r => r.genotype === _pSel && r.status === "completed" && r.eligibleForAnalysis
-            ).length ?? 0) + 1;
+            const _pN  = nextAnimalIndex(getActiveTrial(currentAssay), _pSel);
             UI.Displays.tapLabel.textContent = `Start ${_pSel} (Animal ${_pN})`;
           } else {
             UI.Displays.tapLabel.textContent = "Select Genotype to Start";
@@ -985,6 +991,31 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
 
+  /**
+   * The animal index the next run of `genotype` in `trial` gets: one more
+   * than the highest index an animal already holds.
+   *
+   * A run holds its index once it has counted as data — eligible now, or a
+   * completed run that was eligible automatically (so marking an earlier
+   * animal Ineligible doesn't hand its number to the next worm). A failed
+   * attempt holds nothing, so its retry shares the index, as designed.
+   *
+   * @param {Object|null} trial
+   * @param {string}      genotype
+   * @returns {number}
+   */
+  function nextAnimalIndex(trial, genotype) {
+    let max = 0;
+    for (const r of trial?.runs ?? []) {
+      if (r.genotype !== genotype || r.status === "active") continue;
+      const holdsIndex = r.eligibleForAnalysis || (r.status === "completed" && r.autoEligibleForAnalysis);
+      if (!holdsIndex) continue;
+      const n = Number(r.animalIndex) || 0;
+      if (n > max) max = n;
+    }
+    return max + 1;
+  }
+
   /* -----------------------------------------------------------------------
      Run Lifecycle — Start
   ----------------------------------------------------------------------- */
@@ -1025,11 +1056,24 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // Count only eligible runs for this genotype to determine the next animal index,
-    // consistent with the tap-button and genotype-dropdown counters
-    const animalIndex = activeTrial.runs.filter(
-      run => run.genotype === selectedGenotype && run.status === "completed" && run.eligibleForAnalysis
-    ).length + 1;
+    // The warmup countdown can outlast the screen timeout or be backgrounded.
+    // A run started in a hidden page can't be tapped, so every window would
+    // be stored as a response.
+    if (document.visibilityState === "hidden") {
+      showToast("Run not started: the app was in the background when the countdown ended.", "error", 6000);
+      return;
+    }
+
+    // The audio context can be suspended or interrupted (on iOS: a call, an
+    // alarm, Siri) after the start tap. A run on a stopped audio clock plays
+    // no cues and is cut short by the timing-gap check, so don't start one.
+    if (!isAudioReady()) {
+      showToast("Run not started: audio is interrupted. Tap twice to try again.", "error", 6000);
+      return;
+    }
+
+    // Same numbering the tap button's "Start <G> (Animal N)" label shows.
+    const animalIndex = nextAnimalIndex(activeTrial, selectedGenotype);
 
     const run = createRun({
       genotype:          selectedGenotype,
@@ -1114,6 +1158,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Forward bin size to audio module for "bins" voice mode
     setBinSpeak(runBinSize);
+    runVoiceMode = getVoiceMode();
 
     // Reset all scheduling counters
     currentStimulusIndex    = 0;
@@ -1279,7 +1324,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         // spam assistive tech at typical ISIs.
         if (
           UI.Displays.stimulusProgressAnnouncer &&
-          getVoiceMode() === "tick" &&
+          runVoiceMode === "tick" &&
           (displayIndex === 1 || displayIndex % 10 === 0)
         ) {
           UI.Displays.stimulusProgressAnnouncer.textContent =
@@ -1291,7 +1336,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const nextBeatAlsoDue = (currentTime >= nextSpeechTime + runISI)
                              && (nextSpeechIndex + 1 < runStimCount);
         if (!nextBeatAlsoDue) {
-          triggerImmediateSpeech(displayIndex, runISI);
+          triggerImmediateSpeech(displayIndex, runISI, runVoiceMode);
           speechFired = true;
         }
 
@@ -1439,7 +1484,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         stopRunEarly(`Timing interrupted — stimulus ${nextAudioStimulusIndex + 1} cue could not be played on time`);
         return;
       }
-      scheduleWebAudioTick(nextAudioStimulusIndex + 1, runISI, nextAudioScheduleTime);
+      scheduleWebAudioTick(nextAudioStimulusIndex + 1, runISI, nextAudioScheduleTime, runVoiceMode);
       nextAudioScheduleTime += runISI;
       nextAudioStimulusIndex++;
     }
@@ -1761,10 +1806,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
         // activeTrial can be null if the trial was abandoned/completed by
         // another code path. Use optional chaining consistent with the timeout branch.
-        const activeTrial = getActiveTrial(currentAssay);
-        const nextIndex   = (activeTrial?.runs.filter(
-          r => r.genotype === selectedGenotype && r.status === "completed" && r.eligibleForAnalysis
-        ).length ?? 0) + 1;
+        const nextIndex   = nextAnimalIndex(getActiveTrial(currentAssay), selectedGenotype);
 
         UI.Displays.tapLabel.textContent = `Tap again to start ${selectedGenotype} (Animal ${nextIndex})`;
 
@@ -1777,12 +1819,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             const freshGenotype = UI.Inputs.genotypeSelect.value;
             // Recompute freshly — do not use the closure-captured nextIndex which was
             // calculated at first-tap time and may be stale if a run completed in between.
-            const activeTrial = getActiveTrial(currentAssay);
-            const freshIndex = (activeTrial?.runs.filter(
-              r => r.genotype === freshGenotype &&
-                   r.status === "completed" &&
-                   r.eligibleForAnalysis
-            ).length ?? 0) + 1;
+            const freshIndex = nextAnimalIndex(getActiveTrial(currentAssay), freshGenotype);
             UI.Displays.tapLabel.textContent = `Start ${freshGenotype} (Animal ${freshIndex})`;
           }
         }, 2000);
@@ -1912,6 +1949,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     // only disables it on entering RUNNING, and the warmup isn't a state.
     UI.Buttons.finishTrial.disabled = true;
 
+    // Hold the screen on from the start of the countdown, which can be up to
+    // 60 s — longer than a typical screen timeout. Released below if no run
+    // starts; startRun() re-requests it, which replaces this lock.
+    requestWakeLock();
+
     // Lock genotype selection for the whole warmup+run duration. Without this,
     // currentState stays CONFIGURED/POISED during warmup (it isn't its own
     // STATES value), so setState()'s RUNNING-only disable never fires here —
@@ -1933,6 +1975,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         showToast("Failed to start run — storage error. Please try again.", "error");
       }
       if (currentState !== STATES.RUNNING) {
+        releaseWakeLock();
         // startRun() early-returned or threw without transitioning to RUNNING
         // (which would otherwise keep the picker disabled itself) — re-enable
         // the lock above instead of leaving it stuck disabled with no run active.
@@ -1977,6 +2020,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     /** Cleans up warmup UI without starting a run (cancelled path). */
     const _cancelWarmupUI = () => {
       isWarmingUp = false;
+      if (currentState !== STATES.RUNNING) releaseWakeLock();
       document.body.classList.remove("state-warming-up");
       if (bar) {
         bar.classList.remove("warmup");
@@ -2004,8 +2048,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         // Restore the tap button label so it doesn't show the stale "Tap again…" text.
         const sel = UI.Inputs.genotypeSelect.value;
         if (sel) {
-          const at = getActiveTrial(currentAssay);
-          const n  = (at?.runs.filter(r => r.genotype === sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
+          const n  = nextAnimalIndex(getActiveTrial(currentAssay), sel);
           UI.Displays.tapLabel.textContent = `Start ${sel} (Animal ${n})`;
         }
       }
@@ -2065,6 +2108,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       showToast("Failed to start run — storage error. Please try again.", "error");
     }
     if (currentState !== STATES.RUNNING) {
+      releaseWakeLock();
       // Same safety net as the no-warmup branch above: startRun() early-returned
       // or threw without transitioning to RUNNING, so re-enable the picker
       // locked at the top of this function instead of leaving it stuck disabled.
@@ -2094,10 +2138,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    const activeTrial = getActiveTrial(currentAssay);
-    const nextIndex   = (activeTrial?.runs.filter(
-      r => r.genotype === selectedGenotype && r.status === "completed" && r.eligibleForAnalysis
-    ).length ?? 0) + 1;
+    const nextIndex   = nextAnimalIndex(getActiveTrial(currentAssay), selectedGenotype);
     UI.Displays.tapLabel.textContent = `Start ${selectedGenotype} (Animal ${nextIndex})`;
   }
 
@@ -3511,12 +3552,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Fires when the app is sent to the background (visibilityState = "hidden").
-   * Emergency-flushes the current run data to IDB before the browser suspends us.
+   * Stops a run in progress as interrupted (stopRunEarly() also saves it).
    *
-   * The scheduler's timing gap check will stop the run when the app resumes
-   * (because the gap will exceed 2×ISI), so we only need to save here, not stop.
-   * That check measures wall-clock time as well as AudioContext time, so it
-   * still fires when the context was suspended along with the page.
+   * The experimenter can't tap a hidden page, so every window scored while
+   * hidden would be stored as a response. On phones the page is suspended
+   * and the scheduler's timing-gap check stopped such a run on resume, but
+   * desktop browsers keep an audible tab and its worker ticking in the
+   * background: the gap check never fires there, and the run used to finish
+   * as eligible.
    *
    * Also re-requests the Wake Lock when the app returns to the foreground,
    * because Wake Locks are released automatically when the page is hidden.
@@ -3527,25 +3570,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (document.visibilityState === "hidden") stopTestRig();
 
     if (document.visibilityState === "hidden" && currentState === STATES.RUNNING && currentAssay) {
-      // Emergency flush: persist whatever is recorded so far before the browser suspends us.
-      // Do NOT call stopRunEarly() here — the scheduler's gap check (Step 0) will stop the
-      // run cleanly when the app resumes once the gap exceeds 2×ISI. Calling stopRunEarly()
-      // here AND letting the gap check fire on resume creates a double-stop race where two
-      // concurrent IDB writes target the same run record.
-      const activeTrial = getActiveTrial(currentAssay);
-      const run = activeRun || activeTrial?.runs.find(r => r.status === "active");
-      if (run && activeTrial) {
-        saveRun(currentAssay.assayId, activeTrial.trialId, run).catch(() => {});
-      }
+      // No double stop with the scheduler's gap check: stopRunEarly() leaves
+      // RUNNING and nulls activeRun synchronously, so no later tick can
+      // reach that check for this run.
+      stopRunEarly("App was hidden mid-run, so taps could not be recorded");
     }
 
     // Wake Locks are released when hidden; re-acquire when visible, but only
-    // if a run is still active — there is no point holding the lock otherwise.
-    // Also check activeRun !== null. On slow devices the timing-gap auto-stop
-    // in scheduler() fires on the first tick after resume, which means currentState
-    // is still RUNNING when this handler fires. Without the activeRun guard, we
-    // re-acquire a lock that will be released again moments later.
-    if (wantsWakeLock && document.visibilityState === "visible" && currentState === STATES.RUNNING && activeRun !== null) {
+    // while a run or its warmup countdown is still going — there is no point
+    // holding the lock otherwise. The activeRun check covers the moment a
+    // run is being torn down while currentState still reads RUNNING.
+    if (wantsWakeLock && document.visibilityState === "visible" &&
+        ((currentState === STATES.RUNNING && activeRun !== null) || isWarmingUp)) {
       await requestWakeLock();
     }
   });
@@ -4179,8 +4215,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       UI.Buttons.tap.classList.remove("warming-up");
       const _sel = UI.Inputs.genotypeSelect.value;
       if (_sel && (currentState === STATES.CONFIGURED || currentState === STATES.POISED)) {
-        const _at = getActiveTrial(currentAssay);
-        const _n  = (_at?.runs.filter(r => r.genotype === _sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
+        const _n  = nextAnimalIndex(getActiveTrial(currentAssay), _sel);
         UI.Displays.tapLabel.textContent = `Start ${_sel} (Animal ${_n})`;
       }
       return;
@@ -4658,11 +4693,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   UI.Inputs.genotypeSelect.addEventListener("change", e => {
     if (currentState === STATES.CONFIGURED || currentState === STATES.POISED) {
       const selected    = e.target.value;
-      // activeTrial can be null; use optional chaining to prevent crash.
-      const activeTrial = getActiveTrial(currentAssay);
-      const nextIndex   = (activeTrial?.runs.filter(
-        r => r.genotype === selected && r.status === "completed" && r.eligibleForAnalysis
-      ).length ?? 0) + 1;
+      // activeTrial can be null; nextAnimalIndex() handles that.
+      const nextIndex   = nextAnimalIndex(getActiveTrial(currentAssay), selected);
 
       UI.Displays.tapLabel.textContent = `Start ${selected} (Animal ${nextIndex})`;
 
@@ -5311,7 +5343,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll('input[name="voiceMode"]').forEach(input => {
     input.addEventListener("change", () => {
       if (!input.checked) return;
-      stopSpeech();
+      // The running run keeps the mode it started with (runVoiceMode), so
+      // don't cut off its current cue.
+      if (currentState !== STATES.RUNNING) stopSpeech();
       setVoiceMode(input.value);
       // wrap in try/catch for Private Browsing / QuotaExceededError.
       try { localStorage.setItem(LS_KEYS.VOICE_MODE, input.value); } catch { /* storage unavailable */ }

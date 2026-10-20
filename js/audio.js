@@ -68,8 +68,18 @@ let speechConfig = { rate: 1.0, pitch: 1.0, lang: "en" };
    Public Getters & Setters
    ========================================================================== */
 
-/** @returns {boolean} Whether the audio context is running and ready for scheduling. */
-export const isAudioReady = () => isReady;
+/**
+ * Whether the audio context is running and ready for scheduling.
+ *
+ * Reads the live context state, not just the sticky "resumed once" flag:
+ * iOS suspends or interrupts the context (a call, an alarm, Siri) without
+ * the page being hidden, and a context that is no longer running plays no
+ * cues and stops the clock the scheduler runs on. Reporting it as not ready
+ * makes the next start tap call warmUpAudio() again, inside its gesture.
+ *
+ * @returns {boolean}
+ */
+export const isAudioReady = () => isReady && audioCtx?.state === "running";
 
 /**
  * Changes the active voice/cue mode.
@@ -184,10 +194,20 @@ function getAudioContext() {
  * @returns {Promise<void>} Resolves when the context is running.
  */
 export function warmUpAudio() {
-  if (isReady) return Promise.resolve();  // Already running — no-op.
   const ctx = getAudioContext();
-  return ctx.resume()
-    .then(() => { isReady = true; })
+  if (ctx.state === "running") {  // Already running — no-op.
+    isReady = true;
+    return Promise.resolve();
+  }
+  // WebKit's resume() stays pending while an audio-session interruption is
+  // still in progress, so don't let a start tap hang on it: give it a second,
+  // then judge by the state it actually reached.
+  const settleWindow = new Promise(resolve => setTimeout(resolve, 1000));
+  return Promise.race([ctx.resume(), settleWindow])
+    .then(() => {
+      if (ctx.state !== "running") throw new Error(`AudioContext is still ${ctx.state}`);
+      isReady = true;
+    })
     .catch(err => {
       // Log the cause but re-throw so callers can surface a user-facing error.
       // Swallowing here would let execution continue with a suspended context,
@@ -441,15 +461,20 @@ export function playCompletionTone() {
  * @param {number} stimulusIndex - 1-based stimulus number being scheduled.
  * @param {number} assayIsi      - ISI of the active assay in seconds.
  * @param {number} exactTime     - AudioContext timestamp to schedule the beep.
+ * @param {"tick"|"count"|"tens"|"bins"} [mode] - Cue mode to schedule for.
+ *   The run engine passes the mode it froze at run start: the tick is
+ *   scheduled ~200 ms ahead and speech fires on time, so deciding each from
+ *   the live setting could give a stimulus neither when the mode changes
+ *   in between.
  */
-export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime) {
+export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime, mode = voiceMode) {
   // Fast ISI override: always tick even in count mode (speech can't keep up).
-  if (voiceMode === "count" && assayIsi < 1) {
+  if (mode === "count" && assayIsi < 1) {
     playTick(exactTime);
     return;
   }
 
-  switch (voiceMode) {
+  switch (mode) {
     case "tick":
       // Tick on every stimulus.
       playTick(exactTime);
@@ -486,12 +511,13 @@ export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime) {
  *
  * @param {number} stimulusIndex - 1-based stimulus number to announce.
  * @param {number} assayIsi      - ISI of the active assay in seconds.
+ * @param {"tick"|"count"|"tens"|"bins"} [mode] - Cue mode; see scheduleWebAudioTick().
  */
-export function triggerImmediateSpeech(stimulusIndex, assayIsi) {
+export function triggerImmediateSpeech(stimulusIndex, assayIsi, mode = voiceMode) {
   // Fast ISI: speech can't complete before the next tick — skip all voice modes.
   if (assayIsi < 1) return;
 
-  switch (voiceMode) {
+  switch (mode) {
     case "count":
       // Speak the stimulus number on every interval.
       speak(String(stimulusIndex));
