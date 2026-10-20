@@ -16,7 +16,7 @@
 | DRV2605L Haptic Motor Driver breakout | 1 | Adafruit #2305 or clone; I²C, 3.3V-compatible |
 | **Option A:** LRA motor, 1.8V RMS | 1 | Z-axis linear resonant actuator (e.g. Jinlong G0832012D). Observe +/− polarity. |
 | **Option B:** ERM coin motor, 3V | 1 | Eccentric rotating mass (standard coin vibration motor). No strict polarity. |
-| 1N5819 Schottky Diode | 2 | OR-diode loop: one from XIAO Pin 8 (USB 5 V), one from LiPo BAT+ wire direct |
+| 1N5819 Schottky Diode | 2 | OR-diode loop: one from XIAO Pin 14 (5V / VBUS), one from LiPo BAT+ wire direct |
 | 220µF–470µF electrolytic capacitor | 1 | Bulk decoupling across DRV2605L VIN/GND — positive leg to VIN |
 | **Optional:** External RGB LED (common-cathode, separate R/G/B) | 1 | For visible status outside enclosure. See wiring + resistor table below. |
 | **270 Ω resistor** | 1 | Red LED current-limit (5 mA @ Vf ≈ 2.0 V, 3.3 V rail) |
@@ -46,7 +46,7 @@
 > The XIAO nRF52840 runs at **3.3V logic**. The Adafruit DRV2605L breakout includes a 3.3V regulator and level-shifter, accepting both 3.3V and 5V on VIN. Power it via the dual-voltage OR loop described below.
 
 > [!IMPORTANT]
-> **Clone DRV2605L boards** (non-Adafruit) have an **EN pin** that floats LOW by default, disabling the output stage entirely. Connect EN → XIAO D3 (firmware drives it HIGH) or hardwire EN → 3.3V. If you skip this, the motor will never vibrate regardless of correct register settings.
+> **Clone DRV2605L boards** (non-Adafruit) have an **EN pin** that floats LOW by default, disabling the output stage entirely. Connect EN → XIAO D3 (firmware drives it HIGH) or hardwire EN → 3.3V (XIAO Pin 12, 3V3). If you skip this, the motor will never vibrate regardless of correct register settings.
 
 > [!TIP]
 > The DRV2605L I²C address is fixed at **0x5A**. If adding another I²C device (e.g. IMU), ensure no address conflict.
@@ -55,22 +55,24 @@
 
 ## 🗺️ XIAO BLE nRF52840 Pinout Reference
 
+Top view, component side up, USB-C at the top:
+
 ```
-         USB-C
-    ┌─────────────┐
-D0  │ 1         14│ 3.3V
-D1  │ 2         13│ GND
-D2  │ 3         12│ RST
-D3  │ 4         11│ GND
-D4/SDA│ 5      10│ BAT− (bottom pad)
-D5/SCL│ 6       9│ BAT+ (bottom pad)
-D6  │ 7         8│ VIN (5V from USB)
-    └─────────────┘
-       D7  D8  (additional pads on back, near USB-C)
+              USB-C
+         ┌─────────────┐
+D0/A0    │ 1         14│ 5V  (VBUS: USB 5 V, live only while USB is plugged in)
+D1/A1    │ 2         13│ GND
+D2/A2    │ 3         12│ 3V3 (LDO output)
+D3/A3    │ 4         11│ D10 / MOSI
+D4/SDA   │ 5         10│ D9  / MISO
+D5/SCL   │ 6          9│ D8  / SCK
+D6/TX    │ 7          8│ D7  / RX
+         └─────────────┘
+BAT+ / BAT− are solder pads on the underside, not header pins.
 ```
 
 > [!NOTE]
-> D7 and D8 are exposed on the back pads. Verify against the [official Seeed schematic](https://wiki.seeedstudio.com/XIAO_BLE/) before soldering.
+> D7 (Pin 8) and D8 (Pin 9) are ordinary header pins on the right-hand edge — the bottom two. Verify against the [official Seeed pinout](https://wiki.seeedstudio.com/XIAO_BLE/) before soldering.
 
 **Bottom pads (required for battery):**
 - `BAT+` → LiPo red wire
@@ -86,8 +88,8 @@ The DRV2605L is powered **directly from the LiPo battery** in an OR-diode loop w
 
 > [!IMPORTANT]
 > **Diode anode sources are:**
-> - **Diode 1 anode → XIAO Pin 8 (USB 5 V)** — provides power when USB cable is connected
-> - **Diode 2 anode → LiPo BAT+ wire directly** — tap the red wire *before* it reaches the XIAO BAT+ pad, **not** XIAO Pin 14 (3.3 V) and **not** XIAO Pin 8
+> - **Diode 1 anode → XIAO Pin 14 (5V / VBUS)** — provides power when USB cable is connected
+> - **Diode 2 anode → LiPo BAT+ wire directly** — tap the red wire *before* it reaches the XIAO BAT+ pad, **not** XIAO Pin 12 (3V3) and **not** XIAO Pin 14 (5V)
 >
 > Both cathodes (striped ends) join at a single node → DRV2605L VIN. Whichever source is higher wins; the Schottky diodes prevent back-feed.
 
@@ -102,7 +104,7 @@ The DRV2605L is powered **directly from the LiPo battery** in an OR-diode loop w
 | OUTN | Motor (−) terminal | |
 
 **Step-by-step OR loop wiring:**
-1. Solder **Diode 1 anode** → XIAO **Pin 8 (5 V USB)**
+1. Solder **Diode 1 anode** → XIAO **Pin 14 (5V / VBUS)**
 2. Run a short (~5 cm) wire from the **LiPo red (+) wire**, tap it *before* the XIAO BAT+ pad → **Diode 2 anode**
 3. Twist both **cathodes** (striped ends) together → DRV2605L **VIN**
 4. Solder a **220 µF–470 µF** electrolytic cap across DRV2605L **VIN / GND** (positive → VIN), as close to the VIN/GND pins as possible
@@ -111,7 +113,7 @@ The DRV2605L is powered **directly from the LiPo battery** in an OR-diode loop w
 > The 1N5819 Schottky drop is ~0.3 V. When on battery alone the DRV sees ~3.4–3.9 V (3.7–4.2 V LiPo minus 0.3 V). The DRV2605L VIN range is 2.5–5.2 V — this is fully within spec.
 
 > [!WARNING]
-> **Never connect Diode 2 anode to XIAO Pin 14 (3.3 V).** That is a regulated output from the XIAO LDO, not a battery tap. Connecting it there would feed motor current backwards through the LDO and destroy it.
+> **Never connect Diode 2 anode to XIAO Pin 12 (3V3).** That is a regulated output from the XIAO LDO, not a battery tap. Connecting it there would feed motor current backwards through the LDO and destroy it.
 
 ```text
   LiPo BAT+ wire (red)
@@ -123,7 +125,7 @@ The DRV2605L is powered **directly from the LiPo battery** in an OR-diode loop w
   ▼                                                          ├──→ DRV2605L VIN
   XIAO BAT+ pad (bottom)                                     │       │
                                                              │    [220–470µF]
-  XIAO Pin 8 (5 V USB) ──[>| 1N5819 D1 ]────────────────────┘       │
+  XIAO Pin 14 (5V)     ──[>| 1N5819 D1 ]────────────────────┘       │
                                                                       │
   XIAO Pin 13 (GND) ────────────────────────────────────────→ DRV GND┘
   XIAO D4 (Pin 5)   ────────────────────────────────────────→ DRV SDA
@@ -166,13 +168,13 @@ XIAO GPIO output = **3.3 V**. Target current = **5 mA** per channel (safe, visib
 > If your green or blue LED has Vf ≥ 3.1 V, drop to **68 Ω** or even **47 Ω** for green/blue. Measure across the LED with a multimeter; if it reads < 2.5 V when your resistor is connected, reduce the resistor.
 
 ```
-  XIAO D6 ──→ 270 Ω ──→ R anode  ┐
-  XIAO D7 ──→ 100 Ω ──→ G anode  ├─ Common-Cathode RGB LED
-  XIAO D8 ──→ 100 Ω ──→ B anode  ┘
+  XIAO D6 (Pin 7) ──→ 270 Ω ──→ R anode  ┐
+  XIAO D7 (Pin 8) ──→ 100 Ω ──→ G anode  ├─ Common-Cathode RGB LED
+  XIAO D8 (Pin 9) ──→ 100 Ω ──→ B anode  ┘
   GND ──────────────────→ Cathode
 ```
 
-If your LED is **common-anode** instead, uncomment `#define EXT_RGB_COMMON_ANODE` in the firmware. The same resistor values apply — just place them between XIAO D6/D7/D8 and the individual anodes, with the common anode tied to 3.3 V.
+If your LED is **common-anode** instead, uncomment `#define EXT_RGB_COMMON_ANODE` in the firmware. The same resistor values apply — just place them between XIAO D6/D7/D8 and the individual anodes, with the common anode tied to 3.3 V (XIAO Pin 12, 3V3).
 
 ### LiPo Battery → XIAO (bottom pads)
 
@@ -412,9 +414,9 @@ Write a byte to the Heartbeat characteristic to test the watchdog:
 |---|---|
 | Board not detected in IDE | Double-tap Reset; use a USB-C **data** cable (not charge-only); try different USB port |
 | Upload fails | Select **Seeed nRF52 mbed-enabled Boards** package in Board Manager; verify Port is selected |
-| XIAO resets or reboots during vibration | DRV2605L drawing too much from 3.3 V — **check OR loop wiring**; VIN must come from LiPo/USB5V, not Pin 14 |
+| XIAO resets or reboots during vibration | DRV2605L drawing too much from 3.3 V — **check OR loop wiring**; VIN must come from LiPo/USB5V, not Pin 12 (3V3) |
 | OR loop: DRV2605L works on USB but not on battery alone | Diode 2 anode is not connected to LiPo BAT+ — it may be floating. Tap the red wire before the BAT+ pad |
-| OR loop: DRV2605L works on battery but not on USB | Diode 1 anode is not connected to XIAO Pin 8 (5 V USB); verify with multimeter (should read ~5 V when USB plugged in) |
+| OR loop: DRV2605L works on battery but not on USB | Diode 1 anode is not connected to XIAO Pin 14 (5V / VBUS); verify with multimeter (should read ~5 V when USB plugged in) |
 | Decoupling cap polarity wrong | Electrolytic caps are polarised — positive leg to VIN, negative to GND. Reversed caps can short or explode |
 
 ### DRV2605L & Motor

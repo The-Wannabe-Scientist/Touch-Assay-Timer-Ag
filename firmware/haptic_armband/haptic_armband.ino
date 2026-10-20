@@ -60,12 +60,19 @@
 Adafruit_DRV2605 drv;
 
 // ── XIAO nRF52840 battery monitoring ─────────────────────────
-// PIN_VBAT = P0.31, routed through an on-board 1MΩ/1MΩ divider.
-// Pin 14 (P0.14) gates the divider FET — drive HIGH before reading.
+// PIN_VBAT = P0.31, the midpoint of an on-board 1MΩ (top) / 510kΩ (bottom)
+// divider across the battery. The divider's low side is P0.14: drive it
+// LOW to enable reading, and KEEP it LOW — HIGH or floating puts P0.31 at
+// or above VDD (Seeed wiki warning). Use the core's own pin names: on the
+// mbed core, digital pin 14 is the blue LED, not P0.14.
 #ifndef PIN_VBAT
-  #define PIN_VBAT 32
+  #define PIN_VBAT P0_31
 #endif
-#define VBAT_ENABLE_PIN 14
+#ifdef PIN_VBAT_ENABLE
+  #define VBAT_ENABLE_PIN PIN_VBAT_ENABLE   // mbed core: index 32 = P0.14
+#else
+  #define VBAT_ENABLE_PIN P0_14             // PinName overload
+#endif
 
 // ── DRV2605L EN pin (clone boards only) ─────────────────────
 // Clone boards float EN low, disabling OUTP/OUTN completely.
@@ -332,18 +339,16 @@ void vibrateSOS() {                    // Morse "SOS": BLE-init failure, critica
 }
 
 // ── Battery Reading ──────────────────────────────────────────
-// Reads WLY 602040 3.7V LiPo via XIAO on-board 1MΩ/1MΩ divider.
+// Reads WLY 602040 3.7V LiPo via XIAO on-board 1MΩ/510kΩ divider, which
+// setup() leaves enabled (VBAT_ENABLE_PIN LOW).
 // AR_INTERNAL2V4 = 2.4V internal reference (Seeed nRF52 BSP).
-// 12-bit ADC, divider factor ×2, LiPo range: 3.0V (0%) → 4.2V (100%).
+// 12-bit ADC, divider factor ×2.96 (1510/510), LiPo range: 3.0V (0%) → 4.2V (100%).
+// The nominal factor can be a few percent off per board (≈2.88 has been
+// measured); calibrate against a multimeter if the percentages matter.
 int readBatteryPercent() {
-  pinMode(VBAT_ENABLE_PIN, OUTPUT);
-  digitalWrite(VBAT_ENABLE_PIN, HIGH);
-  delayMicroseconds(1000);  // bumped 500→1000 µs: more settling time on 1MΩ divider under motor load
-
   int raw = analogRead(PIN_VBAT);
-  digitalWrite(VBAT_ENABLE_PIN, LOW);
 
-  float volt = raw * (2.4f / 4095.0f) * 2.0f;
+  float volt = raw * (2.4f / 4095.0f) * (1510.0f / 510.0f);
   int pct = (int)((volt - 3.0f) / 1.2f * 100.0f);
   return constrain(pct, 0, 100);
 }
@@ -485,6 +490,13 @@ void setup() {
   // Configure ADC for battery monitoring
   analogReference(AR_INTERNAL2V4);
   analogReadResolution(12);
+  // Enable the battery divider once and leave it on (a few µA through
+  // 1.5 MΩ) — see VBAT_ENABLE_PIN above for why it must never go HIGH.
+  pinMode(VBAT_ENABLE_PIN, OUTPUT);
+  digitalWrite(VBAT_ENABLE_PIN, LOW);
+  // The divider's ~338 kΩ source impedance needs the longest acquisition
+  // time; the 10 µs default under-reads.
+  analogAcquisitionTime(AT_40_US);
 
   // Enable DRV2605L output stage (EN pin on clone boards)
   pinMode(DRV_EN_PIN, OUTPUT);
