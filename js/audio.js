@@ -60,6 +60,13 @@ let binSpeakSize = 10;
 /** @type {SpeechSynthesisVoice|null} The selected TTS voice, or null if unavailable. */
 let selectedVoice = null;
 
+/**
+ * Set when an utterance fails (other than being cancelled). From then on
+ * ticks carry the Count/Tens cues — see speechCarriesCue().
+ * @type {boolean}
+ */
+let speechBroken = false;
+
 /** @type {{ rate: number, pitch: number, lang: string }} TTS configuration. */
 let speechConfig = { rate: 1.0, pitch: 1.0, lang: "en" };
 
@@ -122,8 +129,11 @@ export function getTickPitch() { return tickPitch; }
 
 /**
  * Selects the best available TTS voice for the configured language.
- * Prefers Google voices for higher quality; falls back to any matching
- * language, then to the first available voice on the system.
+ * Prefers on-device voices: network voices (e.g. Chrome's "Google …" ones)
+ * are silent offline, and late and jittery online, which a stimulus cue
+ * can't afford. Falls back to any matching language, then to any on-device
+ * voice, then to the first voice on the system — a preference order, not a
+ * filter, since some platforms report localService unreliably.
  *
  * Called on init and again when the browser's voice list changes
  * (which can happen asynchronously on some browsers).
@@ -132,11 +142,39 @@ export function loadVoices() {
   const voices = speechSynthesis.getVoices();
   if (voices.length === 0) return;  // List not ready yet; will retry via onvoiceschanged.
 
+  const langOk = v => v.lang.startsWith(speechConfig.lang);
+  const previous = selectedVoice;
   selectedVoice =
-    voices.find(v => v.lang.startsWith(speechConfig.lang) && v.name.includes("Google")) ||
-    voices.find(v => v.lang.startsWith(speechConfig.lang)) ||
+    voices.find(v => langOk(v) && v.localService && v.default) ||
+    voices.find(v => langOk(v) && v.localService) ||
+    voices.find(langOk) ||
+    voices.find(v => v.localService) ||
     voices[0] ||
     null;
+  // A failure belonged to the old voice; give the new one a chance.
+  if (selectedVoice !== previous) speechBroken = false;
+}
+
+/**
+ * Whether this browser can speak at all, and no utterance has failed yet.
+ * main.js uses it to warn that Count/Tens modes will fall back to ticks.
+ * @returns {boolean}
+ */
+export function isSpeechAvailable() {
+  return typeof speechSynthesis !== "undefined" && !speechBroken;
+}
+
+/**
+ * Whether speech can be trusted to carry a stimulus cue on its own. A
+ * network voice (or none chosen yet) can fail silently — Chrome's network
+ * engine fires no error event — so the tick plays as well in that case.
+ *
+ * @param {number} assayIsi - ISI in seconds; below 1 s speech can't keep up.
+ * @returns {boolean}
+ */
+function speechCarriesCue(assayIsi) {
+  return assayIsi >= 1 && isSpeechAvailable() &&
+    selectedVoice !== null && selectedVoice.localService !== false;
 }
 
 // speechSynthesis is not available in all browser environments
@@ -310,6 +348,12 @@ export function speak(text) {
     if (selectedVoice)         utterance.voice = selectedVoice;
     utterance.rate  = speechConfig.rate;
     utterance.pitch = speechConfig.pitch;
+    utterance.onerror = (e) => {
+      // "canceled"/"interrupted" are our own cancel() calls, not failures.
+      if (e.error === "canceled" || e.error === "interrupted") return;
+      if (!speechBroken) console.warn(`[audio] Speech failed (${e.error}); ticks will carry the cues.`);
+      speechBroken = true;
+    };
     speechSynthesis.speak(utterance);
   });
 }
@@ -377,7 +421,33 @@ export function playTick(exactTime = null) {
   osc.stop(time + 0.05);
   // Disconnect the GainNode after the oscillator ends so it is released
   // from the audio graph and eligible for GC on long-running sessions.
-  osc.onended = () => gain.disconnect();
+  const entry = { osc, gain, time };
+  pendingTicks.add(entry);
+  osc.onended = () => { pendingTicks.delete(entry); gain.disconnect(); };
+}
+
+/**
+ * Ticks booked on the audio clock that have not finished playing. The run
+ * engine books each tick ~200 ms ahead, so one can still be waiting when the
+ * run is stopped.
+ * @type {Set<{osc: OscillatorNode, gain: GainNode, time: number}>}
+ */
+const pendingTicks = new Set();
+
+/**
+ * Silences ticks booked for a future audio time. Call when a run stops, so
+ * no cue plays after it has ended. A tick already sounding is left to finish
+ * its 50 ms decay (cutting it would click).
+ */
+export function cancelScheduledTicks() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  for (const entry of pendingTicks) {
+    if (entry.time <= now) continue;
+    try { entry.gain.disconnect(); } catch { /* already gone */ }
+    try { entry.osc.stop(); } catch { /* ignore */ }
+    pendingTicks.delete(entry);
+  }
 }
 
 /**
@@ -454,9 +524,9 @@ export function playCompletionTone() {
  * Schedules the beep precisely on the AudioContext hardware clock, which is
  * immune to main-thread jank and timer throttling.
  *
- * In "count" and "tens" modes, a fast ISI (< 1s) makes the tick always play
- * (on every stimulus for "count"; on multiples of 10 too for "tens") because
- * speech would not have time to complete before the next stimulus.
+ * In "count" and "tens" modes, the tick also plays where speech would (on
+ * every stimulus for "count"; on multiples of 10 too for "tens") whenever
+ * speech can't be trusted to carry the cue — see speechCarriesCue().
  *
  * @param {number} stimulusIndex - 1-based stimulus number being scheduled.
  * @param {number} assayIsi      - ISI of the active assay in seconds.
@@ -468,11 +538,11 @@ export function playCompletionTone() {
  *   in between.
  */
 export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime, mode = voiceMode) {
-  // Fast ISI override: always tick even in count mode (speech can't keep up).
-  if (mode === "count" && assayIsi < 1) {
-    playTick(exactTime);
-    return;
-  }
+  // Count and Tens rely on speech for (some) cues. When speech can't carry
+  // them — a fast ISI (triggerImmediateSpeech() skips all speech below 1 s),
+  // no speech engine, a failed utterance, or a network voice — the tick
+  // plays instead, so no scored stimulus goes without a cue.
+  const speechOk = speechCarriesCue(assayIsi);
 
   switch (mode) {
     case "tick":
@@ -481,18 +551,14 @@ export function scheduleWebAudioTick(stimulusIndex, assayIsi, exactTime, mode = 
       break;
 
     case "count":
-      // No hardware tick in count mode — speech fires in triggerImmediateSpeech.
-      // (Fast-ISI override above already plays a tick when speech can't keep up.)
+      // Speech fires in triggerImmediateSpeech; tick only as the fallback.
+      if (!speechOk) playTick(exactTime);
       break;
 
     case "tens":
-      // Tick on all stimuli that are NOT multiples of 10
-      // (multiples will have speech instead, scheduled in triggerImmediateSpeech).
-      // Fast-ISI exception: triggerImmediateSpeech() skips ALL speech below 1s
-      // (same reason "count" mode gets the override above — speech can't finish
-      // in time), so without this, multiples of 10 would get neither a tick nor
-      // speech at fast ISIs. Tick every stimulus instead of relying on speech.
-      if (assayIsi < 1 || stimulusIndex % 10 !== 0) playTick(exactTime);
+      // Tick on all stimuli that are NOT multiples of 10 (multiples are
+      // spoken by triggerImmediateSpeech), and on those too as the fallback.
+      if (!speechOk || stimulusIndex % 10 !== 0) playTick(exactTime);
       break;
 
     case "bins":

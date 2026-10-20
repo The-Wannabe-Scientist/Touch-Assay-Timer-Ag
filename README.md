@@ -251,7 +251,7 @@ Access **Settings** from the ⋮ overflow menu in the header.
 | **Tick Pitch** | 200 – 2000 Hz (preview plays on slider move) |
 | **Speech Lead** | How many ms before stimulus the spoken count starts |
 | **Audio Cue Mode** | Tick / Count / Bins / Tens |
-| **Voice** | Select from available TTS voices in your browser |
+| **Voice** | Chosen automatically: an on-device English voice is preferred, since network voices are silent offline. If speech is unavailable or fails, Count/Tens modes play ticks instead |
 | **Warmup Countdown** | Enable/disable; 1–60 s duration (default 3 s) |
 | **Human Reaction Grace Period** | 0–400 ms (default 250 ms) — accepts a late tap as a valid non-response after the window closes |
 

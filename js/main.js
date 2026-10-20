@@ -54,7 +54,7 @@ import {
   warmUpAudio, playWarmupTone, scheduleWebAudioTick,
   triggerImmediateSpeech, getAudioTime, getOutputLatencySec, playCompletionTone,
   setTickPitch, getTickPitch, primeSpeechEngine, setBinSpeak,
-  playTick
+  playTick, cancelScheduledTicks, isSpeechAvailable
 }                                                      from "./audio.js";
 import {
   performExcelExport, performCSVExport, buildAllSections, buildHtmlTableFrom2D, RUN_STATUS_LABELS
@@ -1580,6 +1580,8 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function stopCueLoop() {
     timerWorker.postMessage("stop");
+    // The next tick is booked ~200 ms ahead; don't let it play after the stop.
+    cancelScheduledTicks();
     armbandStopHeartbeat();   // cancel heartbeat so watchdog doesn't fire between runs
     activeRun = null;  // Defensive: prevent scheduler() processing stale run
     if (visualAnimationFrame !== null) {
@@ -2387,6 +2389,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // ── Voice mode ──
     setVoiceMode(savedVoiceMode);
+    warnIfSpeechMissing(savedVoiceMode);
     document.querySelectorAll('input[name="voiceMode"]').forEach(input => {
       if (input.value === savedVoiceMode) input.checked = true;
     });
@@ -5516,10 +5519,22 @@ document.addEventListener("DOMContentLoaded", async () => {
       // don't cut off its current cue.
       if (currentState !== STATES.RUNNING) stopSpeech();
       setVoiceMode(input.value);
+      warnIfSpeechMissing(input.value);
       // wrap in try/catch for Private Browsing / QuotaExceededError.
       try { localStorage.setItem(LS_KEYS.VOICE_MODE, input.value); } catch { /* storage unavailable */ }
     });
   });
+
+  /**
+   * Tells the user when a spoken cue mode can't speak here, so the ticks
+   * they will hear instead (see scheduleWebAudioTick) aren't a surprise.
+   * @param {string} mode - The cue mode just selected.
+   */
+  function warnIfSpeechMissing(mode) {
+    if ((mode === "count" || mode === "tens") && !isSpeechAvailable()) {
+      showToast("Speech isn't available in this browser — ticks will play instead.", "warning", 5000);
+    }
+  }
 
   // ── Settings: audio controls ──────────────────────────────────────
 
