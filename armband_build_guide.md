@@ -258,7 +258,7 @@ All firmware lives in the [`firmware/`](./firmware/) directory. There are two sk
 
 | File | Purpose |
 |---|---|
-| [`firmware/haptic_test/haptic_test.ino`](./firmware/haptic_test/haptic_test.ino) | Hardware verification — runs vibration patterns on boot, no BLE needed |
+| [`firmware/haptic_test/haptic_test.ino`](./firmware/haptic_test/haptic_test.ino) | Hardware verification — dumps the DRV2605L registers and holds the motor on for 10 s on boot, no BLE needed |
 | [`firmware/haptic_armband/haptic_armband.ino`](./firmware/haptic_armband/haptic_armband.ino) | Full BLE firmware — connects to the Touch Assay Timer web app |
 
 ### Choosing LRA or ERM motor
@@ -283,19 +283,24 @@ Also at the top of each file:
 
 ### Voltage values — adjusting for your motor
 
-If your specific motor has different ratings, change these two register values in the `initMotor()` function:
+The drive levels are set by `DRV_RATED_VOLTAGE` and `DRV_OD_CLAMP` in the **DRIVE LEVELS** block at the top of `haptic_armband.ino` (written to the chip by `configureMotorRegisters()`). The BLE sketch's defaults drive the motor **harder than the BOM parts are rated for**, for a stronger buzz. `haptic_test.ino` uses lower, closer-to-rated values. To run a motor at its rating, use the "BOM-rated" column below, or work out your own from the formulas (TI DRV2605L datasheet, SLOS854D).
 
-**LRA:**
+**LRA** (closed loop):
 ```
-RATED_VOLTAGE (0x16) = V_rms × 255 / 5.3   (default: 0x57 = 1.8V RMS)
-OD_CLAMP      (0x17) = V_od  × 255 / 5.6   (default: 0x60 = 2.1V, ~17% above rated)
+V_rms = RATED_VOLTAGE × 20.71 mV / sqrt(1 − (4·t_SAMPLE + 300 µs)·f_LRA)   (t_SAMPLE = 300 µs by default)
 ```
 
-**ERM:**
-```
-RATED_VOLTAGE (0x16) = V_rated × 255 / 5.3  (default: 0x90 = 3.0V)
-OD_CLAMP      (0x17) = V_peak  × 255 / 5.6  (default: 0x96 = 3.3V)
-```
+| Register | `haptic_armband.ino` default | BOM-rated (1.8 V RMS LRA, 235 Hz) | `haptic_test.ino` |
+|---|---|---|---|
+| RATED_VOLTAGE (0x16) | `0x78` (≈ 3.1 V RMS) | `0x46` | `0x57` |
+| OD_CLAMP (0x17) | `0xA4` | `0x60` | `0x60` |
+
+**ERM** (open loop): only OD_CLAMP sets the drive, at 21.59 mV per LSB (and never above the supply rail). RATED_VOLTAGE is not used.
+
+| Register | `haptic_armband.ino` default | BOM-rated (3 V ERM) | `haptic_test.ino` |
+|---|---|---|---|
+| OD_CLAMP (0x17) | `0xD0` (≈ 4.5 V) | `0x8B` (≈ 3.0 V) | `0x96` (≈ 3.2 V) |
+| RATED_VOLTAGE (0x16) | `0xC0` (unused) | — | `0x90` (unused) |
 
 ---
 
@@ -338,18 +343,29 @@ Wire per the **External RGB LED** diagram above (270 Ω red, 100 Ω green/blue �
 3. **Set motor type:** ensure the correct `#define MOTOR_LRA` or `#define MOTOR_ERM` is active
 4. Upload and open **Serial Monitor at 115200 baud**
 
-**Expected Serial output:**
+**Expected Serial output** (abridged — the register dumps are longer):
 ```
-I2C scanner found: 0x5A
-LRA auto-calibration OK.       ← (or "DRV2605L: ERM open-loop mode." for ERM)
-  A_CAL_COMP (0x18): 0x0C
-  A_CAL_BEMF (0x19): 0x6C
-Haptic test ready.
+>>> DIAGNOSTIC HAPTIC TEST
+Running I2C scanner...
+  Found: 0x5A
+I2C scan complete.
+DRV2605L responded to begin().
+=== Register dump [AFTER begin(), BEFORE manual init] ===
+  ...
+--- Configuring LRA closed-loop ---
+LRA auto-calibration complete.         ← ERM prints "DRV2605L initialised: ERM open-loop mode." instead
+  A_CAL_COMP (0x18): 0x..
+  A_CAL_BEMF (0x19): 0x..
+=== Register dump [AFTER manual init] ===
+  ...
+>>> OUTPUT ON — measure OUT+ to GND now.
+  t=1s  STATUS=0x..  MODE=0x5  RTP=0x7F      (one line per second, 10 in all)
+>>> Output OFF. Paste the full log above for analysis.
 ```
 
-5. Confirm motor vibrates the double-tap + long-pulse pattern
-6. External LED should be **solid green** when ready
-7. Then upload `firmware/haptic_armband/haptic_armband.ino` and test BLE
+5. Confirm the motor vibrates **continuously for about 10 s** (RTP mode at full amplitude). You can measure OUTP/OUTN with a multimeter during this window.
+6. The external LED turns **solid green** after the 10 s test finishes, or **red** if the DRV2605L is not found
+7. Then upload `firmware/haptic_armband/haptic_armband.ino` and test BLE. The double-tap "ready" buzz comes from this sketch, not from `haptic_test.ino`.
 
 > [!TIP]
 > If the motor is silent but Serial output looks correct, check the **EN pin** is connected and driven HIGH (see Critical Notes above). This is the most common cause of 0V output on clone DRV2605L boards.
@@ -427,7 +443,7 @@ Write a byte to the Heartbeat characteristic to test the watchdog:
 | Motor silent, no Serial errors, 0 V on OUTP/OUTN | **EN pin not driven HIGH** — most common issue on clone boards. Check D3 is wired to EN and firmware is uploading |
 | Motor silent, registers look correct in Serial | Check continuity of OUTP/OUTN → motor leads with multimeter; check for cold solder joints |
 | Motor cuts out immediately (overcurrent) | ERM stall-current exceeded driver limit; reduce OD_CLAMP (0x17) temporarily; verify motor rated current |
-| LRA: motor vibrates but weakly | Verify RATED_VOLTAGE (0x57) and OD_CLAMP (0x60) match your motor spec sheet; confirm auto-cal succeeded (A_CAL_COMP and A_CAL_BEMF both non-zero) |
+| LRA: motor vibrates but weakly | Verify `DRV_RATED_VOLTAGE` and `DRV_OD_CLAMP` (top of the sketch — see *Voltage values* above) suit your motor's spec sheet; confirm auto-cal succeeded (A_CAL_COMP and A_CAL_BEMF both non-zero) |
 | LRA: `WARNING: auto-calibration failed` | Check OUTP/OUTN polarity; confirm RATED_VOLTAGE not too low; try slightly increasing OD_CLAMP |
 | ERM: motor hums but doesn't spin | ERM closed-loop tracking failed on small motor; ensure open-loop is set (`0x1D` bit 5 = 1 in firmware) |
 | DRV2605L I²C lost mid-use | Firmware has auto-recovery every 5 s; check wiring strain relief; add extra GND wire if board moves |
