@@ -2920,6 +2920,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     const activeTrial = getActiveTrial(currentAssay);
     if (!activeTrial) return;
 
+    // One save per run at a time. A second click while the first save is
+    // pending would snapshot the first click's unsaved state as `before`,
+    // and its rollback would then put back a state that isn't in IDB.
+    if (overrideSavesInFlight.has(run.runId)) return;
+    overrideSavesInFlight.add(run.runId);
+    try {
+      await applyEligibilityOverride(activeTrial, run, newEligible, reasonText);
+    } finally {
+      overrideSavesInFlight.delete(run.runId);
+    }
+  }
+
+  /** runIds whose eligibility-override save is still pending. */
+  const overrideSavesInFlight = new Set();
+
+  /** The body of toggleRunEligibilityOverride(), run while it holds the run's save slot. */
+  async function applyEligibilityOverride(activeTrial, run, newEligible, reasonText) {
     // What to put back if the save fails (see below).
     const before = {
       eligibleForAnalysis: run.eligibleForAnalysis,
@@ -4900,8 +4917,16 @@ document.addEventListener("DOMContentLoaded", async () => {
         abandonTrial(active, reason);
       } catch (err) {
         console.error("Header home: could not close the trial:", err);
-        showToast("Could not close the trial (storage error). Use Finish Trial, or try again.", "error", 6000);
-        return;
+        // Don't trap the user on the assay screen: the write can fail for
+        // good (e.g. the assay was deleted in another tab), and nothing else
+        // there leads back to Setup. A trial left active is abandoned by
+        // the startup cleanup next time the app opens.
+        const leaveAnyway = await showConfirmModal(
+          "Leave without closing the trial?",
+          "The trial could not be marked abandoned in storage. If you leave now it stays open until the app is next started, which closes it automatically.",
+          "Leave Anyway"
+        );
+        if (!leaveAnyway || currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) return;
       }
     }
     resetToSetup();
