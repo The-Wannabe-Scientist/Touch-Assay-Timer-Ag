@@ -101,13 +101,17 @@ export async function armbandConnect(onDisconnect, onBatteryUpdate = null, onRec
   await _subscribeBattery(server);
 
   _connected    = true;
+  // Paired by hand mid-run (auto-reconnect gave up, or the band was off when
+  // the run started): the run still wants its heartbeat.
+  if (_hbWanted) armbandStartHeartbeat();
 }
 
 /**
  * Disconnects from the armband cleanly and stops the heartbeat timer.
  */
 export async function armbandDisconnect() {
-  _hbWanted = false;
+  // _hbWanted is left alone: only a run's start and stop own it, so a
+  // Disconnect → Connect during a run gets the heartbeat back.
   _stopHeartbeat();
   _connected = false;
   _writeChain = Promise.resolve();

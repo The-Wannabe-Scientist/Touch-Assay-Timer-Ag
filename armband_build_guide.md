@@ -283,7 +283,7 @@ Also at the top of each file:
 
 ### Voltage values — adjusting for your motor
 
-The drive levels are set by `DRV_RATED_VOLTAGE` and `DRV_OD_CLAMP` in the **DRIVE LEVELS** block at the top of `haptic_armband.ino` (written to the chip by `configureMotorRegisters()`). The BLE sketch's defaults drive the motor **harder than the BOM parts are rated for**, for a stronger buzz. `haptic_test.ino` uses lower, closer-to-rated values. To run a motor at its rating, use the "BOM-rated" column below, or work out your own from the formulas (TI DRV2605L datasheet, SLOS854D).
+The drive levels are set by `DRV_RATED_VOLTAGE` and `DRV_OD_CLAMP` in the **DRIVE LEVELS** block at the top of `haptic_armband.ino` (written to the chip by `configureMotorRegisters()`). The BLE sketch's defaults drive the motor **harder than the BOM parts are rated for**, for a stronger buzz. `haptic_test.ino` uses lower values, though still somewhat above the BOM ratings. To run a motor at its rating, use the "BOM-rated" column below, or work out your own from the formulas (TI DRV2605L datasheet, SLOS854D).
 
 **LRA** (closed loop):
 ```
@@ -292,7 +292,7 @@ V_rms = RATED_VOLTAGE × 20.71 mV / sqrt(1 − (4·t_SAMPLE + 300 µs)·f_LRA)  
 
 | Register | `haptic_armband.ino` default | BOM-rated (1.8 V RMS LRA, 235 Hz) | `haptic_test.ino` |
 |---|---|---|---|
-| RATED_VOLTAGE (0x16) | `0x78` (≈ 3.1 V RMS) | `0x46` | `0x57` |
+| RATED_VOLTAGE (0x16) | `0x78` (≈ 3.1 V RMS) | `0x46` (≈ 1.8 V RMS) | `0x57` (≈ 2.2 V RMS) |
 | OD_CLAMP (0x17) | `0xA4` | `0x60` | `0x60` |
 
 **ERM** (open loop): only OD_CLAMP sets the drive, at 21.59 mV per LSB (and never above the supply rail). RATED_VOLTAGE is not used.

@@ -4957,7 +4957,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       );
       return;
     } finally {
-      testRigStarting = false;
+      // A start that stopTestRig() superseded must not clear the flag for a
+      // newer start that is still pending.
+      if (token === testRigStartToken) testRigStarting = false;
     }
 
     // Anything may have changed during that await: a Stop click, Settings
@@ -5006,8 +5008,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (UI.Buttons.testRigBtn) {
     UI.Buttons.testRigBtn.addEventListener("click", () => {
-      // A second click while the first is still starting cancels it.
-      if (testRigInterval === null && !testRigStarting) startTestRig();
+      // A click while the AudioContext is still resuming (a few ms) is the
+      // second half of a double-click: ignore it rather than cancel the start.
+      if (testRigStarting) return;
+      if (testRigInterval === null) startTestRig();
       else stopTestRig();
     });
   }

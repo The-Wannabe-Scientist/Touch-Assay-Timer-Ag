@@ -12,16 +12,18 @@
 //  Written to RATED_VOLTAGE (0x16) and OD_CLAMP (0x17) by
 //  configureMotorRegisters(). These defaults drive HARDER than the BOM
 //  motors are rated for, for a stronger buzz; use the BOM-rated values in
-//  the comments (also what haptic_test.ino uses) for a by-the-datasheet
-//  build. Formulas: TI SLOS854D, eq. 5 (LRA) and eq. 6 (ERM).
+//  the comments for a by-the-datasheet build. (haptic_test.ino uses lower
+//  values than these, but still above the BOM ratings.)
+//  Formulas: TI SLOS854D, eq. 5 (LRA) and eq. 6 (ERM).
 #ifdef MOTOR_LRA
   // LRA closed loop: V_rms = 0x16 × 20.71 mV / sqrt(1 − (4·t_SAMPLE + 300 µs)·f_LRA)
-  // 0x78 ≈ 3.1 V RMS at 235 Hz. BOM 1.8 V RMS LRA: 0x46 (or 0x57/0x60 as in haptic_test.ino).
+  // 0x78 ≈ 3.1 V RMS at 235 Hz. BOM 1.8 V RMS LRA: 0x46 / 0x60.
+  // (haptic_test.ino: 0x57 ≈ 2.2 V RMS / 0x60.)
   #define DRV_RATED_VOLTAGE 0x78
   #define DRV_OD_CLAMP      0xA4
 #else
   // ERM open loop: only OD_CLAMP sets the drive, 21.59 mV per LSB → 0xD0 ≈ 4.5 V
-  // (capped by the supply rail). BOM 3 V ERM: 0x8B (or 0x96 ≈ 3.2 V as in haptic_test.ino).
+  // (capped by the supply rail). BOM 3 V ERM: 0x8B. (haptic_test.ino: 0x96 ≈ 3.2 V.)
   // RATED_VOLTAGE is not used in open loop.
   #define DRV_RATED_VOLTAGE 0xC0
   #define DRV_OD_CLAMP      0xD0
