@@ -11,9 +11,10 @@
 // with other names belong to other apps on the same origin (e.g. a shared
 // github.io domain) and are left alone.
 const CACHE_PREFIX = "touch-assay-cache-";
-const CACHE_NAME = CACHE_PREFIX + "v2.0.0.3.20";
+const CACHE_NAME = CACHE_PREFIX + "v1.0.0";
 
-// Ensure paths match your actual directory structure!
+// Every local file the app needs offline, pre-cached on install. Keep this
+// list in step with the files index.html, styles.css and the JS modules load.
 const ASSETS_TO_CACHE = [
   "./",
   "./index.html",
@@ -30,9 +31,8 @@ const ASSETS_TO_CACHE = [
   "./manifest.json",
   "./icon-192.png",
   "./icon-512.png",
-  // Self-hosted fonts (replaced the Google Fonts CDN — see index.html/styles.css)
-  // so typography is available offline instead of silently falling back on
-  // first load with no network.
+  // Self-hosted fonts (declared in styles.css), cached so typography is
+  // available offline instead of silently falling back with no network.
   "./fonts/IBMPlexSans-Variable.woff2",
   "./fonts/IBMPlexSans-Variable-Greek.woff2",
   "./fonts/IBMPlexMono-Regular.woff2",
@@ -108,7 +108,7 @@ self.addEventListener("fetch", (event) => {
       // Cache only successful same-origin responses; skip opaque (cross-origin)
       // responses to avoid inflated storage costs (~7 MB padding per entry).
       // The one cross-origin dependency (SheetJS from CDN_URLS) is cached during
-      // install but never revalidated here — this is intentional. Fonts are now
+      // install but never revalidated here — this is intentional. Fonts are
       // self-hosted same-origin assets (see ASSETS_TO_CACHE) and go through the
       // normal revalidation path below like any other local file.
       if (networkResponse && networkResponse.status === 200) {

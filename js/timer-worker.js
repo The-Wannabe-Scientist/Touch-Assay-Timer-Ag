@@ -28,13 +28,13 @@ let running = false;
 /**
  * Generation counter to invalidate stale setTimeout callbacks.
  *
- * Problem: on a rapid stop→start sequence within the 8 ms setTimeout window,
- * a pending setTimeout from the old loop fires after the new loop has already
+ * On a rapid stop→start sequence within the 8 ms setTimeout window, a pending
+ * setTimeout from the old loop could fire after the new loop has already
  * started, posting to port2 a second time and spawning two simultaneous loops.
  *
- * Fix: each loop iteration captures the current generation at the time the
- * setTimeout is scheduled. The callback only re-posts if the generation hasn't
- * changed (i.e. no stop/start occurred in the meantime).
+ * To prevent that, each loop iteration captures the current generation when
+ * the setTimeout is scheduled, and the callback only re-posts if the
+ * generation hasn't changed (i.e. no stop/start occurred in the meantime).
  *
  * @type {number}
  */

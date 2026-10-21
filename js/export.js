@@ -322,8 +322,8 @@ const HTML_PREVIEW_HEADER_LABELS = new Set([
 export function buildHtmlTableFrom2D(title, data2D) {
   if (!data2D || data2D.length === 0) return "";
 
-  // Use the imported escapeHTML() — previously a hand-rolled replacement
-  // only covered &, <, > — omitting " and ' which escapeHTML handles correctly.
+  // escapeHTML() covers all five HTML-significant characters (& < > " '),
+  // so the title is safe to interpolate into markup.
   const titleHtml = title ? `<h3>${escapeHTML(title)}</h3>` : "";
 
   // Column index of a tidy-format "Eligible" column, if this table has one —
@@ -1011,9 +1011,9 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
     ...rawRows,
     // Separator rows must span the FULL header width (all run columns
     // plus the spacer columns between genotypes), not just the static header fields.
-    // The old hardcoded fixed-width arrays caused SheetJS to detect fewer columns than the
-    // data rows had, producing inconsistent column widths in the Excel preview for any
-    // experiment with more than one run per genotype.
+    // Narrower separator rows would make SheetJS detect fewer columns than the
+    // data rows have, producing inconsistent column widths in the Excel preview for
+    // any experiment with more than one run per genotype.
     ...Array(3).fill(Array(hGenotype.length).fill("")),
     summaryHeader,
     ...summaryRows

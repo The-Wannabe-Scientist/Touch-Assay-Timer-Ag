@@ -319,7 +319,7 @@ body {
   background: rgba(255,255,255,0.05);
 }
 
-/* Legacy fallback removed — #overflowMenuButton now uses .header-icon-btn */
+/* #overflowMenuButton is styled by .header-icon-btn; only its font size differs */
 #overflowMenuButton {
   font-size: inherit;
 }
@@ -547,8 +547,8 @@ select option:disabled {
 }
 
 /* ------------------------------------------------------------------
-   CRITICAL DARK MODE READABILITY FIXES
-   Brute-forces dark backgrounds over browser autofill/iOS defaults 
+   DARK MODE FORM-FIELD READABILITY
+   Forces dark backgrounds over browser autofill/iOS default styling
 ------------------------------------------------------------------- */
 [data-theme="dark"] input[type="text"],
 [data-theme="dark"] input[type="number"],
@@ -1334,7 +1334,7 @@ body.state-warming-up #liveProgress {
   font-weight: 600;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
-  /* Removed margin-bottom; #tapZone gap handles spacing uniformly */
+  /* No margin-bottom: #tapZone's gap handles spacing uniformly */
 }
 .live-progress-stim {
   grid-column: 2;
@@ -1739,9 +1739,8 @@ th {
 
 /* Desktop-safe formatting for the Saved Assays items.
    Card treatment (background/border/radius) mirrors #exportDatasetList's
-   dataset rows below — previously this was a flat list separated only by
-   hairlines while Export used cards for the same "list of selectable items"
-   pattern; unified so both read the same way. */
+   dataset rows below, so both "list of selectable items" screens read the
+   same way. */
 .saved-assay-row {
   display: flex;
   flex-direction: column;
@@ -1875,7 +1874,6 @@ th {
   margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0;
 }
 
-/* .warmup-display removed — countdown now rendered via .tap-warmup-overlay inside #tapButton */
 /* Export action layout — primary full-width, secondaries in a row below */
 .export-actions {
   display: flex;
@@ -1990,7 +1988,7 @@ body.state-warming-up #visualMetronomeContainer {
 
 /* The genotype picker is disabled (and fades to 0.55 opacity, see
    .genotype-pill:disabled / .genotype-trigger:disabled above) once a run
-   starts, since it can no longer be changed — but that fade also swallowed
+   starts, since it can no longer be changed — but that fade would also hide
    the color-coded highlight showing which genotype is actually running.
    Keep the CURRENTLY SELECTED pill (and the trigger, which only ever shows
    the current selection) at full opacity so its color/border stays a clear
@@ -3099,7 +3097,7 @@ input.settings-slider-input.settings-slider-badge:focus {
   line-height: 1.4;
 }
 
-/* #5 — Recording banner (shown only while RUNNING) */
+/* Recording banner (shown only while RUNNING) */
 #runBanner {
   background: #fef3c7;
   color: #92400e;
@@ -3115,7 +3113,7 @@ body.state-running #runBanner {
   display: flex;
 }
 
-/* #9 — IDB unavailability banner */
+/* IndexedDB unavailability banner */
 #idbWarningBanner {
   background: #fef2f2;
   color: #991b1b;
@@ -3554,10 +3552,6 @@ button.secondary.btn-loading::before {
   }
 }
 
-/* Wide desktop (≥ 1024px): single-column layout (two-panel removed) */
-
-
-
 /* ── Landscape orientation fixes ──────────────────────────────────────── */
 @media (orientation: landscape) and (max-height: 500px) {
   /* Tap button: reduced min-height to avoid overflow; flex:1 handles the rest */
@@ -3681,9 +3675,9 @@ body.state-running {
   }
 }
 
-/* ── Toggle progress: now inside assay header flex row ───────────────── */
-/* Align-self removed — #assayScreen>header's align-items:center
-   handles vertical alignment now that the button lives in the header. */
+/* ── Toggle progress: inside the assay header flex row ───────────────── */
+/* No align-self: #assayScreen>header's align-items:center handles
+   vertical alignment. */
 #toggleProgress {
   font-size: 0.88rem;
   padding: 0.4rem 0.85rem;
@@ -4106,8 +4100,8 @@ p.instruction {
 }
 
 /* Toggle progress pill button with eye icon */
-/* Removed align-self:flex-start — button now lives inside the
-   assay header flex row and inherits align-items:center from the parent. */
+/* Sits inside the assay header flex row and is vertically centred by the
+   parent's align-items:center. */
 #toggleProgress {
   display: inline-flex;
   align-items: center;

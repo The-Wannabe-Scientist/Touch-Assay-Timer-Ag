@@ -408,9 +408,8 @@ void updateLED() {
 #ifdef MOTOR_LRA
 // Configures the DRV2605L's library, feedback mode, resonance tracking, and
 // haptic strength registers for LRA closed-loop drive. Shared by initMotor()
-// (first boot) and recoverMotor() (post I2C-fault reinit) so the two can
-// never drift apart — a value tuned in one used to require remembering to
-// update the other by hand.
+// (first boot) and recoverMotor() (post I2C-fault reinit) so a value tuned
+// here applies to both paths.
 void configureMotorRegisters() {
   drv.selectLibrary(6);                                          // library 6 = LRA
   drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);    // N_ERM_LRA = 1 (LRA)
@@ -474,8 +473,8 @@ bool recoverMotor() {
 #ifdef MOTOR_ERM
 // Configures the DRV2605L's library, feedback mode, and haptic strength
 // registers for ERM open-loop drive. Shared by initMotor() (first boot) and
-// recoverMotor() (post I2C-fault reinit) so the two can never drift apart —
-// a value tuned in one used to require remembering to update the other by hand.
+// recoverMotor() (post I2C-fault reinit) so a value tuned here applies to
+// both paths.
 void configureMotorRegisters() {
   drv.selectLibrary(1);                                          // library 1 = ERM
   drv.useERM();                                                  // clears N_ERM_LRA bit

@@ -312,9 +312,8 @@ export function binRunValues(values, binSize) {
  * @returns {number[]|null} Normalised ratios, or null if baseline is invalid.
  */
 export function computeTouchIndexBins(binnedPercentages) {
-  // Explicitly guard the empty-array case before reading index 0.
-  // Previously this relied on binnedPercentages[0] === undefined being == null,
-  // which is correct but fragile — a future strict-equality change would break it.
+  // Explicitly guard the empty-array case before reading index 0, rather than
+  // relying on binnedPercentages[0] (undefined) loosely equalling null below.
   if (!binnedPercentages || binnedPercentages.length === 0) return null;
 
   const baseline = binnedPercentages[0];
@@ -340,8 +339,7 @@ export function computeTouchIndexBins(binnedPercentages) {
  * Escapes HTML special characters to prevent XSS when rendering
  * user-supplied strings (e.g. assay names, genotype labels) into innerHTML.
  *
- * Shared between main.js and export.js as a single source of truth —
- * previously both modules had an identical private copy.
+ * Shared by main.js and export.js so both escape user strings identically.
  *
  * @param {string} str - Raw user input string.
  * @returns {string} Safely escaped HTML string.

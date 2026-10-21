@@ -1065,8 +1065,8 @@
     const textInput  = document.getElementById('genotypeTextInput');
     const hiddenInput = document.getElementById('genotypes');
 
-    // normaliseGenotype() is imported from utils.js — was previously
-    // duplicated here, which let the two copies silently drift.
+    // normaliseGenotype() comes from utils.js so the chip input and main.js
+    // apply exactly the same duplicate-detection rule.
 
     function getValues() {
       return Array.from(chipList.querySelectorAll('.chip')).map(c => c.dataset.value);
@@ -1078,12 +1078,10 @@
      *
      * The `change` dispatch lives here rather than at each call site because
      * assigning `.value` programmatically fires no event, and main.js's
-     * draft auto-save listens for `change` on this input alone. Every mutation
-     * path used to dispatch it by hand — except addChip(), so adding a
-     * genotype (by typing, pasting, or blurring) never wrote the draft while
-     * removing one did, and a genotype list edited last was silently lost on
-     * reload. Dispatching from the one place that writes the value makes that
-     * class of omission impossible.
+     * draft auto-save listens for `change` on this input alone. Dispatching
+     * from the one place that writes the value means no mutation path (add,
+     * remove, paste, reorder) can forget it and leave the saved draft behind
+     * the visible chips.
      */
     function syncHidden() {
       hiddenInput.value = getValues().join(',');

@@ -392,7 +392,7 @@ describe("isWellFormedAssay", () => {
     assert.equal(isWellFormedAssay(makeAssay({ assayName: undefined, genotypes: undefined })), true);
   });
 
-  test("rejects the shapes that used to blank the Saved Assays list", () => {
+  test("rejects malformed shapes that would break the Saved Assays list", () => {
     assert.equal(isWellFormedAssay(makeAssay({ genotypes: "N2" })), false);
     assert.equal(isWellFormedAssay(makeAssay({ genotypes: ["N2", 4] })), false);
     assert.equal(isWellFormedAssay(makeAssay({ assayName: { toString: 0 } })), false);

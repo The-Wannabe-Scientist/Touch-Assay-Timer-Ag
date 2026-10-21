@@ -1026,7 +1026,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function showScreen(screenElement) {
     UI.Displays.overflowMenu.hidden = true;
-    UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");  // M9: reset aria-expanded
+    UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");  // keep the menu button's state in sync
 
     // Every overlay screen hides the assay screen, so no tap could be
     // recorded while one is open and each window would be stored as a
@@ -1368,7 +1368,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   /**
    * The main scheduler function — called on every Worker "tick" (~125×/sec).
    *
-   * Runs three sequential layers:
+   * Runs these steps in order:
    *
    *   Step 0: TIMING INTEGRITY CHECK
    *     Detects if the gap since the last tick is suspiciously large
@@ -1396,6 +1396,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    *   Step 3: AUDIO PRE-SCHEDULING
    *     Schedules hardware beeps slightly ahead of time using the AudioContext
    *     clock to guarantee timing accuracy independent of JS thread load.
+   *     Ends the run as interrupted if a stall has left a cue too late to play.
    */
   function scheduler() {
     // Use cached run reference — avoids a linear .find() scan (~125×/sec)
@@ -1543,23 +1544,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // Check if the experimenter tapped within this stimulus window.
       // Uses an index pointer (tapReadIndex) to scan only unconsumed entries,
-      // avoiding the previous .some() + .filter() pattern that allocated a new
-      // array and closures on every ISI tick.
+      // so no new array or closures are allocated on every ISI tick.
       let tapOccurred = false;
       while (tapReadIndex < tapTimestamps.length) {
         const t = tapTimestamps[tapReadIndex];
         // Stop scanning if the tap is beyond both the interval AND the grace window.
-        // If gracePeriodMs = 0 then graceEnd = intervalEnd and behaviour is unchanged.
+        // With no grace period, graceEnd = intervalEnd: the plain window edge.
         if (t >= graceEnd) break;               // belongs to a future window (past grace)
-        // guard against a tap that arrived after the second confirmation
-        // press but before the first stimulus window opened (i.e. t < intervalStart
-        // for stimulus 1).  The old code consumed these pre-run taps without counting
-        // them — which is correct — but if such a tap landed exactly ON intervalStart
-        // it would pass the >= check and set tapOccurred = true for stimulus 1,
-        // recording a false non-response.  The strict-boundary case is now blocked
-        // by using a half-open interval [intervalStart, intervalEnd) so that a tap
-        // at exactly intervalStart is correctly attributed to stimulus 1 only when
-        // it was genuinely within the window.
+        // A tap before intervalStart is consumed without being counted — in
+        // practice a tap in the lead-in between the second confirmation press
+        // and stimulus 1 (for later windows, earlier taps were already consumed
+        // by the previous window's scan or clamped forward by
+        // executeTapAction()). The accepted range is half-open,
+        // [intervalStart, graceEnd), so a tap exactly on a boundary counts
+        // toward one window only.
         if (t >= intervalStart) tapOccurred = true;  // inside window or within grace period
         tapReadIndex++;                         // consume (past or matched)
       }
@@ -1599,7 +1597,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // live only in memory until it ends (completeRunNormally / stopRunEarly),
       // both of which persist immediately. The tradeoff: a hard crash mid-run
       // (tab kill, OS crash, power loss — not a clean backgrounding, which the
-      // visibilitychange handler below already flushes) loses that one run's
+      // visibilitychange handler below stops and saves) loses that one run's
       // in-progress data. Accepted deliberately — a single animal is cheap to
       // re-run, unlike a precision regression across every run.
 
@@ -1651,10 +1649,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   ----------------------------------------------------------------------- */
 
   /**
-   * Halts the Worker heartbeat and cancels the visual animation frame.
+   * Halts the Worker heartbeat, silences audio ticks already booked ahead,
+   * stops the armband heartbeat and cancels the visual animation frame.
    * Also clears the cached activeRun reference so scheduler() cannot fire
-   * against a stale run object if a tick arrives after stop.
-   * Does not modify any data — call before any run-ending function.
+   * against a stale run object if a tick arrives after stop, and empties the
+   * tap buffer. Does not modify run data — call before any run-ending function.
    */
   function stopCueLoop() {
     timerWorker.postMessage("stop");
@@ -1666,8 +1665,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       cancelAnimationFrame(visualAnimationFrame);
       visualAnimationFrame = null;
     }
-    // trim consumed tapTimestamps entries to prevent unbounded
-    // array growth during long runs. Reset the read index to match.
+    // Drop the run's tap timestamps (only needed while windows are being
+    // scored) and reset the read index to match.
     tapTimestamps.length = 0;
     tapReadIndex = 0;
   }
@@ -1677,7 +1676,10 @@ document.addEventListener("DOMContentLoaded", async () => {
    *
    * Marks the run as completed, evaluates eligibility for analysis,
    * saves the final state to IDB, plays the completion chime, and
-   * returns the UI to POISED state so the next run can begin.
+   * returns the UI to POISED state so the next run can begin. If the save
+   * fails twice, the run is queued in unsavedRuns to be retried later.
+   *
+   * @param {Object} run - The run the scheduler just finished.
    */
   async function completeRunNormally(run) {
     // Clear the double-Escape timer so the first Esc press in a new run can
@@ -1690,11 +1692,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     // (activeRun is already null at this point because stopCueLoop() was called first.)
     if (!run) return;
 
-    // guard against null activeTrial. This can happen in an extreme
-    // race where the trial was already completed via another path before the
-    // scheduler fired completeRunNormally. Without this guard, line 830
-    // (`saveRun(currentAssay.assayId, activeTrial.trialId, run)`) would throw
-    // TypeError and the final IDB save would never happen.
+    // Guard against a null activeTrial: possible in an extreme race where the
+    // trial was already completed via another path before the scheduler fired
+    // completeRunNormally. The run can't be saved without its trial, so return
+    // the UI to POISED rather than throwing a TypeError on activeTrial.trialId
+    // in the final save below.
     if (!activeTrial) {
       console.error("completeRunNormally: no active trial found — run data may not be saved to IDB.");
       playCompletionTone();
@@ -1724,18 +1726,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     // NOTE: run.binnedPercentages is intentionally NOT cached here.
     // export.js always recomputes binned percentages fresh from raw `run.values`
     // via buildRunCache() → binRunValues(), so a stale cached value would be ignored
-    // anyway. Caching here also caused staleness if binSize changed between trials.
+    // anyway. A cached copy would also go stale if binSize changed between trials.
 
     // Warn if the stimulus count is not an exact multiple of binSize —
     // trailing values will be silently dropped during analysis
     const remainder = run.values.length % currentAssay.binSize;
     if (remainder !== 0) {
-      // reworded to remove ambiguous double-negative ("do not fill")
       run.partialBinWarning =
         `Last ${remainder} value(s) dropped — not enough to fill a complete bin of size ${currentAssay.binSize}`;
     }
 
-    // Final save: ensures all values are in IDB regardless of batch timing.
+    // Final save: until now the run's values exist only in memory (scheduler()
+    // never writes to IDB mid-run).
     // A failure here must not escape: everything below — including the
     // transition back to POISED — would be skipped, stranding the app in
     // RUNNING with no run for Stop to act on. Try twice, then carry on and
@@ -1903,12 +1905,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  /**
-   * Aborts an in-progress run and marks it as ineligible for analysis.
-   * Called by: the Stop Run button, the timing gap detector, and crash guards.
-   *
-   * @param {string} [reason="Run stopped early by user"] - Explanation for the stop.
-   */
   // Re-entrancy guard — prevents a rapid double-press on "Stop Run" (or a
   // timing-gap auto-stop racing with the button) from calling stopRunEarly()
   // twice on the same run.
@@ -1922,23 +1918,27 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Stops the active run before it reaches its full stimulus count, marking
-   * it "stoppedEarly" and persisting the reason.
+   * it "stoppedEarly" and ineligible for analysis, persisting the reason and
+   * returning the UI to POISED.
+   * Called by: the Stop Run button, the double-Escape shortcut, the
+   * scheduler's timing-gap and late-cue checks, and the crash guards
+   * (visibilitychange, unload).
    * @param {string} [reason="Run stopped early by user"] - Human-readable reason, stored on the run record.
    */
   function stopRunEarly(reason = "Run stopped early by user") {
     // Clear the double-Escape timer unconditionally — BEFORE the re-entrancy
-    // guard — so a blocked second call still resets the stale timestamp.
-    // Placing this after the guard meant a rapid double-stop that hit the guard
-    // on the second call could leave lastEscapeTime armed into the next run.
+    // guard — so a blocked second call still resets the stale timestamp;
+    // otherwise a rapid double-stop that hits the guard on the second call
+    // could leave lastEscapeTime armed into the next run.
     lastEscapeTime = 0;
 
     // Guard: if a stop sequence is already in flight, do nothing.
     if (_stopRunPromise) return;
 
     isWarmingUp = false;
-    // if warmup was in progress, clear the overlay and ring class so
+    // If warmup was in progress, clear the overlay and ring class so
     // the UI doesn't get stuck in an unresponsive state after an external stop.
-    // also remove the state-warming-up body class and reset the bar so
+    // Also remove the state-warming-up body class and reset the bar so
     // CSS-driven elements (amber bar, live counter) don't stay visible post-stop.
     document.body.classList.remove("state-warming-up");
     if (UI.Displays.metronomeBar) {
@@ -2026,12 +2026,17 @@ document.addEventListener("DOMContentLoaded", async () => {
    *
    * Routes differently depending on current state:
    *   CONFIGURED / POISED: double-tap confirmation → start warmup → start run
-   *   RUNNING:             record a tap timestamp for the current stimulus window
+   *   RUNNING:             record a tap timestamp for the open stimulus window,
+   *                        or mark the window just scored as a non-response
+   *                        when the back-dated tap belongs to it
    *
    * Also handles:
    *   - Hardware debounce (TAP_COOLDOWN_MS)
    *   - Audio context warm-up on first interaction
    *   - Visual and haptic feedback on every tap
+   *
+   * @param {number} eventTimeStamp - The input event's timeStamp (same clock as
+   *   performance.now()), used to back-date the tap to when it happened.
    */
   async function executeTapAction(eventTimeStamp) {
     // Block taps on the export screen entirely
@@ -2066,8 +2071,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         // First tap: show confirmation prompt and set a 2-second reset timer
         pendingStart = true;
 
-        // activeTrial can be null if the trial was abandoned/completed by
-        // another code path. Use optional chaining consistent with the timeout branch.
+        // getActiveTrial() can return null if the trial was abandoned/completed
+        // by another code path; nextAnimalIndex() treats that as an empty trial.
         const nextIndex   = nextAnimalIndex(getActiveTrial(currentAssay), selectedGenotype);
 
         UI.Displays.tapLabel.textContent = `Tap again to start ${selectedGenotype} (Animal ${nextIndex})`;
@@ -2076,7 +2081,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         startTimeout = setTimeout(() => {
           pendingStart = false;
           if (currentState === STATES.CONFIGURED || currentState === STATES.POISED) {
-            // re-read genotype from the DOM inside the timeout to avoid
+            // Re-read genotype from the DOM inside the timeout to avoid
             // using a stale closure-captured value if the user changed the dropdown.
             const freshGenotype = UI.Inputs.genotypeSelect.value;
             // Recompute freshly — do not use the closure-captured nextIndex which was
@@ -2109,9 +2114,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         );
         return;
       }
-      // speak("") with an empty string can break iOS speechSynthesis.
-      // primeSpeechEngine() uses a silent space utterance (" ") for the same purpose
-      // and is already used during warmup for exactly this reason.
+      // Prime the speech engine inside this user gesture. primeSpeechEngine()
+      // speaks a silent space utterance (" ") rather than speak(""), which can
+      // break iOS speechSynthesis; the warmup primes it the same way.
       primeSpeechEngine();
     }
 
@@ -2130,8 +2135,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       // No "undo last tap" is offered by design: at typical ISIs (~1 Hz) a
       // confirmation affordance would itself eat into the next stimulus
       // window, and by the time a misfire is noticed the window it belongs
-      // to has usually already closed and been scored (see the data-recording
-      // pass below). Correcting a bad run means stopping/discarding it, not
+      // to has usually already closed and been scored (see Step 2b in
+      // scheduler()). Correcting a bad run means stopping/discarding it, not
       // patching a single tap.
 
       // The cue loop has already stopped (the last window was scored and the
@@ -2209,9 +2214,9 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   async function runWarmup() {
     if (isWarmingUp) return;
-    // set isWarmingUp = true here, BEFORE the !isWarmupEnabled early-exit
+    // Set isWarmingUp = true here, BEFORE the !isWarmupEnabled early-exit
     // branch, so the guard also prevents re-entrant startRun() calls when warmup is
-    // disabled. Previously, two taps that both passed the guard could both reach
+    // disabled. Otherwise two taps that both passed the guard could both reach
     // startRun() concurrently, creating two runs for the same genotype.
     isWarmingUp = true;
     const myToken    = ++warmupToken;
@@ -2265,13 +2270,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // Removed redundant isWarmingUp = true. isWarmingUp is already
-    // set to true unconditionally earlier in this function,
-    // so this second assignment was a stale leftover — never false at this point.
     // Show the countdown overlay INSIDE the tap button (button stays visible).
     // The .warming-up class adds the pulsing ring and blocks pointer events.
     UI.Displays.warmup.hidden = false;
-    // hide the overlay + normal label from AT while countdown is active.
+    // Hide the overlay + normal label from AT while the countdown is active.
     UI.Displays.warmup.setAttribute("aria-hidden", "true");
     UI.Displays.tapLabel.setAttribute("aria-hidden", "true");
     UI.Buttons.tap.classList.add("warming-up");
@@ -2305,7 +2307,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       if (stimDisplay) stimDisplay.textContent = "0";
       UI.Displays.warmup.hidden = true;
-      // restore accessibility on cancel path.
+      // Restore accessibility on the cancel path.
       UI.Displays.warmup.removeAttribute("aria-hidden");
       UI.Displays.tapLabel.removeAttribute("aria-hidden");
       UI.Buttons.tap.classList.remove("warming-up");
@@ -2333,8 +2335,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     for (let i = warmupDuration; i > 0; i--) {
       // A newer warmup owns the UI and the isWarmingUp flag now — leave both
       // alone. Must come before the isWarmingUp checks: the newer warmup has
-      // set that flag back to true, which is exactly what used to let this
-      // cancelled loop carry on and start the run early.
+      // set that flag back to true, which would otherwise let this cancelled
+      // loop carry on and start the run early.
       if (superseded()) return;
 
       // Cancel if the state has changed externally (e.g. stop was clicked)
@@ -2344,8 +2346,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
 
       UI.Displays.warmupNumber.textContent = i;
-      // cancel running Web Animations instead of triggering a
-      // layout reflow via offsetWidth to restart the digit pop-in each second.
+      // Cancel running Web Animations, rather than forcing a layout reflow
+      // via offsetWidth, to restart the digit pop-in each second.
       UI.Displays.warmupNumber.getAnimations().forEach(a => a.cancel());
       UI.Displays.warmupNumber.style.animation = "";   // re-enable CSS animation
       playWarmupTone(1200);  // High beep each countdown second
@@ -2373,7 +2375,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     if (stimDisplay) stimDisplay.textContent = "0";
     UI.Displays.warmup.hidden = true;
-    // restore accessibility on the success completion path too.
+    // Restore accessibility on the success completion path too.
     UI.Displays.warmup.removeAttribute("aria-hidden");
     UI.Displays.tapLabel.removeAttribute("aria-hidden");
     UI.Buttons.tap.classList.remove("warming-up");
@@ -2473,8 +2475,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Use cached DOM reference from UI — avoids getElementById on every frame
     if (UI.Displays.metronomeBar) {
       // Drive via scaleX so the compositor layer added by will-change: transform
-      // is used end-to-end. Previously used style.width which forced layout;
-      // scaleX + transform-origin:left is equivalent visually but GPU-accelerated.
+      // is used end-to-end. Animating style.width would force layout every
+      // frame; scaleX + transform-origin:left looks the same but is GPU-accelerated.
       UI.Displays.metronomeBar.style.transform = `scaleX(${progress})`;
       // near-full glow at 90%+ to signal upcoming stimulus
       if (progress >= 0.9) {
@@ -2534,7 +2536,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       savedPitch    = parseInt(localStorage.getItem(LS_KEYS.TICK_PITCH), 10);
       progressPref  = localStorage.getItem(LS_KEYS.PROGRESS_VISIBLE);
     } catch {
-      // H5: localStorage unavailable — fall back to in-memory defaults already
+      // localStorage unavailable — fall back to in-memory defaults already
       // set by the module-level variable initialisers (speechLeadMs, gracePeriodMs, etc.)
       savedTheme     = window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
       savedVoiceMode = "tick";
@@ -2592,11 +2594,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // ── Assay Defaults — restore saved defaults into the sub-page inputs ──
     _restoreAssayDefaultsToUI();
 
-    // Restore progress-table visibility preference.
-    // We don't apply it here at startup because there's no data yet;
-    // it gets applied in completeRunNormally() / stopRunEarly() when
-    // the table is first shown (or kept hidden) according to preference.
-    void progressPref;  // variable read during localStorage phase; consumed later
+    // Progress-table visibility preference: not applied here at startup
+    // because there's no table data yet. applyProgressVisibilityPreference()
+    // re-reads it when an assay or trial starts and after each run ends.
+    void progressPref;  // read with the other settings above, but unused here
   }
 
   /**
@@ -2639,17 +2640,18 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Applies the user's saved progress-table visibility preference.
-   * Called after each run ends so the table respects the user's toggle setting.
+   * Called when an assay or trial starts and after each run ends, so the
+   * table respects the user's toggle setting.
    */
   function applyProgressVisibilityPreference() {
     let pref = null;
-    try { pref = localStorage.getItem(LS_KEYS.PROGRESS_VISIBLE); } catch {} // L7: guard for Private Browsing
+    try { pref = localStorage.getItem(LS_KEYS.PROGRESS_VISIBLE); } catch {} // guard for Private Browsing
     const container = document.getElementById("assayProgress");
     if (!container) return;
     // Default: show the table ("true" or no stored pref = visible)
     const shouldShow = pref !== "false";
     container.hidden = !shouldShow;
-    // the `hidden` attribute already removes the element from the
+    // The `hidden` attribute already removes the element from the
     // accessibility tree — setting aria-hidden on top is redundant and can cause
     // screen readers to announce a hidden element when aria-hidden="false" is present.
     container.removeAttribute("aria-hidden");
@@ -2689,9 +2691,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   /**
    * Shows an inline warning below the ISI field when the current grace period
    * setting would exceed half the ISI (and would therefore be clamped on run start).
-   * Called whenever the ISI input changes.
+   * Called whenever the ISI or grace period changes, and after the setup form
+   * is filled from defaults or a draft.
    *
-   * NOTE: ETA display was intentionally omitted per experimenter preference.
+   * NOTE: no run ETA is displayed, by experimenter preference.
    */
   function updateGraceIsiWarning() {
     const isiEl  = document.getElementById("graceIsiWarning");
@@ -2711,8 +2714,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Updates the numeric run-count badge inside the #toggleProgress button.
-   * Shows the total number of completed+stopped runs in the current trial.
-   * Called after every run ends (normal or early stop).
+   * Shows the number of eligible runs in the active trial; hidden when zero
+   * or when no assay is loaded. Called whenever a run ends, a run's
+   * eligibility is overridden, or the active assay/trial changes.
    */
   function updateProgressBadge() {
     const badge = document.getElementById("progressRunBadge");
@@ -2734,13 +2738,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   /* -----------------------------------------------------------------------
      Genotype Picker (custom UI over the hidden #genotypeSelect)
 
-     #genotypeSelect (the native <select>) remains the single source of truth
-     for the selected value — every other part of the app reads/writes it
-     exactly as before. Everything below is a purely visual/interaction layer
-     that mirrors it: renderGenotypePicker() rebuilds the on-screen control
-     from the same (genotypes, trial) data populateGenotypeSelect() already
-     computes, and selectGenotype() writes back to the hidden select and
-     dispatches a "change" event so existing listeners fire unchanged.
+     #genotypeSelect (the native <select>) is the single source of truth for
+     the selected value — every other part of the app reads/writes it
+     directly. Everything below is a purely visual/interaction layer that
+     mirrors it: renderGenotypePicker() rebuilds the on-screen control from
+     the same (genotypes, trial) data populateGenotypeSelect() uses, and
+     selectGenotype() writes back to the hidden select and dispatches a
+     "change" event so its listeners fire as for a native selection.
 
      Two display modes (see the CSS comment above .genotype-pills):
        - Pills:            wide viewport, genotype count <= GENOTYPE_PILL_MAX.
@@ -2834,10 +2838,11 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Rebuilds the genotype selection dropdown with current run counts.
-   * The count shows how many runs have been completed (non-active) for each genotype
-   * in the current trial, giving the experimenter live feedback.
+   * The count shows how many eligible runs each genotype has in the active
+   * trial, giving the experimenter live feedback.
    *
-   * Restores the previously selected value after rebuilding.
+   * Restores the previously selected value after rebuilding, then re-renders
+   * the custom picker.
    *
    * Genotype labels are shown as entered and listed in entry order, by design:
    * the experimenter must know which genotype/plate they are handling to place
@@ -2859,7 +2864,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const option  = document.createElement("option");
       option.value  = g;
 
-      // Count only eligible (completed + eligible for analysis) runs for this genotype
+      // Count only eligible (finished + eligible for analysis) runs for this genotype
       const count   = trial
         ? trial.runs.filter(r => r.genotype === g && isRunEligible(r)).length
         : 0;
@@ -2879,7 +2884,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Re-populates the genotype dropdown to reflect updated run counts
-   * without changing the current selection. Called after each run ends.
+   * without changing the current selection. Called after each run ends and
+   * after a manual eligibility override.
    */
   function refreshGenotypeDropdownCounts() {
     if (!currentAssay) return;
@@ -2947,8 +2953,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   /**
    * Mirrors #genotypeSelect.disabled onto the custom picker's pills and
    * trigger. setState() toggles the hidden select's .disabled directly
-   * (unchanged legacy behavior) without rebuilding the picker, so this is
-   * called once after every state transition to keep the two in sync.
+   * without rebuilding the picker, so this is called once after every state
+   * transition (and wherever else .disabled changes) to keep the two in sync.
    */
   function syncGenotypePickerEnabled() {
     const disabled = UI.Inputs.genotypeSelect.disabled;
@@ -3055,7 +3061,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!container) return;  // guard against missing element
     container.innerHTML = "";
 
-    // call getActiveTrial once and reuse — avoids a second .find() scan.
     const trial = currentAssay ? getActiveTrial(currentAssay) : null;
     if (!currentAssay) return;
 
@@ -3134,8 +3139,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   /**
-   * Manually overrides a completed/stopped run's effective eligibility for
-   * analysis. The automatic determination is preserved separately in
+   * Manually overrides a completed/stopped/abandoned run's effective
+   * eligibility for analysis. The automatic determination is preserved separately in
    * autoEligibleForAnalysis/autoIneligibleReason (set once, never changed),
    * so the override is always traceable back to what the system originally
    * decided — surfaced in exports via the "Manual Override" row.
@@ -3273,8 +3278,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   /**
    * Populates the export dataset list with checkboxes for each trial and
    * the two pooled (completed-only vs all-trials) options.
-   * Completed trials are pre-checked; abandoned/active are unchecked.
-   * Shows a per-genotype run breakdown alongside the totals.
+   * Completed trials, and the completed-only pool when it holds runs, are
+   * pre-checked; abandoned/active trials and the all-trials pool are not.
+   * Shows a per-genotype run breakdown alongside the totals, and updates
+   * the #tiExclusionWarning partial-bin advisory.
    * Syncs the Select All checkbox and refreshes button state after building.
    *
    * @param {Object} assay - The full assay object.
@@ -3348,12 +3355,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // exact multiple of binSize — those trailing stimuli are dropped in the
     // Touch Index calculation, which can subtly skew per-animal summaries.
     //
-    // NOTE: r.values is the definitive record of recorded stimuli for a run.
-    // stimCount is not stored on individual run objects — only on the assay.
-    // r.values.length is therefore the correct canonical source for the
-    // per-run stimulus count.  If the data model ever changes so that values
-    // is trimmed or normalised separately from the recorded stimulus count,
-    // this check should be updated to use a dedicated run.stimCount field.
+    // NOTE: r.values is the definitive record of recorded stimuli for a run,
+    // and binning drops the remainder of r.values itself, so r.values.length
+    // (not run.expectedStimCount, the target) is the count to check — a
+    // stopped-early run marked Eligible records fewer values than its target.
     const tiWarn = document.getElementById("tiExclusionWarning");
     if (tiWarn) {
       if (assay.binSize) {
@@ -3386,8 +3391,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   /**
-   * Enables or disables the Export and Preview buttons based on whether at
-   * least one dataset checkbox is currently checked.
+   * Enables or disables the Export, CSV and Preview buttons based on whether
+   * at least one dataset checkbox is currently checked.
    */
   function refreshExportButtonState() {
     const anyChecked =
@@ -3410,14 +3415,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     selAll.indeterminate = checked.length > 0 && checked.length < all.length;
   }
 
-  // escapeHTML is imported from utils.js (shared with export.js).
-  // The local copy that was here has been removed.
-
-  /**
-   * Fetches all saved assays from IndexedDB and renders them as a list
-   * in the Saved Assays overlay. Each entry shows the assay name, date,
-   * and action buttons (Start New Trial, Export, Delete).
-   */
   /**
    * Removes the bulk-delete "Permanently delete N assays?" bar, if showing.
    * The bar's count describes the selection when it opened, so it must not
@@ -3428,6 +3425,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.querySelector(".bulk-delete-confirm")?.remove();
   }
 
+  /**
+   * Fetches all saved assays from IndexedDB and renders them, newest first,
+   * in the Saved Assays screen. Each row shows the assay name, genotypes and
+   * creation date, a bulk-select checkbox and Start New Trial / Preview /
+   * Export / Delete buttons; a damaged record gets a Delete-only row. The
+   * sparkline charts are filled in afterwards by
+   * enrichSavedAssayRowsWithSparklines().
+   */
   async function populateSavedAssaysList() {
     dismissBulkDeleteConfirm();
     // Reset the bulk-selection controls before any exit path — the error and
@@ -3471,10 +3476,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // One damaged record (e.g. from a hand-edited backup imported before
-    // backups were validated) must not blank the whole list. It gets a row of
-    // its own with only Delete, so it can be removed, and every other assay
-    // stays reachable.
+    // One damaged record (e.g. from a hand-edited backup) must not blank the
+    // whole list. It gets a row of its own with only Delete, so it can be
+    // removed, and every other assay stays reachable.
     const listed = assays.filter(isWellFormedAssay);
     const damaged = assays.filter(a => !isWellFormedAssay(a));
 
@@ -3482,9 +3486,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     let html = "";
     listed.sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)).forEach(assay => {
       // Name is the primary identifier and gets its own line; genotypes + date
-      // are secondary metadata on a muted line underneath — previously all
-      // three were run together in one sentence-like string that wrapped
-      // awkwardly for assays with several genotypes.
+      // are secondary metadata on a muted line underneath, rather than one
+      // run-on string that wraps awkwardly for assays with several genotypes.
       const metaParts = [];
       if (assay.genotypes && assay.genotypes.length) metaParts.push(escapeHTML(assay.genotypes.join(", ")));
       metaParts.push(formatDateTime(assay.createdAt));
@@ -3675,12 +3678,12 @@ document.addEventListener("DOMContentLoaded", async () => {
    *   with the assay screen's genotype picker.
    * @param {Object}  [opts]
    * @param {number}  [opts.yMin] - Defaults to min(0, data).
-   * @param {number}  [opts.yMax] - Defaults to max(data).
+   * @param {number}  [opts.yMax] - Defaults to max(data, opts.referenceY).
    * @param {number}  [opts.referenceY] - Draws a dashed horizontal line at this Y value (e.g. Touch Index baseline = 1).
-   * @param {boolean} [opts.mini=false] - true = tiny inline sparkline for a collapsed section's <summary>: no gridlines, no point markers.
+   * @param {boolean} [opts.mini=false] - true = tiny inline sparkline for a collapsed section's <summary>: no gridlines, SEM band or point markers.
    * @param {number}  [opts.width] - Overrides the default viewBox width for the mini/full size.
    * @param {number}  [opts.height] - Overrides the default viewBox height for the mini/full size (e.g. a taller mini chart elsewhere).
-   * @returns {string} SVG markup, or "" if there's no data to plot.
+   * @returns {string} SVG markup, or "" if there's no data to plot (or a mini chart has only one bin).
    */
   function buildSparklineSVG(seriesByGenotype, colorByGenotype, opts = {}) {
     const genotypes = Object.keys(seriesByGenotype).filter(g => seriesByGenotype[g].means.some(m => m != null));
@@ -3805,8 +3808,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   /**
    * Populates the Data Preview modal from buildAllSections()' output.
    *
-   * Unlike the old single-innerHTML-dump approach, this builds one
-   * collapsible <details> per section plus a jump-menu, and — critically —
+   * Builds one collapsible <details> per section plus a jump-menu, and
    * only calls buildHtmlTableFrom2D() (i.e. only builds that section's DOM)
    * the first time it's actually expanded. A large pooled export at a
    * realistic scale (3 trials x 20 animals x 100 stimuli) was measured at
@@ -4326,7 +4328,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // the assay default applied above in place — silently substituting a
     // fabricated ambient reading into the recorded metadata after a reload.
     // != null restores "" verbatim while still falling through to the default
-    // for a key an older draft never wrote (undefined) — and, as before, keeps
+    // for a key an older draft never wrote (undefined) — and still keeps
     // genuine zeroes (0 °C, 0 % RH) from being treated as blank.
     if (draft.temperature != null) UI.Inputs.temperature.value  = draft.temperature;
     if (draft.humidity    != null) UI.Inputs.humidity.value     = draft.humidity;
@@ -4462,9 +4464,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Fires whenever the ISI changes so the experimenter sees the conflict
   // before clicking Begin, not just at run-start.
   UI.Inputs.isi.addEventListener("input", updateGraceIsiWarning);
-  // The gracePeriod slider listener (registered later in initializeSettings)
-  // already updates gracePeriodMs and calls updateGraceIsiWarning() from
-  // within the canonical settings listener — no second listener needed here.
+  // The grace-period slider's listener (in the Settings section below)
+  // updates gracePeriodMs and calls updateGraceIsiWarning() itself, so no
+  // second listener is needed here.
 
   // feature-detect PointerEvent so only one event fires per touch.
   // On modern iOS/Android *both* pointerdown and touchstart fire for the same
@@ -4587,8 +4589,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Because _cancelWarmupUI is a closure inside runWarmup() and is not accessible
       // here, we replicate only what it can't do (the timer cancel) and rely on the
       // runWarmup loop to call _cancelWarmupUI itself on the very next setTimeout tick.
-      // The UI elements that were previously updated inline are now left for that tick,
-      // which fires within ≤1 s — acceptable for a cancel action.
+      // The remaining UI reset is left to that tick, which fires within ≤1 s —
+      // acceptable for a cancel action.
       isWarmingUp = false;
       // also cancel the pendingStart reset timer — if the warmup
       // started while startTimeout was still running, the timer would fire
@@ -5324,10 +5326,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("openAssayDefaults").addEventListener("click", () => {
     // Mirror showScreen() fully: collapse the overflow menu, reset aria-expanded,
     // and add state-overlay so CSS dimming is consistent with other overlays.
-    // Previously state-overlay was only set when Settings was first opened via
-    // showScreen() — navigating into Assay Defaults from Settings didn't change
-    // it, which is fine in practice (it was already set), but for correctness we
-    // explicitly add it here so the sub-page works even if entered independently.
+    // Settings has normally set state-overlay already; adding it here as well
+    // keeps the sub-page correct even if it is entered some other way.
     UI.Displays.overflowMenu.hidden = true;
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
     document.body.classList.add("state-overlay");
@@ -5348,8 +5348,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   UI.Buttons.openSavedAssays.addEventListener("click", () => {
     showScreen(UI.Screens.savedAssays);
-    // propagate async errors — previously the returned Promise was
-    // discarded so IDB failures produced a silent empty list with no user feedback.
+    // Surface async failures: without the catch, an IDB error would leave a
+    // silently empty list with no feedback to the user.
     populateSavedAssaysList().catch(err => {
       console.error("Failed to load saved assays:", err);
       showToast("Could not load saved assays. Please try again.", "error", 4000);
@@ -5475,9 +5475,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     e.stopPropagation();  // Prevent the document click handler from immediately closing it
     const willBeOpen = UI.Displays.overflowMenu.hidden;  // true = it is currently closed → we are opening it
     UI.Displays.overflowMenu.hidden = !willBeOpen;
-    // keep aria-expanded in sync so screen readers announce the correct
-    // open/closed state. Previously the attribute was hard-coded to "false" in HTML
-    // and never updated, so assistive technologies always reported the menu as collapsed.
+    // Keep aria-expanded in sync so screen readers announce the correct
+    // open/closed state.
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", String(willBeOpen));
   });
 
@@ -5712,10 +5711,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     UI.Buttons.deleteSelectedAssays.disabled  = checked.length === 0;
     UI.Inputs.selectAllAssays.checked         = checked.length === all.length && all.length > 0;
-    // set indeterminate when some (but not all) checkboxes are checked.
-    // Previously indeterminate was never set here, so the master checkbox only
-    // showed checked/unchecked, losing the "partial selection" affordance.
-    // Compare with syncExportSelectAll() which handles this correctly for exports.
+    // Show the master checkbox as indeterminate when some (but not all) rows
+    // are checked — the same "partial selection" affordance syncExportSelectAll()
+    // gives the export list.
     UI.Inputs.selectAllAssays.indeterminate   = checked.length > 0 && checked.length < all.length;
   });
 
@@ -5779,8 +5777,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
         if (failCount > 0) {
           showToast(`${failCount} assay(s) could not be deleted. The rest were removed.`, "error", 5000);
-          // previously both branches ran when failCount > 0 because there
-          // was no `else` — users saw a success toast and an error toast simultaneously.
         } else {
           showToast(`${idsToDelete.length} assay${idsToDelete.length !== 1 ? "s" : ""} deleted.`, "success", 3000);
         }
@@ -5993,10 +5989,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         _popBadge(UI.Settings.gracePeriodDisplay);
       }
       // Re-evaluate the grace×ISI warning on the setup screen whenever the
-      // slider moves — gracePeriodMs is now up-to-date so updateGraceIsiWarning()
-      // will reflect the correct effective value. This is the single canonical
-      // place to trigger the warning; the duplicate listener that previously
-      // existed near the ISI input wiring has been removed.
+      // slider moves — gracePeriodMs is already updated above, so
+      // updateGraceIsiWarning() reflects the new effective value. This is the
+      // only place a grace-period change triggers the warning.
       updateGraceIsiWarning();
     });
     // Badge input → slider
@@ -6036,9 +6031,9 @@ document.addEventListener("DOMContentLoaded", async () => {
      * Deliberately does NOT bind the +/− buttons: index.html already binds a
      * single delegated handler to every `.stepper-btn` on the page, and that
      * handler clamps, writes the field, and dispatches `change`. Binding a
-     * second click handler here made each button apply its delta twice (20 →
-     * 22 °C, 100 → 102 stimuli, 1.0 → 1.2 s ISI), and it was the doubled value
-     * that got persisted. Listening for the `change` that handler dispatches
+     * second click handler here would make each button apply its delta twice
+     * (20 → 22 °C, 100 → 102 stimuli, 1.0 → 1.2 s ISI) and persist the doubled
+     * value. Listening for the `change` that handler dispatches
      * keeps one source of truth for the arithmetic and one for the storage.
      *
      * @param {HTMLInputElement} input - The number input.

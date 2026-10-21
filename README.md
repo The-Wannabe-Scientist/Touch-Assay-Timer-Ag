@@ -296,8 +296,11 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
 ├── service-worker.js       # Offline caching via Cache API
 ├── icon-192.png            # PWA icon (192×192)
 ├── icon-512.png            # PWA icon (512×512, maskable)
+├── Touch_assay_logo_main.png  # Full-resolution logo artwork
 ├── armband_build_guide.md  # Full hardware build guide for the haptic armband
 ├── package.json            # `npm test` runs the unit test suite; no runtime deps
+├── jsconfig.json           # Editor type-checking for js/ (no build step)
+├── LICENSE                 # MIT licence
 ├── fonts/                  # Self-hosted webfonts (no external CDN dependency)
 ├── test/                   # Unit tests (node --test) for utils/models/export/db
 ├── js/
@@ -309,7 +312,8 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
 │   ├── export.js           # Excel (SheetJS) / CSV / HTML preview generation
 │   ├── utils.js            # Binning, Touch Index, pooled-run computation
 │   ├── toast.js            # Non-blocking notification toasts
-│   └── timer-worker.js     # Web Worker — drift-compensated ISI scheduler
+│   ├── timer-worker.js     # Web Worker — drift-compensated ISI scheduler
+│   └── global.d.ts         # Type declarations for globals (SheetJS, window hooks)
 └── firmware/
     ├── haptic_armband/
     │   └── haptic_armband.ino  # Full BLE firmware (LRA or ERM — set #define at top)
