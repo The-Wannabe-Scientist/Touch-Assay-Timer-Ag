@@ -16,7 +16,7 @@
 | DRV2605L Haptic Motor Driver breakout | 1 | Adafruit #2305 or clone; I²C, 3.3V-compatible |
 | **Option A:** LRA motor, 1.8V RMS | 1 | Z-axis linear resonant actuator (e.g. Jinlong G0832012D). Observe +/− polarity. |
 | **Option B:** ERM coin motor, 3V | 1 | Eccentric rotating mass (standard coin vibration motor). No strict polarity. |
-| 1N5819 Schottky Diode | 2 | OR-diode loop: one from XIAO Pin 8 (USB 5 V), one from LiPo BAT+ wire direct |
+| 1N5819 Schottky Diode | 2 | OR-diode loop: one from XIAO Pin 14 (5V / VBUS), one from LiPo BAT+ wire direct |
 | 220µF–470µF electrolytic capacitor | 1 | Bulk decoupling across DRV2605L VIN/GND — positive leg to VIN |
 | **Optional:** External RGB LED (common-cathode, separate R/G/B) | 1 | For visible status outside enclosure. See wiring + resistor table below. |
 | **270 Ω resistor** | 1 | Red LED current-limit (5 mA @ Vf ≈ 2.0 V, 3.3 V rail) |
@@ -46,7 +46,7 @@
 > The XIAO nRF52840 runs at **3.3V logic**. The Adafruit DRV2605L breakout includes a 3.3V regulator and level-shifter, accepting both 3.3V and 5V on VIN. Power it via the dual-voltage OR loop described below.
 
 > [!IMPORTANT]
-> **Clone DRV2605L boards** (non-Adafruit) have an **EN pin** that floats LOW by default, disabling the output stage entirely. Connect EN → XIAO D3 (firmware drives it HIGH) or hardwire EN → 3.3V. If you skip this, the motor will never vibrate regardless of correct register settings.
+> **Clone DRV2605L boards** (non-Adafruit) have an **EN pin** that floats LOW by default, disabling the output stage entirely. Connect EN → XIAO D3 (firmware drives it HIGH) or hardwire EN → 3.3V (XIAO Pin 12, 3V3). If you skip this, the motor will never vibrate regardless of correct register settings.
 
 > [!TIP]
 > The DRV2605L I²C address is fixed at **0x5A**. If adding another I²C device (e.g. IMU), ensure no address conflict.
@@ -55,22 +55,24 @@
 
 ## 🗺️ XIAO BLE nRF52840 Pinout Reference
 
+Top view, component side up, USB-C at the top:
+
 ```
-         USB-C
-    ┌─────────────┐
-D0  │ 1         14│ 3.3V
-D1  │ 2         13│ GND
-D2  │ 3         12│ RST
-D3  │ 4         11│ GND
-D4/SDA│ 5      10│ BAT− (bottom pad)
-D5/SCL│ 6       9│ BAT+ (bottom pad)
-D6  │ 7         8│ VIN (5V from USB)
-    └─────────────┘
-       D7  D8  (additional pads on back, near USB-C)
+              USB-C
+         ┌─────────────┐
+D0/A0    │ 1         14│ 5V  (VBUS: USB 5 V, live only while USB is plugged in)
+D1/A1    │ 2         13│ GND
+D2/A2    │ 3         12│ 3V3 (LDO output)
+D3/A3    │ 4         11│ D10 / MOSI
+D4/SDA   │ 5         10│ D9  / MISO
+D5/SCL   │ 6          9│ D8  / SCK
+D6/TX    │ 7          8│ D7  / RX
+         └─────────────┘
+BAT+ / BAT− are solder pads on the underside, not header pins.
 ```
 
 > [!NOTE]
-> D7 and D8 are exposed on the back pads. Verify against the [official Seeed schematic](https://wiki.seeedstudio.com/XIAO_BLE/) before soldering.
+> D7 (Pin 8) and D8 (Pin 9) are ordinary header pins on the right-hand edge — the bottom two. Verify against the [official Seeed pinout](https://wiki.seeedstudio.com/XIAO_BLE/) before soldering.
 
 **Bottom pads (required for battery):**
 - `BAT+` → LiPo red wire
@@ -86,8 +88,8 @@ The DRV2605L is powered **directly from the LiPo battery** in an OR-diode loop w
 
 > [!IMPORTANT]
 > **Diode anode sources are:**
-> - **Diode 1 anode → XIAO Pin 8 (USB 5 V)** — provides power when USB cable is connected
-> - **Diode 2 anode → LiPo BAT+ wire directly** — tap the red wire *before* it reaches the XIAO BAT+ pad, **not** XIAO Pin 14 (3.3 V) and **not** XIAO Pin 8
+> - **Diode 1 anode → XIAO Pin 14 (5V / VBUS)** — provides power when USB cable is connected
+> - **Diode 2 anode → LiPo BAT+ wire directly** — tap the red wire *before* it reaches the XIAO BAT+ pad, **not** XIAO Pin 12 (3V3) and **not** XIAO Pin 14 (5V)
 >
 > Both cathodes (striped ends) join at a single node → DRV2605L VIN. Whichever source is higher wins; the Schottky diodes prevent back-feed.
 
@@ -102,7 +104,7 @@ The DRV2605L is powered **directly from the LiPo battery** in an OR-diode loop w
 | OUTN | Motor (−) terminal | |
 
 **Step-by-step OR loop wiring:**
-1. Solder **Diode 1 anode** → XIAO **Pin 8 (5 V USB)**
+1. Solder **Diode 1 anode** → XIAO **Pin 14 (5V / VBUS)**
 2. Run a short (~5 cm) wire from the **LiPo red (+) wire**, tap it *before* the XIAO BAT+ pad → **Diode 2 anode**
 3. Twist both **cathodes** (striped ends) together → DRV2605L **VIN**
 4. Solder a **220 µF–470 µF** electrolytic cap across DRV2605L **VIN / GND** (positive → VIN), as close to the VIN/GND pins as possible
@@ -111,7 +113,7 @@ The DRV2605L is powered **directly from the LiPo battery** in an OR-diode loop w
 > The 1N5819 Schottky drop is ~0.3 V. When on battery alone the DRV sees ~3.4–3.9 V (3.7–4.2 V LiPo minus 0.3 V). The DRV2605L VIN range is 2.5–5.2 V — this is fully within spec.
 
 > [!WARNING]
-> **Never connect Diode 2 anode to XIAO Pin 14 (3.3 V).** That is a regulated output from the XIAO LDO, not a battery tap. Connecting it there would feed motor current backwards through the LDO and destroy it.
+> **Never connect Diode 2 anode to XIAO Pin 12 (3V3).** That is a regulated output from the XIAO LDO, not a battery tap. Connecting it there would feed motor current backwards through the LDO and destroy it.
 
 ```text
   LiPo BAT+ wire (red)
@@ -123,7 +125,7 @@ The DRV2605L is powered **directly from the LiPo battery** in an OR-diode loop w
   ▼                                                          ├──→ DRV2605L VIN
   XIAO BAT+ pad (bottom)                                     │       │
                                                              │    [220–470µF]
-  XIAO Pin 8 (5 V USB) ──[>| 1N5819 D1 ]────────────────────┘       │
+  XIAO Pin 14 (5V)     ──[>| 1N5819 D1 ]────────────────────┘       │
                                                                       │
   XIAO Pin 13 (GND) ────────────────────────────────────────→ DRV GND┘
   XIAO D4 (Pin 5)   ────────────────────────────────────────→ DRV SDA
@@ -166,13 +168,13 @@ XIAO GPIO output = **3.3 V**. Target current = **5 mA** per channel (safe, visib
 > If your green or blue LED has Vf ≥ 3.1 V, drop to **68 Ω** or even **47 Ω** for green/blue. Measure across the LED with a multimeter; if it reads < 2.5 V when your resistor is connected, reduce the resistor.
 
 ```
-  XIAO D6 ──→ 270 Ω ──→ R anode  ┐
-  XIAO D7 ──→ 100 Ω ──→ G anode  ├─ Common-Cathode RGB LED
-  XIAO D8 ──→ 100 Ω ──→ B anode  ┘
+  XIAO D6 (Pin 7) ──→ 270 Ω ──→ R anode  ┐
+  XIAO D7 (Pin 8) ──→ 100 Ω ──→ G anode  ├─ Common-Cathode RGB LED
+  XIAO D8 (Pin 9) ──→ 100 Ω ──→ B anode  ┘
   GND ──────────────────→ Cathode
 ```
 
-If your LED is **common-anode** instead, uncomment `#define EXT_RGB_COMMON_ANODE` in the firmware. The same resistor values apply — just place them between XIAO D6/D7/D8 and the individual anodes, with the common anode tied to 3.3 V.
+If your LED is **common-anode** instead, uncomment `#define EXT_RGB_COMMON_ANODE` in the firmware. The same resistor values apply — just place them between XIAO D6/D7/D8 and the individual anodes, with the common anode tied to 3.3 V (XIAO Pin 12, 3V3).
 
 ### LiPo Battery → XIAO (bottom pads)
 
@@ -256,7 +258,7 @@ All firmware lives in the [`firmware/`](./firmware/) directory. There are two sk
 
 | File | Purpose |
 |---|---|
-| [`firmware/haptic_test/haptic_test.ino`](./firmware/haptic_test/haptic_test.ino) | Hardware verification — runs vibration patterns on boot, no BLE needed |
+| [`firmware/haptic_test/haptic_test.ino`](./firmware/haptic_test/haptic_test.ino) | Hardware verification — dumps the DRV2605L registers and holds the motor on for 10 s on boot, no BLE needed |
 | [`firmware/haptic_armband/haptic_armband.ino`](./firmware/haptic_armband/haptic_armband.ino) | Full BLE firmware — connects to the Touch Assay Timer web app |
 
 ### Choosing LRA or ERM motor
@@ -281,19 +283,24 @@ Also at the top of each file:
 
 ### Voltage values — adjusting for your motor
 
-If your specific motor has different ratings, change these two register values in the `initMotor()` function:
+The drive levels are set by `DRV_RATED_VOLTAGE` and `DRV_OD_CLAMP` in the **DRIVE LEVELS** block at the top of `haptic_armband.ino` (written to the chip by `configureMotorRegisters()`). The BLE sketch's defaults drive the motor **harder than the BOM parts are rated for**, for a stronger buzz. `haptic_test.ino` uses lower values, though still somewhat above the BOM ratings. To run a motor at its rating, use the "BOM-rated" column below, or work out your own from the formulas (TI DRV2605L datasheet, SLOS854D).
 
-**LRA:**
+**LRA** (closed loop):
 ```
-RATED_VOLTAGE (0x16) = V_rms × 255 / 5.3   (default: 0x57 = 1.8V RMS)
-OD_CLAMP      (0x17) = V_od  × 255 / 5.6   (default: 0x60 = 2.1V, ~17% above rated)
+V_rms = RATED_VOLTAGE × 20.71 mV / sqrt(1 − (4·t_SAMPLE + 300 µs)·f_LRA)   (t_SAMPLE = 300 µs by default)
 ```
 
-**ERM:**
-```
-RATED_VOLTAGE (0x16) = V_rated × 255 / 5.3  (default: 0x90 = 3.0V)
-OD_CLAMP      (0x17) = V_peak  × 255 / 5.6  (default: 0x96 = 3.3V)
-```
+| Register | `haptic_armband.ino` default | BOM-rated (1.8 V RMS LRA, 235 Hz) | `haptic_test.ino` |
+|---|---|---|---|
+| RATED_VOLTAGE (0x16) | `0x78` (≈ 3.1 V RMS) | `0x46` (≈ 1.8 V RMS) | `0x57` (≈ 2.2 V RMS) |
+| OD_CLAMP (0x17) | `0xA4` | `0x60` | `0x60` |
+
+**ERM** (open loop): only OD_CLAMP sets the drive, at 21.59 mV per LSB (and never above the supply rail). RATED_VOLTAGE is not used.
+
+| Register | `haptic_armband.ino` default | BOM-rated (3 V ERM) | `haptic_test.ino` |
+|---|---|---|---|
+| OD_CLAMP (0x17) | `0xD0` (≈ 4.5 V) | `0x8B` (≈ 3.0 V) | `0x96` (≈ 3.2 V) |
+| RATED_VOLTAGE (0x16) | `0xC0` (unused) | — | `0x90` (unused) |
 
 ---
 
@@ -336,18 +343,29 @@ Wire per the **External RGB LED** diagram above (270 Ω red, 100 Ω green/blue �
 3. **Set motor type:** ensure the correct `#define MOTOR_LRA` or `#define MOTOR_ERM` is active
 4. Upload and open **Serial Monitor at 115200 baud**
 
-**Expected Serial output:**
+**Expected Serial output** (abridged — the register dumps are longer):
 ```
-I2C scanner found: 0x5A
-LRA auto-calibration OK.       ← (or "DRV2605L: ERM open-loop mode." for ERM)
-  A_CAL_COMP (0x18): 0x0C
-  A_CAL_BEMF (0x19): 0x6C
-Haptic test ready.
+>>> DIAGNOSTIC HAPTIC TEST
+Running I2C scanner...
+  Found: 0x5A
+I2C scan complete.
+DRV2605L responded to begin().
+=== Register dump [AFTER begin(), BEFORE manual init] ===
+  ...
+--- Configuring LRA closed-loop ---
+LRA auto-calibration complete.         ← ERM prints "DRV2605L initialised: ERM open-loop mode." instead
+  A_CAL_COMP (0x18): 0x..
+  A_CAL_BEMF (0x19): 0x..
+=== Register dump [AFTER manual init] ===
+  ...
+>>> OUTPUT ON — measure OUT+ to GND now.
+  t=1s  STATUS=0x..  MODE=0x5  RTP=0x7F      (one line per second, 10 in all)
+>>> Output OFF. Paste the full log above for analysis.
 ```
 
-5. Confirm motor vibrates the double-tap + long-pulse pattern
-6. External LED should be **solid green** when ready
-7. Then upload `firmware/haptic_armband/haptic_armband.ino` and test BLE
+5. Confirm the motor vibrates **continuously for about 10 s** (RTP mode at full amplitude). You can measure OUTP/OUTN with a multimeter during this window.
+6. The external LED turns **solid green** after the 10 s test finishes, or **red** if the DRV2605L is not found
+7. Then upload `firmware/haptic_armband/haptic_armband.ino` and test BLE. The double-tap "ready" buzz comes from this sketch, not from `haptic_test.ino`.
 
 > [!TIP]
 > If the motor is silent but Serial output looks correct, check the **EN pin** is connected and driven HIGH (see Critical Notes above). This is the most common cause of 0V output on clone DRV2605L boards.
@@ -412,9 +430,9 @@ Write a byte to the Heartbeat characteristic to test the watchdog:
 |---|---|
 | Board not detected in IDE | Double-tap Reset; use a USB-C **data** cable (not charge-only); try different USB port |
 | Upload fails | Select **Seeed nRF52 mbed-enabled Boards** package in Board Manager; verify Port is selected |
-| XIAO resets or reboots during vibration | DRV2605L drawing too much from 3.3 V — **check OR loop wiring**; VIN must come from LiPo/USB5V, not Pin 14 |
+| XIAO resets or reboots during vibration | DRV2605L drawing too much from 3.3 V — **check OR loop wiring**; VIN must come from LiPo/USB5V, not Pin 12 (3V3) |
 | OR loop: DRV2605L works on USB but not on battery alone | Diode 2 anode is not connected to LiPo BAT+ — it may be floating. Tap the red wire before the BAT+ pad |
-| OR loop: DRV2605L works on battery but not on USB | Diode 1 anode is not connected to XIAO Pin 8 (5 V USB); verify with multimeter (should read ~5 V when USB plugged in) |
+| OR loop: DRV2605L works on battery but not on USB | Diode 1 anode is not connected to XIAO Pin 14 (5V / VBUS); verify with multimeter (should read ~5 V when USB plugged in) |
 | Decoupling cap polarity wrong | Electrolytic caps are polarised — positive leg to VIN, negative to GND. Reversed caps can short or explode |
 
 ### DRV2605L & Motor
@@ -425,7 +443,7 @@ Write a byte to the Heartbeat characteristic to test the watchdog:
 | Motor silent, no Serial errors, 0 V on OUTP/OUTN | **EN pin not driven HIGH** — most common issue on clone boards. Check D3 is wired to EN and firmware is uploading |
 | Motor silent, registers look correct in Serial | Check continuity of OUTP/OUTN → motor leads with multimeter; check for cold solder joints |
 | Motor cuts out immediately (overcurrent) | ERM stall-current exceeded driver limit; reduce OD_CLAMP (0x17) temporarily; verify motor rated current |
-| LRA: motor vibrates but weakly | Verify RATED_VOLTAGE (0x57) and OD_CLAMP (0x60) match your motor spec sheet; confirm auto-cal succeeded (A_CAL_COMP and A_CAL_BEMF both non-zero) |
+| LRA: motor vibrates but weakly | Verify `DRV_RATED_VOLTAGE` and `DRV_OD_CLAMP` (top of the sketch — see *Voltage values* above) suit your motor's spec sheet; confirm auto-cal succeeded (A_CAL_COMP and A_CAL_BEMF both non-zero) |
 | LRA: `WARNING: auto-calibration failed` | Check OUTP/OUTN polarity; confirm RATED_VOLTAGE not too low; try slightly increasing OD_CLAMP |
 | ERM: motor hums but doesn't spin | ERM closed-loop tracking failed on small motor; ensure open-loop is set (`0x1D` bit 5 = 1 in firmware) |
 | DRV2605L I²C lost mid-use | Firmware has auto-recovery every 5 s; check wiring strain relief; add extra GND wire if board moves |

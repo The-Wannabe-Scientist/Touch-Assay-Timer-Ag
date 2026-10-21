@@ -10,7 +10,7 @@ import {
   saveAssay, loadAllAssays, hydrateAssay, deleteAssay,
   saveTrial, markTrialCompleted, markTrialAbandoned,
   saveRun, abandonAllActiveTrialsInDB, markOrphanRunsStopped,
-  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON
+  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON, isWellFormedAssay
 } from "../js/db.js";
 
 // db.js caches a single IDBDatabase connection at module scope (by design —
@@ -103,6 +103,23 @@ describe("getIdbAvailable", () => {
   });
 });
 
+describe("openDB when storage is blocked", () => {
+  test("a synchronous open() throw rejects and clears idbAvailable", async () => {
+    const realIDB = globalThis.indexedDB;
+    globalThis.indexedDB = {
+      open() { throw new DOMException("The user denied permission to access the database.", "SecurityError"); }
+    };
+    try {
+      // A fresh module instance: the flag and the cached connection are module-level.
+      const fresh = await import("../js/db.js?blocked-storage");
+      await assert.rejects(() => fresh.openDB(), { name: "SecurityError" });
+      assert.equal(fresh.getIdbAvailable(), false);
+    } finally {
+      globalThis.indexedDB = realIDB;
+    }
+  });
+});
+
 describe("saveAssay / loadAllAssays", () => {
   test("a saved assay appears in loadAllAssays()", async () => {
     const assay = makeAssay();
@@ -134,6 +151,36 @@ describe("hydrateAssay", () => {
       hydrated.trials[0].runs.map(r => r.runId),
       [runEarlier.runId, runLater.runId]
     );
+  });
+
+  test("orders runs by runSeq before startedAt, so a backward clock step can't swap them", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+    const trial = makeTrial();
+    await saveTrial(assay.assayId, trial);
+    const first  = makeRun({ runId: uid("z-run"), runSeq: 0, startedAt: 2_000 });
+    const second = makeRun({ runId: uid("a-run"), runSeq: 1, startedAt: 1_000 });  // clock stepped back
+    await saveRun(assay.assayId, trial.trialId, second);
+    await saveRun(assay.assayId, trial.trialId, first);
+
+    const hydrated = await hydrateAssay(assay.assayId);
+    assert.deepEqual(hydrated.trials[0].runs.map(r => r.runId), [first.runId, second.runId]);
+  });
+
+  test("returns trials sorted by trialIndex, not primary-key (trialId) order", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+
+    // trialIds chosen so primary-key order ("a" < "b" < "c") is the reverse
+    // of trialIndex order — the "assayId" index yields records in key order.
+    const prefix = uid("t");
+    const trial3 = makeTrial({ trialId: `${prefix}_a`, trialIndex: 3 });
+    const trial2 = makeTrial({ trialId: `${prefix}_b`, trialIndex: 2 });
+    const trial1 = makeTrial({ trialId: `${prefix}_c`, trialIndex: 1 });
+    for (const t of [trial3, trial2, trial1]) await saveTrial(assay.assayId, t);
+
+    const hydrated = await hydrateAssay(assay.assayId);
+    assert.deepEqual(hydrated.trials.map(t => t.trialIndex), [1, 2, 3]);
   });
 
   test("throws when the assay does not exist", async () => {
@@ -240,6 +287,65 @@ describe("saveTrial / markTrialCompleted / markTrialAbandoned", () => {
   });
 });
 
+/**
+ * Makes every write transaction on the shared connection abort at commit, for
+ * the rest of test `t`.
+ *
+ * A commit-time failure (e.g. QuotaExceededError) fires `abort` on the
+ * transaction with no `error` event: every request has already succeeded.
+ * Reproduce that by aborting from inside each put request's success handler.
+ */
+async function abortWritesAtCommit(t) {
+  const db = await openDB();
+  const realTransaction = db.transaction;
+  // Un-shadow the prototype method afterwards — in a hook, so it also runs
+  // if the test times out and the connection isn't left aborting every
+  // later test's writes.
+  t.after(() => { delete db.transaction; });
+  db.transaction = function (...args) {
+    const tx = realTransaction.apply(this, args);
+    const realObjectStore = tx.objectStore.bind(tx);
+    tx.objectStore = name => {
+      const store = realObjectStore(name);
+      const realPut = store.put.bind(store);
+      store.put = (...putArgs) => {
+        const request = realPut(...putArgs);
+        request.addEventListener("success", () => tx.abort());
+        return request;
+      };
+      return store;
+    };
+    return tx;
+  };
+}
+
+// The timeouts matter: without an abort handler these promises never settle,
+// and the caller would hang instead of reporting a failure.
+describe("writes that abort at commit", () => {
+  test("saveRun rejects, rather than never settling", { timeout: 2000 }, async (t) => {
+    await abortWritesAtCommit(t);
+    await assert.rejects(() => saveRun("any-assay", uid("trial"), makeRun()), /aborted/i);
+  });
+
+  test("saveAssay rejects, rather than never settling", { timeout: 2000 }, async (t) => {
+    await abortWritesAtCommit(t);
+    await assert.rejects(() => saveAssay(makeAssay()), /aborted/i);
+  });
+
+  test("saveTrial rejects, rather than never settling", { timeout: 2000 }, async (t) => {
+    await abortWritesAtCommit(t);
+    await assert.rejects(() => saveTrial(uid("assay"), makeTrial()), /aborted/i);
+  });
+
+  test("importAllDataFromJSON rejects, rather than never settling", { timeout: 2000 }, async (t) => {
+    await abortWritesAtCommit(t);
+    await assert.rejects(
+      () => importAllDataFromJSON({ assays: [makeAssay()], trials: [], runs: [] }),
+      /aborted/i
+    );
+  });
+});
+
 describe("abandonAllActiveTrialsInDB", () => {
   test("abandons this test's active trial and its active run", async () => {
     const assay = makeAssay();
@@ -279,6 +385,23 @@ describe("markOrphanRunsStopped", () => {
   });
 });
 
+describe("isWellFormedAssay", () => {
+  test("accepts the records the app writes, including legacy numeric IDs", () => {
+    assert.equal(isWellFormedAssay(makeAssay()), true);
+    assert.equal(isWellFormedAssay(makeAssay({ assayId: 1686731847000 })), true);
+    assert.equal(isWellFormedAssay(makeAssay({ assayName: undefined, genotypes: undefined })), true);
+  });
+
+  test("rejects malformed shapes that would break the Saved Assays list", () => {
+    assert.equal(isWellFormedAssay(makeAssay({ genotypes: "N2" })), false);
+    assert.equal(isWellFormedAssay(makeAssay({ genotypes: ["N2", 4] })), false);
+    assert.equal(isWellFormedAssay(makeAssay({ assayName: { toString: 0 } })), false);
+    assert.equal(isWellFormedAssay(makeAssay({ assayId: "" })), false);
+    assert.equal(isWellFormedAssay(null), false);
+    assert.equal(isWellFormedAssay([makeAssay()]), false);
+  });
+});
+
 describe("exportAllDataAsJSON / importAllDataFromJSON", () => {
   test("exports include records this test created", async () => {
     const assay = makeAssay();
@@ -293,6 +416,131 @@ describe("exportAllDataAsJSON / importAllDataFromJSON", () => {
   test("rejects a backup object missing required arrays", async () => {
     await assert.rejects(() => importAllDataFromJSON({ assays: [] }), /valid Touch Assay Timer backup/i);
     await assert.rejects(() => importAllDataFromJSON(null), /valid Touch Assay Timer backup/i);
+  });
+
+  test("rejects a backup with a malformed record and writes nothing from it", async () => {
+    const good = makeAssay();
+    // A string where an array belongs is stored without complaint by IDB, but
+    // then breaks every screen that lists assays.
+    const bad  = makeAssay({ genotypes: "N2" });
+    await assert.rejects(
+      () => importAllDataFromJSON({ assays: [good, bad], trials: [], runs: [] }),
+      /malformed record \(assay #2\)/
+    );
+    await assert.rejects(
+      () => importAllDataFromJSON({ assays: [makeAssay({ assayName: { toString: 0 } })], trials: [], runs: [] }),
+      /malformed record/
+    );
+    await assert.rejects(
+      () => importAllDataFromJSON({ assays: [], trials: [makeTrial()], runs: [] }),  // no assayId
+      /malformed record \(trial #1\)/
+    );
+    await assert.rejects(
+      () => importAllDataFromJSON({ assays: [], trials: [], runs: [makeRun({ runId: undefined })] }),
+      /malformed record \(run #1\)/
+    );
+
+    const all = await loadAllAssays();
+    assert.ok(!all.some(a => a.assayId === good.assayId), "a rejected backup must not be partly imported");
+  });
+
+  test("accepts records with numeric IDs from older databases", async () => {
+    const assay = makeAssay({ assayId: Date.now() + 0.5 });
+    const counts = await importAllDataFromJSON({
+      assays: [assay],
+      trials: [makeTrial({ assayId: assay.assayId })],
+      runs:   []
+    });
+    assert.equal(counts.trials, 1);
+  });
+
+  test("keeps newer records already on this device and never re-activates a finished trial", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+    const t0 = Date.now() - 60_000;
+    const trial = makeTrial({ status: "completed", startedAt: t0, endedAt: t0 + 30_000 });
+    await saveTrial(assay.assayId, trial);
+    const run = makeRun({ status: "completed", values: [1, 1, 1], startedAt: t0, endedAt: t0 + 20_000 });
+    await saveRun(assay.assayId, trial.trialId, run);
+
+    // An older backup taken mid-trial: trial and run still "active".
+    const counts = await importAllDataFromJSON({
+      assays: [],
+      trials: [{ ...trial, assayId: assay.assayId, status: "active", endedAt: null, runs: undefined }],
+      runs:   [{ ...run, trialId: trial.trialId, status: "active", values: [1], endedAt: null }]
+    });
+    assert.equal(counts.trials, 0);
+    assert.equal(counts.runs, 0);
+    assert.equal(counts.keptNewer, 2);
+
+    const hydrated = await hydrateAssay(assay.assayId);
+    assert.equal(hydrated.trials[0].status, "completed");
+    assert.deepEqual(hydrated.trials[0].runs[0].values, [1, 1, 1]);
+  });
+
+  test("a completed copy beats one the startup cleanup closed later, in either direction", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+    const trial = makeTrial({ status: "completed", endedAt: Date.now() });
+    await saveTrial(assay.assayId, trial);
+    const t0 = Date.now() - 60_000;
+    // Its final save failed: IDB holds the empty start record, which the
+    // next startup's cleanup closed — with a LATER endedAt than the real run.
+    const stub = makeRun({ status: "active", values: [], startedAt: t0 });
+    await saveRun(assay.assayId, trial.trialId, stub);
+    await abandonAllActiveTrialsInDB();
+    await markOrphanRunsStopped();
+
+    const completed = { ...stub, trialId: trial.trialId, status: "completed", values: [1, 0, 1], eligibleForAnalysis: true, endedAt: t0 + 30_000 };
+    const counts = await importAllDataFromJSON({ assays: [], trials: [], runs: [completed] });
+    assert.equal(counts.runs, 1);
+    let hydrated = await hydrateAssay(assay.assayId);
+    assert.equal(hydrated.trials[0].runs[0].status, "completed");
+    assert.deepEqual(hydrated.trials[0].runs[0].values, [1, 0, 1]);
+
+    // And the other way round: another device's cleaned-up copy can't
+    // replace the completed one here.
+    const closed = { ...completed, status: "abandoned", values: [], eligibleForAnalysis: false, endedAt: Date.now() + 60_000 };
+    const again = await importAllDataFromJSON({ assays: [], trials: [], runs: [closed] });
+    assert.equal(again.keptNewer, 1);
+    hydrated = await hydrateAssay(assay.assayId);
+    assert.deepEqual(hydrated.trials[0].runs[0].values, [1, 0, 1]);
+  });
+
+  test("replaces an older local copy with the backup's newer one", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+    const trial = makeTrial({ status: "completed", endedAt: Date.now() });
+    await saveTrial(assay.assayId, trial);
+    const run = makeRun({ status: "completed", eligibleForAnalysis: true, endedAt: Date.now() - 1000 });
+    await saveRun(assay.assayId, trial.trialId, run);
+
+    const overridden = { ...run, trialId: trial.trialId, eligibleForAnalysis: false, overrideAt: Date.now() + 1000 };
+    const counts = await importAllDataFromJSON({ assays: [], trials: [], runs: [overridden] });
+    assert.equal(counts.runs, 1);
+    assert.equal(counts.keptNewer, 0);
+
+    const hydrated = await hydrateAssay(assay.assayId);
+    assert.equal(hydrated.trials[0].runs[0].eligibleForAnalysis, false);
+  });
+
+  test("renumbers trials that end up sharing a trialIndex", async () => {
+    const assay = makeAssay();
+    await saveAssay(assay);
+    const t0 = Date.now();
+    const local = makeTrial({ trialIndex: 1, status: "completed", startedAt: t0, endedAt: t0 + 10 });
+    const localSecond = makeTrial({ trialIndex: 2, status: "completed", startedAt: t0 + 20, endedAt: t0 + 30 });
+    await saveTrial(assay.assayId, local);
+    await saveTrial(assay.assayId, localSecond);
+
+    // Another device's "Trial 2" for the same assay, started later.
+    const other = { ...makeTrial({ trialIndex: 2, status: "completed", startedAt: t0 + 40, endedAt: t0 + 50 }), assayId: assay.assayId };
+    delete other.runs;
+    await importAllDataFromJSON({ assays: [], trials: [other], runs: [] });
+
+    const hydrated = await hydrateAssay(assay.assayId);
+    assert.deepEqual(hydrated.trials.map(t => t.trialIndex), [1, 2, 3]);
+    assert.deepEqual(hydrated.trials.map(t => t.trialId), [local.trialId, localSecond.trialId, other.trialId]);
   });
 
   test("upserts records from a valid backup without touching unrelated existing data", async () => {

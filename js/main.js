@@ -27,15 +27,17 @@
  * Scheduling pipeline (fires ~125×/sec via timer-worker.js):
  *
  *   Worker "tick" → scheduler() {
- *     Step 0: Gap check — auto-stop if timing gap > 2×ISI (backgrounding detected)
- *     Step 1: Speech/UI layer  — update counter, trigger voice cue at stimulus open
- *     Step 2: Data layer       — record 0/1 at stimulus close, batch-save to IDB
- *     Step 3: Audio layer      — pre-schedule hardware beep slightly in advance
+ *     Step 0:  Gap check — auto-stop if timing gap > 2×ISI (backgrounding detected)
+ *     Step 1:  Speech/UI layer  — update counter, trigger voice cue at stimulus open
+ *     Step 2a: Window boundary  — restart the metronome sweep at stimulus close
+ *     Step 2b: Data layer       — record 0/1 one grace period after stimulus close,
+ *                                 then turn over the "tap registered" indicators
+ *     Step 3:  Audio layer      — pre-schedule hardware beep slightly in advance
  *   }
  */
 
 
-import { validateInputs, generateAutoID, binRunValues, escapeHTML, formatDateTime, summarizeTrialRunsByGenotype } from "./utils.js";  // escapeHTML is shared from utils.js
+import { validateInputs, generateAutoID, binRunValues, escapeHTML, formatDateTime, summarizeTrialRunsByGenotype, isRunEligible, collectPooledRuns } from "./utils.js";  // escapeHTML is shared from utils.js
 import {
   createAssay, createTrial, createRun,
   getActiveTrial, completeRun, abandonTrial
@@ -44,14 +46,15 @@ import {
   saveAssay, loadAllAssays, hydrateAssay, deleteAssay,
   saveTrial, markTrialCompleted, markTrialAbandoned,
   saveRun, abandonAllActiveTrialsInDB, markOrphanRunsStopped, getIdbAvailable,
-  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON
+  recoverCrashGuard, exportAllDataAsJSON, importAllDataFromJSON, isWellFormedAssay,
+  consumeDbRecreated, openDB
 }                                                      from "./db.js";
 import {
   isAudioReady, setVoiceMode, getVoiceMode, loadVoices, speak, stopSpeech,
   warmUpAudio, playWarmupTone, scheduleWebAudioTick,
-  triggerImmediateSpeech, getAudioTime, playCompletionTone,
+  triggerImmediateSpeech, getAudioTime, getOutputLatencySec, playCompletionTone,
   setTickPitch, getTickPitch, primeSpeechEngine, setBinSpeak,
-  playTick
+  playTick, cancelScheduledTicks, isSpeechAvailable
 }                                                      from "./audio.js";
 import {
   performExcelExport, performCSVExport, buildAllSections, buildHtmlTableFrom2D, RUN_STATUS_LABELS
@@ -83,7 +86,9 @@ const LS_KEYS = {
   VOICE_MODE:        "touchAssayVoiceMode",
   TICK_PITCH:        "touchAssayTickPitch",
   PROGRESS_VISIBLE:  "touchAssayProgressVisible",
-  SETUP_DRAFT:       "touchAssaySetupDraft"
+  SETUP_DRAFT:       "touchAssaySetupDraft",
+  PERSIST_WARNED:    "touchAssayPersistWarned",
+  UNSAVED_RUNS:      "touchAssayUnsavedRuns"
 };
 
 /**
@@ -200,10 +205,45 @@ let runBinSize = 10;
  */
 let runGraceSec = 0;
 
+/**
+ * Cue mode ("tick"/"count"/"tens"/"bins") for the current run, frozen by
+ * startCueLoop(). Each stimulus's tick is scheduled ~200 ms early and its
+ * speech fires on time; reading the live setting for each could leave a
+ * stimulus with no cue at all — while its window is still scored.
+ * @type {"tick"|"count"|"tens"|"bins"}
+ */
+let runVoiceMode = "tick";
+
 /** @type {number} AudioContext time when the next speech/UI update should fire. */
 let nextSpeechTime = 0.0;
 
-/** @type {number} AudioContext time when the next data recording window closes. */
+/**
+ * AudioContext time at which the current stimulus window closes.
+ *
+ * This is the window-boundary clock: it advances exactly on each stimulus
+ * edge and drives the visual metronome bar's sweep. It is deliberately
+ * separate from nextDataIntervalTime, which is held back by the grace period —
+ * the bar must still turn over on the beat even while scoring for that window
+ * is still accepting late taps. The "tap registered" indicators follow the
+ * scoring clock instead; see Step 2b in scheduler().
+ * @type {number}
+ */
+let nextWindowCloseTime = 0.0;
+
+/**
+ * Number of stimulus windows whose close edge has already been processed by
+ * the Step 2a boundary pass. Runs one grace period ahead of
+ * currentStimulusIndex (the scoring counter).
+ * @type {number}
+ */
+let closedWindowIndex = 0;
+
+/**
+ * AudioContext time of the close edge of the next stimulus window awaiting
+ * scoring. Scoring fires at this time PLUS runGraceSec — see Step 2b in
+ * scheduler() for why the delay is load-bearing.
+ * @type {number}
+ */
 let nextDataIntervalTime = 0.0;
 
 /** @type {number} AudioContext time when the next hardware tick should be scheduled. */
@@ -227,6 +267,51 @@ const SCHEDULE_AHEAD_TIME = 0.20;
 let lastSchedulerTime = 0;
 
 /**
+ * Wall-clock (Date.now()) and monotonic (performance.now()) readings taken at
+ * the last scheduler() invocation, in ms. The AudioContext clock stops while
+ * the context is suspended (sleep, screen lock, backgrounding), so a gap
+ * measured on that clock alone reads as zero across exactly the interruptions
+ * the gap guard exists to catch. Date.now() is tracked alongside
+ * performance.now() because the latter can itself stop during system sleep.
+ * @type {number}
+ */
+let lastSchedulerWallMs = 0;
+let lastSchedulerPerfMs = 0;
+
+/**
+ * performance.now() of the last scheduler() tick on which the AudioContext
+ * clock was seen to advance. Detects the context stalling while JS keeps
+ * running (e.g. a call or Siri interruption with the page still visible).
+ * @type {number}
+ */
+let lastAudioAdvancePerfMs = 0;
+
+/**
+ * How late (seconds) a hardware tick may be handed to the audio graph before
+ * the cue counts as missed. playTick() gives each tick a 50 ms envelope
+ * anchored to its scheduled time, so anything much later than this is
+ * truncated or silent rather than merely delayed.
+ * @type {number}
+ */
+const LATE_CUE_TOLERANCE_SEC = 0.02;
+
+/**
+ * Audio output latency for the current run in seconds: how long after its
+ * scheduled AudioContext time a tick is actually heard. Captured at run start
+ * and used to shift the scoring and metronome-bar windows onto the audible
+ * beat. Clamped to half the ISI. 0 when the browser doesn't report it.
+ * @type {number}
+ */
+let runOutputLatencySec = 0;
+
+/**
+ * The output-latency shift (ms) last announced in a toast, so the notice
+ * appears when the value first matters or changes — not on every run.
+ * @type {number}
+ */
+let lastAnnouncedLatencyMs = 0;
+
+/**
  * How many milliseconds before the stimulus opens to fire the TTS command,
  * to compensate for browser speech-engine cold-path latency (typically 50–120 ms).
  * Loaded from localStorage so users can tune it per-device in Settings.
@@ -248,8 +333,13 @@ try {
 /** @type {number|null} requestAnimationFrame handle for the visual metronome bar. */
 let visualAnimationFrame = null;
 
-/** @type {number|null} Timestamp (Date.now()) of the last processed tap. */
-let lastTapTime = 0;
+/**
+ * performance.now() of the last processed tap. Monotonic on purpose: a
+ * wall-clock (Date.now()) debounce drops every tap after a backward system
+ * clock step until the clock catches up.
+ * @type {number}
+ */
+let lastTapTime = -Infinity;
 
 /**
  * Minimum milliseconds between accepted taps (hardware debounce).
@@ -324,6 +414,50 @@ let lastEscapeTime = 0;
 let isWarmingUp = false;
 
 /**
+ * Incremented by every runWarmup() call. Each countdown loop remembers the
+ * value it started with and exits silently once it no longer matches, so a
+ * loop cancelled with Escape cannot wake from its 1 s sleep, find isWarmingUp
+ * true again because a newer warmup has begun, and start the run on its own
+ * stale schedule.
+ * @type {number}
+ */
+let warmupToken = 0;
+
+/**
+ * True from the moment a Finish Trial confirmation is accepted until the
+ * trial has been written and the Export screen is showing. Blocks taps for
+ * that span so a run cannot be started on a trial that is being closed.
+ * @type {boolean}
+ */
+let isFinishingTrial = false;
+
+/**
+ * True while Begin Assay is writing the new assay and its first trial, so a
+ * second submit can't create a duplicate assay.
+ * @type {boolean}
+ */
+let isCreatingAssay = false;
+
+/**
+ * True while a Start New Trial (Export screen or Saved Assays) is writing,
+ * so a double activation can't create two new trials.
+ * @type {boolean}
+ */
+let isStartingTrial = false;
+
+/**
+ * Completed runs whose final IDB save failed. They exist only in memory, and
+ * finishing the trial re-reads it from IDB, so they would be dropped from the
+ * export. flushUnsavedRuns() retries them before the next run starts and
+ * before a trial is finished.
+ * @type {Array<{assayId: string, trialId: string, run: Object}>}
+ */
+const unsavedRuns = [];
+
+// The service-worker update toast in index.html checks this before reloading.
+window.__touchAssayHasUnsavedRuns = () => unsavedRuns.length > 0;
+
+/**
  * The Web Worker instance that drives the scheduling heartbeat.
  * Isolated off the main thread so browser timer throttling doesn't affect timing.
  */
@@ -352,6 +486,23 @@ document.addEventListener("DOMContentLoaded", async () => {
       console.warn("[Unhandled Rejection — non-fatal, skipped overlay]", reason);
       return;
     }
+    // A storage write that failed (full disk or quota, a broken IDB backend)
+    // is not a bug in the app, and the fatal overlay's only way out is
+    // Reload, which throws away any queued unsaved runs. Say so instead.
+    const isStorageFailure =
+      reason.name === "QuotaExceededError" ||
+      reason.name === "UnknownError"       ||
+      /: transaction aborted$|: request failed$/.test(reason.message);
+    if (isStorageFailure) {
+      console.error("[Unhandled storage failure — skipped overlay]", reason);
+      showToast(
+        `A change could not be saved (${reason.name === "Error" ? "storage error" : reason.name}). ` +
+        "If this keeps happening, free up storage and export a backup.",
+        "error",
+        7000
+      );
+      return;
+    }
     handleFatalError(reason);
   });
 
@@ -376,12 +527,19 @@ document.addEventListener("DOMContentLoaded", async () => {
         // structuredClone is available in all modern browsers (Chrome 98+, FF 94+, Safari 15.4+).
         let safeAssay   = null;
         let safeRun     = null;
-        try { safeAssay = structuredClone(currentAssay ?? {}); } catch { safeAssay = currentAssay ?? {}; }
-        try { safeRun   = structuredClone(activeRun ?? null);  } catch { safeRun   = activeRun   ?? null; }
+        let safeUnsaved = [];
+        try { safeAssay   = structuredClone(currentAssay ?? {}); } catch { safeAssay   = currentAssay ?? {}; }
+        try { safeRun     = structuredClone(activeRun ?? null);  } catch { safeRun     = activeRun   ?? null; }
+        try { safeUnsaved = structuredClone(unsavedRuns);        } catch { safeUnsaved = unsavedRuns; }
+        // The Import Backup shape (flat assays/trials/runs), so the file can
+        // be loaded straight back through Settings → Import Backup. The
+        // completed runs whose final save failed are folded in: once
+        // currentAssay is re-read from IDB (Finish Anyway) or cleared (return
+        // to Setup), that queue is their only copy.
         const recoveryData = {
-          assay:     safeAssay,
+          ...assayToBackup(safeAssay, safeUnsaved),
+          // The run that was recording, for reference — it is also in runs.
           activeRun: safeRun,
-          timestamp: Date.now(),
         };
         const dataStr = "data:text/json;charset=utf-8," +
           encodeURIComponent(JSON.stringify(recoveryData, null, 2));
@@ -393,6 +551,34 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     const reloadBtn = document.getElementById('reloadAppBtn');
     if (reloadBtn) reloadBtn.onclick = () => window.location.reload();
+  }
+
+  /**
+   * Flattens an in-memory assay (trials → runs nested) plus queued unsaved
+   * runs into the backup shape importAllDataFromJSON() accepts.
+   *
+   * @param {Object|null} assay  - Nested assay, or null/{} when there is none.
+   * @param {Array<{assayId: string, trialId: string, run: Object}>} [queued=[]]
+   * @returns {{exportedAt: number, assays: Object[], trials: Object[], runs: Object[]}}
+   */
+  function assayToBackup(assay, queued = []) {
+    const assays = [], trials = [], runs = [];
+    if (assay && assay.assayId != null) {
+      const { trials: ts = [], ...assayRecord } = assay;
+      assays.push(assayRecord);
+      for (const t of ts) {
+        const { runs: rs = [], ...trialRecord } = t;
+        trials.push({ ...trialRecord, assayId: assay.assayId });
+        for (const r of rs) runs.push({ ...r, trialId: t.trialId });
+      }
+    }
+    for (const u of queued) {
+      if (!u?.run) continue;
+      const record = { ...u.run, trialId: u.trialId };
+      const i = runs.findIndex(r => r.runId === record.runId);
+      if (i !== -1) runs[i] = record; else runs.push(record);
+    }
+    return { exportedAt: Date.now(), assays, trials, runs };
   }
 
   /**
@@ -419,6 +605,37 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
   checkStorageQuota();
+
+  /**
+   * Asks the browser to make this origin's storage persistent, so assays
+   * (the only copy — there is no server) are not evicted under storage
+   * pressure along with ordinary site data.
+   *
+   * Chrome and Edge decide silently (engagement, installed app); Firefox may
+   * ask the user. Called at startup and again on Begin Assay, since a later
+   * call can be granted once the app is installed or used more. If it's
+   * refused, says once (ever) what that means and what to do about it.
+   */
+  async function requestPersistentStorage() {
+    if (!(navigator.storage && navigator.storage.persist && navigator.storage.persisted)) return;
+    try {
+      if (await navigator.storage.persisted()) return;
+      if (await navigator.storage.persist()) return;
+      let warned = false;
+      try { warned = localStorage.getItem(LS_KEYS.PERSIST_WARNED) === "1"; } catch { /* storage unavailable */ }
+      if (warned) return;
+      try { localStorage.setItem(LS_KEYS.PERSIST_WARNED, "1"); } catch { /* storage unavailable */ }
+      showToast(
+        "This browser may delete saved assays if the device runs low on storage. " +
+        "Install the app (Add to Home Screen) and export a backup regularly: ☰ → Saved Assays → Export Full Backup.",
+        "warning",
+        10000
+      );
+    } catch (e) {
+      console.warn("Persistent storage request failed", e);
+    }
+  }
+  requestPersistentStorage();
 
 
   /* -----------------------------------------------------------------------
@@ -608,10 +825,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         await navigator.serviceWorker.ready;
       }
       const names = await caches.keys();
-      // Mirrors CACHE_NAME's prefix in service-worker.js. Falls back to
-      // whatever's there if the prefix ever changes, rather than showing
-      // nothing; there should only ever be one cache for this origin.
-      const current = names.find(n => n.startsWith("touch-assay-cache-")) ?? names[0];
+      // Mirrors CACHE_PREFIX in service-worker.js. Other apps on a shared
+      // origin can have caches too, so never fall back to one of theirs.
+      const current = names.find(n => n.startsWith("touch-assay-cache-"));
       if (current) UI.Displays.swVersionFooter.textContent = current;
     } catch {
       // Cache API / service worker unavailable in this context — leave the
@@ -631,9 +847,42 @@ document.addEventListener("DOMContentLoaded", async () => {
    * that must run last so it doesn't race the primary cleanup's writes.
    */
   async function runStartupCleanup() {
+    // Probe storage first. Every step below can finish without opening the
+    // database (nothing queued, no crash guard, another tab holds the lock),
+    // and the "Storage unavailable" banner relies on openDB() having failed.
+    try { await openDB(); } catch { return; }  // idbAvailable is false now
+
+    await restorePersistedUnsavedRuns();
     await recoverCrashGuard();
-    await abandonAllActiveTrialsInDB();
-    await markOrphanRunsStopped();
+
+    const cleanUp = async () => {
+      await abandonAllActiveTrialsInDB();
+      await markOrphanRunsStopped();
+    };
+    // An "active" trial or run is a leftover only if no other tab is open:
+    // a second tab's would be live, and abandoning it would cut its trial
+    // short. Each tab holds a shared lock for its lifetime, so the exclusive
+    // ifAvailable request is granted only to a tab that is alone.
+    if (!navigator.locks?.request) {
+      await cleanUp();
+      return;
+    }
+    let lockAnswered = false;
+    try {
+      await navigator.locks.request("touch-assay-live", { ifAvailable: true }, async lock => {
+        lockAnswered = true;
+        if (lock) await cleanUp();
+      });
+    } catch (err) {
+      // The cleanup itself failed — report it as before.
+      if (lockAnswered) throw err;
+      // The lock manager refused (e.g. SecurityError in a restricted
+      // context): clean up as a browser without Web Locks would.
+      await cleanUp();
+    } finally {
+      navigator.locks.request("touch-assay-live", { mode: "shared" }, () => new Promise(() => {}))
+        .catch(() => { /* lock manager unavailable — cleanup already ran or was skipped */ });
+    }
   }
 
   Promise.allSettled([
@@ -669,6 +918,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   function setState(nextState) {
     currentState           = nextState;
     document.body.className = `state-${currentState}`;
+    // The assignment above also dropped the state-overlay modifier. Put it
+    // back if an overlay screen is still open (e.g. Settings opened mid-run,
+    // then the run completes), or that screen renders stacked under the
+    // assay screen instead of covering it.
+    const overlayOpen = !UI.Screens.settings.hidden      || !UI.Screens.guidelines.hidden
+                     || !UI.Screens.savedAssays.hidden   || !UI.Screens.assayDefaults.hidden;
+    document.body.classList.toggle("state-overlay", overlayOpen);
 
     switch (currentState) {
       case STATES.SETUP:
@@ -702,10 +958,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         {
           const _pSel = UI.Inputs.genotypeSelect.value;
           if (_pSel && currentAssay) {
-            const _pAt = getActiveTrial(currentAssay);
-            const _pN  = (_pAt?.runs.filter(
-              r => r.genotype === _pSel && r.status === "completed" && r.eligibleForAnalysis
-            ).length ?? 0) + 1;
+            const _pN  = nextAnimalIndex(getActiveTrial(currentAssay), _pSel);
             UI.Displays.tapLabel.textContent = `Start ${_pSel} (Animal ${_pN})`;
           } else {
             UI.Displays.tapLabel.textContent = "Select Genotype to Start";
@@ -719,6 +972,18 @@ document.addEventListener("DOMContentLoaded", async () => {
         UI.Buttons.progress.disabled      = true;
         UI.Buttons.tap.disabled           = false;
         UI.Buttons.stopRun.disabled       = false;
+        // The ⋮ button is hidden during a run (see styles.css); don't leave
+        // its menu open, with nothing usable in it, if the run started while
+        // it was showing.
+        UI.Displays.overflowMenu.hidden = true;
+        UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
+        // Don't carry focus from a run-details override box into the run:
+        // its controls are inert while running (see styles.css), and Space
+        // must reach the tap handler.
+        if (document.activeElement instanceof HTMLElement &&
+            document.activeElement.closest("#assayProgress")) {
+          document.activeElement.blur();
+        }
         // The "do not leave" beforeunload dialog is handled by the event listener
         // registered below — no additional setup is needed here.
         break;
@@ -731,6 +996,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Every branch above may have just changed #genotypeSelect.disabled;
     // keep the custom picker's pills/trigger in sync without a full rebuild.
     syncGenotypePickerEnabled();
+
+    // The scheduler only turns the "tap registered" indicators over when it
+    // scores a window, which never happens again once a run is stopped.
+    if (currentState !== STATES.RUNNING) clearTapRegisteredIndicators();
+  }
+
+  /**
+   * Returns the tap button and metronome bar to their neutral, "no tap
+   * registered" look. Called whenever no run is being scored, so a green left
+   * over from a stopped run can't make the next animal's first window look
+   * already tapped.
+   */
+  function clearTapRegisteredIndicators() {
+    UI.Buttons.tap.classList.remove("bucket-fulfilled", "isi-waiting");
+    if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.remove("fulfilled", "near-full");
   }
 
 
@@ -746,8 +1026,22 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function showScreen(screenElement) {
     UI.Displays.overflowMenu.hidden = true;
-    UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");  // M9: reset aria-expanded
+    UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");  // keep the menu button's state in sync
+
+    // Every overlay screen hides the assay screen, so no tap could be
+    // recorded while one is open and each window would be stored as a
+    // response. The menu items are hidden during a run; this catches any
+    // other path in.
+    if (currentState === STATES.RUNNING) {
+      showToast("Stop the run before opening this screen — taps can't be recorded while it is open.", "warning", 3500);
+      return;
+    }
+
     document.body.classList.add("state-overlay");
+
+    // Switching from Settings to another overlay hides the Test Rig's Stop
+    // button, so don't leave its loop ticking/vibrating behind it.
+    if (screenElement !== UI.Screens.settings) stopTestRig();
 
     // Collapse all overlay screens first to avoid stacking
     UI.Screens.settings.hidden      = true;
@@ -765,6 +1059,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   function hideScreenAndRestore(screenElement) {
     screenElement.hidden = true;
+    if (screenElement === UI.Screens.savedAssays) dismissBulkDeleteConfirm();
     document.body.classList.remove("state-overlay");
     // Stop any running Test Rig loop so it never keeps ticking/vibrating in
     // the background after Settings is closed. No-ops if it wasn't running.
@@ -784,7 +1079,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     wantsWakeLock = true;
     try {
       if ("wakeLock" in navigator) {
-        wakeLock = await navigator.wakeLock.request("screen");
+        // Hold the new sentinel locally until it is known to still be wanted.
+        // releaseWakeLock() can run while this request is pending (e.g. a gap
+        // auto-stop right after returning from background); assigning straight
+        // to `wakeLock` would then store a lock nothing ever releases.
+        const lock = await navigator.wakeLock.request("screen");
+        if (!wantsWakeLock) {
+          lock.release().catch(() => {});
+          return;
+        }
+        if (wakeLock && wakeLock !== lock) wakeLock.release().catch(() => {});
+        wakeLock = lock;
+        // The browser releases the lock itself when the page is hidden.
+        lock.addEventListener("release", () => { if (wakeLock === lock) wakeLock = null; });
       }
     } catch (err) {
       console.warn("Wake Lock request failed:", err);
@@ -804,6 +1111,31 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+
+  /**
+   * The animal index the next run of `genotype` in `trial` gets: one more
+   * than the highest index an animal already holds.
+   *
+   * A run holds its index once it has counted as data — eligible now, or a
+   * completed run that was eligible automatically (so marking an earlier
+   * animal Ineligible doesn't hand its number to the next worm). A failed
+   * attempt holds nothing, so its retry shares the index, as designed.
+   *
+   * @param {Object|null} trial
+   * @param {string}      genotype
+   * @returns {number}
+   */
+  function nextAnimalIndex(trial, genotype) {
+    let max = 0;
+    for (const r of trial?.runs ?? []) {
+      if (r.genotype !== genotype || r.status === "active") continue;
+      const holdsIndex = r.eligibleForAnalysis || (r.status === "completed" && r.autoEligibleForAnalysis);
+      if (!holdsIndex) continue;
+      const n = Number(r.animalIndex) || 0;
+      if (n > max) max = n;
+    }
+    return max + 1;
+  }
 
   /* -----------------------------------------------------------------------
      Run Lifecycle — Start
@@ -826,6 +1158,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     // underneath an actual assay run.
     stopTestRig();
 
+    // Best effort: an earlier run whose final save failed gets another chance
+    // now that storage may have recovered. Nothing to do in the normal case.
+    if (unsavedRuns.length > 0) {
+      await flushUnsavedRuns();
+      if (!currentAssay) return;
+    }
+    await repersistIfWiped();
+    if (!currentAssay) return;
+
     const activeTrial = getActiveTrial(currentAssay);
     if (!activeTrial) return;
 
@@ -838,20 +1179,73 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // Count only eligible runs for this genotype to determine the next animal index,
-    // consistent with the tap-button and genotype-dropdown counters
-    const animalIndex = activeTrial.runs.filter(
-      run => run.genotype === selectedGenotype && run.status === "completed" && run.eligibleForAnalysis
-    ).length + 1;
+    // The warmup countdown can outlast the screen timeout or be backgrounded.
+    // A run started in a hidden page can't be tapped, so every window would
+    // be stored as a response.
+    if (document.visibilityState === "hidden") {
+      showToast("Run not started: the app was in the background when the countdown ended.", "error", 6000);
+      return;
+    }
+
+    // The audio context can be suspended or interrupted (on iOS: a call, an
+    // alarm, Siri) after the start tap. A run on a stopped audio clock plays
+    // no cues and is cut short by the timing-gap check, so don't start one.
+    if (!isAudioReady()) {
+      showToast("Run not started: audio is interrupted. Tap twice to try again.", "error", 6000);
+      return;
+    }
+
+    // Same numbering the tap button's "Start <G> (Animal N)" label shows.
+    const animalIndex = nextAnimalIndex(activeTrial, selectedGenotype);
 
     const run = createRun({
       genotype:          selectedGenotype,
       animalIndex,
       expectedStimCount: currentAssay.stimCount
     });
+    // Start order within the trial, independent of the wall clock — hydrate
+    // sorts by it, so a clock step can't swap a failed attempt and its retry.
+    run.runSeq = activeTrial.runs.length;
 
     activeTrial.runs.push(run);
-    await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+    const assay = currentAssay;
+    try {
+      await saveRun(assay.assayId, activeTrial.trialId, run);
+    } catch (err) {
+      // Don't leave an orphan "active" run in memory: every later run in the
+      // trial would otherwise be recorded into it (wrong genotype and animal
+      // index). The caller surfaces the failure to the user.
+      const orphanIndex = activeTrial.runs.indexOf(run);
+      if (orphanIndex !== -1) activeTrial.runs.splice(orphanIndex, 1);
+      throw err;
+    }
+
+    // The user may have left this assay (header logo, Saved Assays) or begun
+    // finishing the trial while the record was being written. Going live now
+    // would leave the app in RUNNING with no run screen and no working Stop,
+    // or record into a trial that is closing. Close the run record instead.
+    if (currentAssay !== assay || isFinishingTrial ||
+        currentState === STATES.SETUP || currentState === STATES.EXPORT) {
+      const i = activeTrial.runs.indexOf(run);
+      if (i !== -1) activeTrial.runs.splice(i, 1);
+      run.status = "stoppedEarly";
+      run.endedAt = Date.now();
+      run.eligibleForAnalysis     = false;
+      run.ineligibleReason        = "Run start cancelled";
+      run.autoEligibleForAnalysis = false;
+      run.autoIneligibleReason    = "Run start cancelled";
+      saveRun(assay.assayId, activeTrial.trialId, run)
+        .catch(err => console.warn("Saving the cancelled run start failed:", err));
+      return;
+    }
+
+    // An overlay screen can still be open here if the run was armed with the
+    // Space shortcut or the screen was opened during the warmup. Close it so
+    // the tap button is on screen for the run that is about to be scored.
+    UI.Screens.settings.hidden      = true;
+    UI.Screens.guidelines.hidden    = true;
+    UI.Screens.savedAssays.hidden   = true;
+    UI.Screens.assayDefaults.hidden = true;
 
     // Transition UI
     setState(STATES.RUNNING);
@@ -860,7 +1254,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Displays.currentStim.textContent = "1";
 
     requestWakeLock();
-    startCueLoop();
+    startCueLoop(run);
   }
 
   /**
@@ -873,11 +1267,16 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Also captures the active run reference and stable assay parameters into
    * module-level cache variables so scheduler() never dereferences currentAssay
    * or scans the runs array during its hot path.
+   *
+   * @param {Object} [run] - The run startRun() just created. Passed in rather
+   *   than looked up by status, so a stale "active" run can never be picked up.
    */
-  function startCueLoop() {
+  function startCueLoop(run) {
     // Capture the active run reference once — scheduler() will use this directly
-    const activeTrial = getActiveTrial(currentAssay);
-    activeRun         = activeTrial?.runs.find(r => r.status === "active") ?? null;
+    activeRun = run ?? getActiveTrial(currentAssay)?.runs.find(r => r.status === "active") ?? null;
+
+    // A new run always opens window 1 in the neutral state.
+    clearTapRegisteredIndicators();
 
     // Cache stable run parameters to avoid repeated property lookups in scheduler()
     runISI        = currentAssay.isi;
@@ -905,23 +1304,50 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Forward bin size to audio module for "bins" voice mode
     setBinSpeak(runBinSize);
+    runVoiceMode = getVoiceMode();
 
     // Reset all scheduling counters
     currentStimulusIndex    = 0;
+    closedWindowIndex       = 0;
     nextSpeechIndex         = 0;
     nextAudioStimulusIndex  = 0;
     tapTimestamps           = [];
     tapReadIndex            = 0;
     lastSchedulerTime       = 0;
+    lastSchedulerWallMs     = 0;
+    lastSchedulerPerfMs     = 0;
+    lastAudioAdvancePerfMs  = performance.now();
 
     const t0 = getAudioTime();
     const startTime = t0 + 0.5;  // 500ms warm-up delay
+
+    // A tick scheduled for AudioContext time T is heard at T + output latency
+    // (a few ms on wired outputs, 100 ms and up over Bluetooth). The
+    // experimenter reacts to the tick they hear, so the scoring and bar
+    // windows are shifted onto the audible beat; only the audio schedule
+    // itself stays on the render clock. Capped at half the ISI so a bogus
+    // reading can't push a window past the next stimulus.
+    runOutputLatencySec = Math.min(getOutputLatencySec(), runISI / 2);
+
+    // Say so when the shift is big enough to matter. The figure is the
+    // browser's own estimate, so this is also the experimenter's chance to
+    // notice one that doesn't match what they hear.
+    const latencyMs = Math.round(runOutputLatencySec * 1000);
+    if (latencyMs >= 100 && Math.abs(latencyMs - lastAnnouncedLatencyMs) >= 20) {
+      lastAnnouncedLatencyMs = latencyMs;
+      showToast(
+        `Audio output lags by about ${latencyMs} ms (typical of Bluetooth). Scoring windows are shifted to match.`,
+        "info",
+        6000
+      );
+    }
 
     nextAudioScheduleTime  = startTime;
     // Fire the TTS command slightly before the stimulus opens to compensate
     // for browser speech-engine latency (speechLeadMs, default 80 ms).
     nextSpeechTime         = startTime - (speechLeadMs / 1000);
-    nextDataIntervalTime   = startTime + runISI;  // First window closes after one ISI
+    nextDataIntervalTime   = startTime + runISI + runOutputLatencySec;  // First window closes one ISI after the first audible tick
+    nextWindowCloseTime    = startTime + runISI + runOutputLatencySec;  // Same edge; diverges once grace > 0
 
     timerWorker.postMessage("start");
     armbandStartHeartbeat();  // keep armband watchdog alive during the run
@@ -942,7 +1368,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   /**
    * The main scheduler function — called on every Worker "tick" (~125×/sec).
    *
-   * Runs three sequential layers:
+   * Runs these steps in order:
    *
    *   Step 0: TIMING INTEGRITY CHECK
    *     Detects if the gap since the last tick is suspiciously large
@@ -953,15 +1379,24 @@ document.addEventListener("DOMContentLoaded", async () => {
    *     Fires at the opening of each stimulus window.
    *     Updates the stimulus counter and triggers optional voice cues.
    *
-   *   Step 2: DATA RECORDING
+   *   Step 2a: WINDOW BOUNDARY
    *     Fires at the closing of each stimulus window.
-   *     Checks whether a tap occurred during that interval and records 0 or 1.
+   *     Advances the boundary clock the visual metronome sweep reads, so the
+   *     bar restarts on the beat.
+   *
+   *   Step 2b: DATA RECORDING
+   *     Fires one grace period AFTER each stimulus window closes, so a tap
+   *     arriving inside the grace span has actually happened by the time the
+   *     window is scored. Checks whether a tap occurred and records 0 or 1,
+   *     then turns over the "tap registered" indicators — the window accepting
+   *     taps only really changes here, not on the boundary above.
    *     No IDB write happens here — see the no-mid-run-save note below.
    *     Triggers run completion when all stimuli are recorded.
    *
    *   Step 3: AUDIO PRE-SCHEDULING
    *     Schedules hardware beeps slightly ahead of time using the AudioContext
    *     clock to guarantee timing accuracy independent of JS thread load.
+   *     Ends the run as interrupted if a stall has left a cue too late to play.
    */
   function scheduler() {
     // Use cached run reference — avoids a linear .find() scan (~125×/sec)
@@ -980,20 +1415,48 @@ document.addEventListener("DOMContentLoaded", async () => {
     // first tick (lastSchedulerTime === 0) the guard is intentionally skipped.
     // On a recovered return from background, the first tick post-resume will
     // correctly fire the gap guard and abort the run before any data is lost.
+    //
+    // Three gaps are measured, because no single clock sees every interruption:
+    //   - audio:   AudioContext time since the last tick. Catches JS being
+    //              throttled while audio keeps rendering (background tab).
+    //   - wall:    real time since the last tick. Catches the context being
+    //              suspended together with JS (sleep, screen lock), where the
+    //              AudioContext clock stops and the audio gap reads ~0.
+    //   - stalled: real time since the AudioContext clock last advanced.
+    //              Catches the context stalling while JS keeps ticking (a call
+    //              or Siri interruption with the page still visible).
+    const wallNowMs = Date.now();
+    const perfNowMs = performance.now();
+    if (currentTime > lastSchedulerTime) lastAudioAdvancePerfMs = perfNowMs;
     if (lastSchedulerTime > 0) {
-      const gap           = currentTime - lastSchedulerTime;
+      const audioGap      = currentTime - lastSchedulerTime;
+      const dateGap       = (wallNowMs - lastSchedulerWallMs) / 1000;
+      const perfGap       = (perfNowMs - lastSchedulerPerfMs) / 1000;
+      const wallGap       = Math.max(dateGap, perfGap);
+      const stalledFor    = (perfNowMs - lastAudioAdvancePerfMs) / 1000;
+      const gap           = Math.max(audioGap, wallGap, stalledFor);
       const maxAllowedGap = Math.max(runISI * 2, 1.0);
 
       if (gap > maxAllowedGap) {
+        // Only Date.now() jumped: a sleep during which the other clocks
+        // paused too (macOS) looks exactly like a system-clock change, so the
+        // run stops either way — but say that it may have been the clock.
+        const clockOnly = dateGap > maxAllowedGap && Math.max(audioGap, perfGap, stalledFor) <= maxAllowedGap;
+        const cause = clockOnly
+          ? "the device slept, or the system clock changed"
+          : "device was backgrounded or throttled";
         console.error(
-          `Timing gap: ${gap.toFixed(3)}s exceeds max ${maxAllowedGap.toFixed(3)}s — ` +
-          `auto-stopping run (device was backgrounded or throttled)`
+          `Timing gap: ${gap.toFixed(3)}s exceeds max ${maxAllowedGap.toFixed(3)}s ` +
+          `(audio ${audioGap.toFixed(3)}s, wall ${dateGap.toFixed(3)}s, perf ${perfGap.toFixed(3)}s, ` +
+          `audio clock stalled ${stalledFor.toFixed(3)}s) — auto-stopping run (${cause})`
         );
-        stopRunEarly("Timing interrupted — device was backgrounded or throttled");
+        stopRunEarly(`Timing interrupted — ${cause}`);
         return;
       }
     }
-    lastSchedulerTime = currentTime;
+    lastSchedulerTime   = currentTime;
+    lastSchedulerWallMs = wallNowMs;
+    lastSchedulerPerfMs = perfNowMs;
 
     // ── Step 1: Speech & UI sync (fires at stimulus open) ──────────────────
     // Optimisation: when the scheduler misses several ticks (e.g. a brief JS
@@ -1017,7 +1480,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         // spam assistive tech at typical ISIs.
         if (
           UI.Displays.stimulusProgressAnnouncer &&
-          getVoiceMode() === "tick" &&
+          runVoiceMode === "tick" &&
           (displayIndex === 1 || displayIndex % 10 === 0)
         ) {
           UI.Displays.stimulusProgressAnnouncer.textContent =
@@ -1029,7 +1492,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const nextBeatAlsoDue = (currentTime >= nextSpeechTime + runISI)
                              && (nextSpeechIndex + 1 < runStimCount);
         if (!nextBeatAlsoDue) {
-          triggerImmediateSpeech(displayIndex, runISI);
+          triggerImmediateSpeech(displayIndex, runISI, runVoiceMode);
           speechFired = true;
         }
 
@@ -1041,8 +1504,36 @@ document.addEventListener("DOMContentLoaded", async () => {
       void speechFired;  // Suppress unused-variable linters
     }
 
-    // ── Step 2: Data recording (fires at stimulus close) ───────────────────
-    while (currentTime >= nextDataIntervalTime && currentStimulusIndex < runStimCount) {
+    // ── Step 2a: Window close (fires exactly at stimulus close) ────────────
+    // Advances the window-boundary clock that the visual metronome sweep reads,
+    // so the bar restarts on the beat rather than being held back by the grace
+    // period the way scoring below is.
+    //
+    // Only the beat-derived glow is cleared here. The "tap registered" state
+    // (see Step 2b) deliberately is NOT: during the grace span the window that
+    // is still accepting taps is the one that just closed, so turning those
+    // indicators over on the boundary would advertise a fresh window a full
+    // grace period before one actually opens.
+    while (currentTime >= nextWindowCloseTime && closedWindowIndex < runStimCount) {
+      if (UI.Displays.metronomeBar) {
+        UI.Displays.metronomeBar.classList.remove("near-full");
+      }
+      nextWindowCloseTime += runISI;
+      closedWindowIndex++;
+    }
+
+    // ── Step 2b: Data recording (fires one grace period after stimulus close) ──
+    // The +runGraceSec delay is what makes the grace period real. Scoring a
+    // window the instant it closes means no tap from inside the grace span has
+    // physically happened yet, so graceEnd is unreachable and the late tap
+    // instead falls through to the NEXT window — corrupting two values at once
+    // (a false "responded" here, a false "did not respond" next). Waiting out
+    // the grace span before reading tapTimestamps is what lets a late tap be
+    // credited to the window it belongs to.
+    while (
+      currentTime >= nextDataIntervalTime + runGraceSec &&
+      currentStimulusIndex < runStimCount
+    ) {
       const intervalStart = nextDataIntervalTime - runISI;
       const intervalEnd   = nextDataIntervalTime;
       // Grace period: extend acceptance window for taps that arrived up to
@@ -1053,23 +1544,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // Check if the experimenter tapped within this stimulus window.
       // Uses an index pointer (tapReadIndex) to scan only unconsumed entries,
-      // avoiding the previous .some() + .filter() pattern that allocated a new
-      // array and closures on every ISI tick.
+      // so no new array or closures are allocated on every ISI tick.
       let tapOccurred = false;
       while (tapReadIndex < tapTimestamps.length) {
         const t = tapTimestamps[tapReadIndex];
         // Stop scanning if the tap is beyond both the interval AND the grace window.
-        // If gracePeriodMs = 0 then graceEnd = intervalEnd and behaviour is unchanged.
+        // With no grace period, graceEnd = intervalEnd: the plain window edge.
         if (t >= graceEnd) break;               // belongs to a future window (past grace)
-        // guard against a tap that arrived after the second confirmation
-        // press but before the first stimulus window opened (i.e. t < intervalStart
-        // for stimulus 1).  The old code consumed these pre-run taps without counting
-        // them — which is correct — but if such a tap landed exactly ON intervalStart
-        // it would pass the >= check and set tapOccurred = true for stimulus 1,
-        // recording a false non-response.  The strict-boundary case is now blocked
-        // by using a half-open interval [intervalStart, intervalEnd) so that a tap
-        // at exactly intervalStart is correctly attributed to stimulus 1 only when
-        // it was genuinely within the window.
+        // A tap before intervalStart is consumed without being counted — in
+        // practice a tap in the lead-in between the second confirmation press
+        // and stimulus 1 (for later windows, earlier taps were already consumed
+        // by the previous window's scan or clamped forward by
+        // executeTapAction()). The accepted range is half-open,
+        // [intervalStart, graceEnd), so a tap exactly on a boundary counts
+        // toward one window only.
         if (t >= intervalStart) tapOccurred = true;  // inside window or within grace period
         tapReadIndex++;                         // consume (past or matched)
       }
@@ -1085,12 +1573,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       // or exported — there is no "response latency" to capture here.
       run.values.push(tapOccurred ? 0 : 1);
 
-      // Reset visual "bucket fulfilled" indicators for the next interval
+      // Reset the "tap registered" indicators now that this window has been
+      // scored — NOT on the window boundary in Step 2a. The scan above credits
+      // any tap before graceEnd to this window and consumes it, so between the
+      // boundary and here a tap still counts toward the window just closed and
+      // cannot reach the next one. Clearing the green on the boundary would
+      // therefore invite a second tap that gets silently swallowed, and would
+      // leave a genuinely late tap lighting the button green against the wrong
+      // (still-unscored) window — reading as "already recorded" and suppressing
+      // the tap that window actually needed.
       UI.Buttons.tap.classList.remove("bucket-fulfilled");
-      // Remove ISI waiting dim now that a new interval is starting
+      // Remove the ISI waiting dim now that a new interval is genuinely open.
       UI.Buttons.tap.classList.remove("isi-waiting");
       if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.remove("fulfilled");
-      if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.remove("near-full");
 
       currentStimulusIndex++;
       nextDataIntervalTime += runISI;
@@ -1102,7 +1597,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // live only in memory until it ends (completeRunNormally / stopRunEarly),
       // both of which persist immediately. The tradeoff: a hard crash mid-run
       // (tab kill, OS crash, power loss — not a clean backgrounding, which the
-      // visibilitychange handler below already flushes) loses that one run's
+      // visibilitychange handler below stops and saves) loses that one run's
       // in-progress data. Accepted deliberately — a single animal is cheap to
       // re-run, unlike a precision regression across every run.
 
@@ -1112,7 +1607,14 @@ document.addEventListener("DOMContentLoaded", async () => {
         // so completeRunNormally() receives it directly without a fragile .find() re-scan.
         const completedRun = run;
         stopCueLoop();
-        completeRunNormally(completedRun);
+        // Safety net: whatever goes wrong while finalising, never leave the
+        // app in RUNNING with the cue loop already stopped.
+        completeRunNormally(completedRun).catch(err => {
+          console.error("completeRunNormally failed:", err);
+          releaseWakeLock();
+          if (currentState === STATES.RUNNING) setState(STATES.POISED);
+          showToast("Run finished, but finalising it failed. Export your data before reloading.", "error", 10000);
+        });
         return;  // Exit scheduler immediately — run is over
       }
     }
@@ -1122,7 +1624,20 @@ document.addEventListener("DOMContentLoaded", async () => {
       nextAudioScheduleTime < currentTime + SCHEDULE_AHEAD_TIME &&
       nextAudioStimulusIndex < runStimCount
     ) {
-      scheduleWebAudioTick(nextAudioStimulusIndex + 1, runISI, nextAudioScheduleTime);
+      // A main-thread stall longer than the look-ahead, but shorter than the
+      // Step 0 limit, gets here with the cue's time already in the past. The
+      // tick would be truncated or silent, so the experimenter never gets the
+      // signal to deliver this stimulus while its window is still scored.
+      // That is not a run that can be trusted, so end it as interrupted.
+      if (currentTime - nextAudioScheduleTime > LATE_CUE_TOLERANCE_SEC) {
+        console.error(
+          `Stimulus ${nextAudioStimulusIndex + 1} cue is ` +
+          `${((currentTime - nextAudioScheduleTime) * 1000).toFixed(0)} ms late — auto-stopping run`
+        );
+        stopRunEarly(`Timing interrupted — stimulus ${nextAudioStimulusIndex + 1} cue could not be played on time`);
+        return;
+      }
+      scheduleWebAudioTick(nextAudioStimulusIndex + 1, runISI, nextAudioScheduleTime, runVoiceMode);
       nextAudioScheduleTime += runISI;
       nextAudioStimulusIndex++;
     }
@@ -1134,21 +1649,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   ----------------------------------------------------------------------- */
 
   /**
-   * Halts the Worker heartbeat and cancels the visual animation frame.
+   * Halts the Worker heartbeat, silences audio ticks already booked ahead,
+   * stops the armband heartbeat and cancels the visual animation frame.
    * Also clears the cached activeRun reference so scheduler() cannot fire
-   * against a stale run object if a tick arrives after stop.
-   * Does not modify any data — call before any run-ending function.
+   * against a stale run object if a tick arrives after stop, and empties the
+   * tap buffer. Does not modify run data — call before any run-ending function.
    */
   function stopCueLoop() {
     timerWorker.postMessage("stop");
+    // The next tick is booked ~200 ms ahead; don't let it play after the stop.
+    cancelScheduledTicks();
     armbandStopHeartbeat();   // cancel heartbeat so watchdog doesn't fire between runs
     activeRun = null;  // Defensive: prevent scheduler() processing stale run
     if (visualAnimationFrame !== null) {
       cancelAnimationFrame(visualAnimationFrame);
       visualAnimationFrame = null;
     }
-    // trim consumed tapTimestamps entries to prevent unbounded
-    // array growth during long runs. Reset the read index to match.
+    // Drop the run's tap timestamps (only needed while windows are being
+    // scored) and reset the read index to match.
     tapTimestamps.length = 0;
     tapReadIndex = 0;
   }
@@ -1158,7 +1676,10 @@ document.addEventListener("DOMContentLoaded", async () => {
    *
    * Marks the run as completed, evaluates eligibility for analysis,
    * saves the final state to IDB, plays the completion chime, and
-   * returns the UI to POISED state so the next run can begin.
+   * returns the UI to POISED state so the next run can begin. If the save
+   * fails twice, the run is queued in unsavedRuns to be retried later.
+   *
+   * @param {Object} run - The run the scheduler just finished.
    */
   async function completeRunNormally(run) {
     // Clear the double-Escape timer so the first Esc press in a new run can
@@ -1171,11 +1692,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     // (activeRun is already null at this point because stopCueLoop() was called first.)
     if (!run) return;
 
-    // guard against null activeTrial. This can happen in an extreme
-    // race where the trial was already completed via another path before the
-    // scheduler fired completeRunNormally. Without this guard, line 830
-    // (`saveRun(currentAssay.assayId, activeTrial.trialId, run)`) would throw
-    // TypeError and the final IDB save would never happen.
+    // Guard against a null activeTrial: possible in an extreme race where the
+    // trial was already completed via another path before the scheduler fired
+    // completeRunNormally. The run can't be saved without its trial, so return
+    // the UI to POISED rather than throwing a TypeError on activeTrial.trialId
+    // in the final save below.
     if (!activeTrial) {
       console.error("completeRunNormally: no active trial found — run data may not be saved to IDB.");
       playCompletionTone();
@@ -1205,19 +1726,33 @@ document.addEventListener("DOMContentLoaded", async () => {
     // NOTE: run.binnedPercentages is intentionally NOT cached here.
     // export.js always recomputes binned percentages fresh from raw `run.values`
     // via buildRunCache() → binRunValues(), so a stale cached value would be ignored
-    // anyway. Caching here also caused staleness if binSize changed between trials.
+    // anyway. A cached copy would also go stale if binSize changed between trials.
 
     // Warn if the stimulus count is not an exact multiple of binSize —
     // trailing values will be silently dropped during analysis
     const remainder = run.values.length % currentAssay.binSize;
     if (remainder !== 0) {
-      // reworded to remove ambiguous double-negative ("do not fill")
       run.partialBinWarning =
         `Last ${remainder} value(s) dropped — not enough to fill a complete bin of size ${currentAssay.binSize}`;
     }
 
-    // Final save: ensures all values are in IDB regardless of batch timing
-    await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+    // Final save: until now the run's values exist only in memory (scheduler()
+    // never writes to IDB mid-run).
+    // A failure here must not escape: everything below — including the
+    // transition back to POISED — would be skipped, stranding the app in
+    // RUNNING with no run for Stop to act on. Try twice, then carry on and
+    // tell the user the run only exists in memory.
+    let saved = false;
+    for (let attempt = 1; attempt <= 2 && !saved; attempt++) {
+      try {
+        await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+        saved = true;
+      } catch (err) {
+        console.error(`Final run save failed (attempt ${attempt}):`, err);
+      }
+    }
+
+    if (saved) await repersistIfWiped();
 
     // Update last-modified timestamp so metadata exports reflect the latest activity
     currentAssay.lastModifiedAt = Date.now();
@@ -1241,15 +1776,135 @@ document.addEventListener("DOMContentLoaded", async () => {
     // (set via the "Hide/Show Progress" toggle in the assay screen).
     applyProgressVisibilityPreference();
     setState(STATES.POISED);
-    showToast("Run complete — all stimulations recorded.", "success");
+    if (saved) {
+      showToast("Run complete — all stimulations recorded.", "success");
+    } else {
+      unsavedRuns.push({ assayId: currentAssay.assayId, trialId: activeTrial.trialId, run });
+      persistUnsavedRuns();
+      showToast(
+        "Run complete, but it could NOT be saved (storage error). Do not reload — " +
+        "the save is retried when the next run starts and when you finish the trial.",
+        "error",
+        12000
+      );
+    }
   }
 
   /**
-   * Aborts an in-progress run and marks it as ineligible for analysis.
-   * Called by: the Stop Run button, the timing gap detector, and crash guards.
-   *
-   * @param {string} [reason="Run stopped early by user"] - Explanation for the stop.
+   * If the browser wiped the database while the app was open (site data
+   * cleared, eviction), saves the assay still held in memory again — every
+   * trial and run — and tells the user. Without this the next save writes
+   * into an empty database: the run looks saved, but Finish Trial can't find
+   * its trial and the trial's earlier runs are gone.
    */
+  async function repersistIfWiped() {
+    if (!(await consumeDbRecreated()) || !currentAssay) return;
+    const assay = currentAssay;
+    try {
+      await saveAssay(assay);
+      for (const t of assay.trials) {
+        await saveTrial(assay.assayId, t);
+        for (const r of t.runs) await saveRun(assay.assayId, t.trialId, r);
+      }
+      showToast(
+        "Browser storage was cleared while the app was open. The data still in memory has been saved again — export a backup now.",
+        "warning", 12000
+      );
+    } catch (err) {
+      console.error("Re-saving after a storage wipe failed:", err);
+      showToast("Browser storage was cleared while the app was open, and saving it again failed. Export your data now.", "error", 0);
+    }
+  }
+
+  /**
+   * Retries the final save of every run in unsavedRuns, dropping the ones
+   * that now succeed. Says so when one is saved: the stored trial (and any
+   * re-export of it) changes at that moment.
+   * @returns {Promise<boolean>} True when nothing is left unsaved.
+   */
+  async function flushUnsavedRuns() {
+    for (let i = unsavedRuns.length - 1; i >= 0; i--) {
+      const { assayId, trialId, run } = unsavedRuns[i];
+      try {
+        await saveRun(assayId, trialId, run);
+        unsavedRuns.splice(i, 1);
+        showToast(`An earlier unsaved run (${run.genotype} Animal ${run.animalIndex}) has now been saved.`, "success", 6000);
+      } catch (err) {
+        console.error("Retrying a failed run save did not succeed:", err);
+      }
+    }
+    persistUnsavedRuns();
+    return unsavedRuns.length === 0;
+  }
+
+  /**
+   * Lays the runs still in unsavedRuns over a freshly hydrated assay. IDB
+   * holds only the run's "active" start record, so without this a hydrate
+   * (Finish Trial, Saved Assays, Start New Trial) shows and exports an empty
+   * ghost instead of the values that were recorded.
+   * @param {Object} assay - From hydrateAssay(); modified in place.
+   * @returns {Object} The same assay.
+   */
+  function overlayUnsavedRuns(assay) {
+    for (const { assayId, trialId, run } of unsavedRuns) {
+      if (String(assayId) !== String(assay.assayId)) continue;
+      const trial = assay.trials.find(t => t.trialId === trialId);
+      if (!trial) continue;
+      const i = trial.runs.findIndex(r => r.runId === run.runId);
+      if (i !== -1) trial.runs[i] = run; else trial.runs.push(run);
+    }
+    return assay;
+  }
+
+  /**
+   * Mirrors unsavedRuns into localStorage (or clears it when empty), so a
+   * page unload — closing the tab, the update toast's Reload — doesn't lose
+   * them: the next startup saves them before its cleanup runs.
+   */
+  function persistUnsavedRuns() {
+    try {
+      if (unsavedRuns.length > 0) localStorage.setItem(LS_KEYS.UNSAVED_RUNS, JSON.stringify(unsavedRuns));
+      else localStorage.removeItem(LS_KEYS.UNSAVED_RUNS);
+    } catch { /* storage unavailable or full — the unload prompt still warns */ }
+  }
+
+  /**
+   * Startup: saves any runs a previous page left in unsavedRuns (see
+   * persistUnsavedRuns). Runs before the orphan cleanup, which would
+   * otherwise mark their "active" start records abandoned.
+   */
+  async function restorePersistedUnsavedRuns() {
+    let queued;
+    try { queued = JSON.parse(localStorage.getItem(LS_KEYS.UNSAVED_RUNS) || "[]"); } catch { return; }
+    if (!Array.isArray(queued)) return;
+    queued = queued.filter(e => e && e.run && e.run.runId != null && e.trialId != null);
+    if (queued.length === 0) return;
+    try {
+      // Through the import's merge rule rather than a blind put: the stored
+      // copy may be newer (an eligibility override that did reach IDB), and
+      // a completed queued run must beat its empty "active" start record.
+      await importAllDataFromJSON({
+        assays: [], trials: [],
+        runs: queued.map(e => ({ ...e.run, trialId: e.trialId }))
+      });
+      try { localStorage.removeItem(LS_KEYS.UNSAVED_RUNS); } catch { /* ignore */ }
+      showToast(`${queued.length} run(s) that couldn't be saved last time have now been saved.`, "success", 6000);
+    } catch (err) {
+      console.error("Restoring queued runs failed:", err);
+      // Keep them in this session's queue — retried with the others,
+      // overlaid on hydrates, prompted for on unload, and persisted again
+      // with the rest (a later persist would otherwise overwrite them).
+      for (const e of queued) {
+        if (!unsavedRuns.some(u => u.run.runId === e.run.runId)) unsavedRuns.push(e);
+      }
+      persistUnsavedRuns();
+      showToast(
+        `${queued.length} run(s) from last time still couldn't be saved (storage error). They are kept and retried — export a backup when you can.`,
+        "warning", 10000
+      );
+    }
+  }
+
   // Re-entrancy guard — prevents a rapid double-press on "Stop Run" (or a
   // timing-gap auto-stop racing with the button) from calling stopRunEarly()
   // twice on the same run.
@@ -1263,23 +1918,27 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Stops the active run before it reaches its full stimulus count, marking
-   * it "stoppedEarly" and persisting the reason.
+   * it "stoppedEarly" and ineligible for analysis, persisting the reason and
+   * returning the UI to POISED.
+   * Called by: the Stop Run button, the double-Escape shortcut, the
+   * scheduler's timing-gap and late-cue checks, and the crash guards
+   * (visibilitychange, unload).
    * @param {string} [reason="Run stopped early by user"] - Human-readable reason, stored on the run record.
    */
   function stopRunEarly(reason = "Run stopped early by user") {
     // Clear the double-Escape timer unconditionally — BEFORE the re-entrancy
-    // guard — so a blocked second call still resets the stale timestamp.
-    // Placing this after the guard meant a rapid double-stop that hit the guard
-    // on the second call could leave lastEscapeTime armed into the next run.
+    // guard — so a blocked second call still resets the stale timestamp;
+    // otherwise a rapid double-stop that hits the guard on the second call
+    // could leave lastEscapeTime armed into the next run.
     lastEscapeTime = 0;
 
     // Guard: if a stop sequence is already in flight, do nothing.
     if (_stopRunPromise) return;
 
     isWarmingUp = false;
-    // if warmup was in progress, clear the overlay and ring class so
+    // If warmup was in progress, clear the overlay and ring class so
     // the UI doesn't get stuck in an unresponsive state after an external stop.
-    // also remove the state-warming-up body class and reset the bar so
+    // Also remove the state-warming-up body class and reset the bar so
     // CSS-driven elements (amber bar, live counter) don't stay visible post-stop.
     document.body.classList.remove("state-warming-up");
     if (UI.Displays.metronomeBar) {
@@ -1299,8 +1958,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Guard against currentAssay being null (e.g. corrupted state or a
     // spurious call after resetToSetup). Without this, saveRun(currentAssay.assayId, ...)
-    // below would throw TypeError: Cannot read properties of null.
-    if (!currentAssay) return;
+    // below would throw TypeError: Cannot read properties of null. Still
+    // leave RUNNING, so Stop can always get the app out of a run.
+    if (!currentAssay) {
+      releaseWakeLock();
+      if (currentState === STATES.RUNNING) setState(STATES.SETUP);
+      return;
+    }
 
     const activeTrial = getActiveTrial(currentAssay);
     const run         = snapshotRun || activeTrial?.runs.find(r => r.status === "active");
@@ -1362,14 +2026,19 @@ document.addEventListener("DOMContentLoaded", async () => {
    *
    * Routes differently depending on current state:
    *   CONFIGURED / POISED: double-tap confirmation → start warmup → start run
-   *   RUNNING:             record a tap timestamp for the current stimulus window
+   *   RUNNING:             record a tap timestamp for the open stimulus window,
+   *                        or mark the window just scored as a non-response
+   *                        when the back-dated tap belongs to it
    *
    * Also handles:
    *   - Hardware debounce (TAP_COOLDOWN_MS)
    *   - Audio context warm-up on first interaction
    *   - Visual and haptic feedback on every tap
+   *
+   * @param {number} eventTimeStamp - The input event's timeStamp (same clock as
+   *   performance.now()), used to back-date the tap to when it happened.
    */
-  async function executeTapAction() {
+  async function executeTapAction(eventTimeStamp) {
     // Block taps on the export screen entirely
     if (currentState === STATES.EXPORT) return;
 
@@ -1379,8 +2048,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     // re-arms pendingStart, letting the *next* run start with zero confirmation.
     if (isWarmingUp) return;
 
+    // The trial is being closed — a run must not be armed or started on it.
+    if (isFinishingTrial) return;
+
     // ── Hardware debounce ─────────────────────────────────────────────────
-    const now = Date.now();
+    const now = performance.now();
     if (now - lastTapTime < TAP_COOLDOWN_MS) return;
     lastTapTime = now;
 
@@ -1399,12 +2071,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         // First tap: show confirmation prompt and set a 2-second reset timer
         pendingStart = true;
 
-        // activeTrial can be null if the trial was abandoned/completed by
-        // another code path. Use optional chaining consistent with the timeout branch.
-        const activeTrial = getActiveTrial(currentAssay);
-        const nextIndex   = (activeTrial?.runs.filter(
-          r => r.genotype === selectedGenotype && r.status === "completed" && r.eligibleForAnalysis
-        ).length ?? 0) + 1;
+        // getActiveTrial() can return null if the trial was abandoned/completed
+        // by another code path; nextAnimalIndex() treats that as an empty trial.
+        const nextIndex   = nextAnimalIndex(getActiveTrial(currentAssay), selectedGenotype);
 
         UI.Displays.tapLabel.textContent = `Tap again to start ${selectedGenotype} (Animal ${nextIndex})`;
 
@@ -1412,17 +2081,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         startTimeout = setTimeout(() => {
           pendingStart = false;
           if (currentState === STATES.CONFIGURED || currentState === STATES.POISED) {
-            // re-read genotype from the DOM inside the timeout to avoid
+            // Re-read genotype from the DOM inside the timeout to avoid
             // using a stale closure-captured value if the user changed the dropdown.
             const freshGenotype = UI.Inputs.genotypeSelect.value;
             // Recompute freshly — do not use the closure-captured nextIndex which was
             // calculated at first-tap time and may be stale if a run completed in between.
-            const activeTrial = getActiveTrial(currentAssay);
-            const freshIndex = (activeTrial?.runs.filter(
-              r => r.genotype === freshGenotype &&
-                   r.status === "completed" &&
-                   r.eligibleForAnalysis
-            ).length ?? 0) + 1;
+            const freshIndex = nextAnimalIndex(getActiveTrial(currentAssay), freshGenotype);
             UI.Displays.tapLabel.textContent = `Start ${freshGenotype} (Animal ${freshIndex})`;
           }
         }, 2000);
@@ -1450,9 +2114,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         );
         return;
       }
-      // speak("") with an empty string can break iOS speechSynthesis.
-      // primeSpeechEngine() uses a silent space utterance (" ") for the same purpose
-      // and is already used during warmup for exactly this reason.
+      // Prime the speech engine inside this user gesture. primeSpeechEngine()
+      // speaks a silent space utterance (" ") rather than speak(""), which can
+      // break iOS speechSynthesis; the warmup primes it the same way.
       primeSpeechEngine();
     }
 
@@ -1471,17 +2135,59 @@ document.addEventListener("DOMContentLoaded", async () => {
       // No "undo last tap" is offered by design: at typical ISIs (~1 Hz) a
       // confirmation affordance would itself eat into the next stimulus
       // window, and by the time a misfire is noticed the window it belongs
-      // to has usually already closed and been scored (see the data-recording
-      // pass below). Correcting a bad run means stopping/discarding it, not
+      // to has usually already closed and been scored (see Step 2b in
+      // scheduler()). Correcting a bad run means stopping/discarding it, not
       // patching a single tap.
-      // Record the tap's AudioContext timestamp for the data recording layer
-      tapTimestamps.push(getAudioTime());
+
+      // The cue loop has already stopped (the last window was scored and the
+      // run is being saved), so there is nothing left for this tap to count
+      // toward.
+      if (!activeRun) return;
+
+      // Record the tap's AudioContext timestamp for the data recording layer.
+      //
+      // Stamp it with when the input happened, not when this handler got to
+      // run: after a main-thread stall the two differ by the length of the
+      // stall, which can move the tap into the next window. The event's own
+      // timeStamp shares performance.now()'s clock, so the difference is how
+      // late we are. Anything implausible (a browser reporting an epoch-based
+      // timeStamp, or no timestamp at all) falls back to handler time.
+      let lateBySec = (performance.now() - eventTimeStamp) / 1000;
+      if (!(lateBySec > 0 && lateBySec < 5)) lateBySec = 0;
+      let tapTime = getAudioTime() - lateBySec;
+
+      // Start of the earliest window not yet scored.
+      const openWindowStart = nextDataIntervalTime - runISI;
+      if (currentStimulusIndex > 0) {
+        // A back-dated tap can belong to the window scored last (k): the
+        // scorer credits every tap before k's grace end to k. It ran before
+        // this tap was handled, so correct k's value in place — carrying the
+        // tap forward would also mark window k+1 as "no response".
+        const lastStart    = openWindowStart - runISI;
+        const lastGraceEnd = openWindowStart + runGraceSec;
+        if (tapTime >= lastStart && tapTime < lastGraceEnd) {
+          activeRun.values[currentStimulusIndex - 1] = 0;
+          armbandTap();  // mirror navigator.vibrate(50) on the armband
+          return;
+        }
+        // Older still: never back-date a tap into a window that has already
+        // been scored — the scorer would consume it without counting it.
+        // Credit it to the earliest window still open instead, as an
+        // un-back-dated tap would be.
+        if (tapTime < openWindowStart) tapTime = openWindowStart;
+      }
+
+      tapTimestamps.push(tapTime);
       armbandTap();  // mirror navigator.vibrate(50) on the armband
 
-      // Visual indicator: "bucket fulfilled" shows the tap was registered
-      UI.Buttons.tap.classList.add("bucket-fulfilled");
-      // Use cached reference — avoids getElementById on every tap during a run
-      if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.add("fulfilled");
+      // Visual indicator: "bucket fulfilled" shows the tap was registered.
+      // A tap in the lead-in before stimulus 1 is discarded by the scorer, so
+      // it must not light the indicator for the whole of window 1.
+      if (tapTime >= openWindowStart) {
+        UI.Buttons.tap.classList.add("bucket-fulfilled");
+        // Use cached reference — avoids getElementById on every tap during a run
+        if (UI.Displays.metronomeBar) UI.Displays.metronomeBar.classList.add("fulfilled");
+      }
 
     } else if (isStartingNewRun) {
       // Shown for the whole warmup+run duration — see showLiveGenotypeBadge().
@@ -1508,11 +2214,26 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   async function runWarmup() {
     if (isWarmingUp) return;
-    // set isWarmingUp = true here, BEFORE the !isWarmupEnabled early-exit
+    // Set isWarmingUp = true here, BEFORE the !isWarmupEnabled early-exit
     // branch, so the guard also prevents re-entrant startRun() calls when warmup is
-    // disabled. Previously, two taps that both passed the guard could both reach
+    // disabled. Otherwise two taps that both passed the guard could both reach
     // startRun() concurrently, creating two runs for the same genotype.
     isWarmingUp = true;
+    const myToken    = ++warmupToken;
+    const superseded = () => myToken !== warmupToken;
+
+    // Keyboard focus left in an override-reason box would send Space to that
+    // field instead of the tap shortcut for the whole run.
+    if (document.activeElement?.matches?.(".override-reason-input")) document.activeElement.blur();
+
+    // Finish Trial must not be reachable once a run is on its way: setState()
+    // only disables it on entering RUNNING, and the warmup isn't a state.
+    UI.Buttons.finishTrial.disabled = true;
+
+    // Hold the screen on from the start of the countdown, which can be up to
+    // 60 s — longer than a typical screen timeout. Released below if no run
+    // starts; startRun() re-requests it, which replaces this lock.
+    requestWakeLock();
 
     // Lock genotype selection for the whole warmup+run duration. Without this,
     // currentState stays CONFIGURED/POISED during warmup (it isn't its own
@@ -1535,23 +2256,24 @@ document.addEventListener("DOMContentLoaded", async () => {
         showToast("Failed to start run — storage error. Please try again.", "error");
       }
       if (currentState !== STATES.RUNNING) {
+        releaseWakeLock();
         // startRun() early-returned or threw without transitioning to RUNNING
         // (which would otherwise keep the picker disabled itself) — re-enable
         // the lock above instead of leaving it stuck disabled with no run active.
         UI.Inputs.genotypeSelect.disabled = false;
         syncGenotypePickerEnabled();
+        if (currentState === STATES.POISED) UI.Buttons.finishTrial.disabled = false;
+        // The label still reads "Tap again to start…" from the confirmation tap.
+        restoreStartLabel();
       }
       isWarmingUp = false;  // clear flag after the no-warmup path exits
       return;
     }
 
-    // Removed redundant isWarmingUp = true. isWarmingUp is already
-    // set to true unconditionally earlier in this function,
-    // so this second assignment was a stale leftover — never false at this point.
     // Show the countdown overlay INSIDE the tap button (button stays visible).
     // The .warming-up class adds the pulsing ring and blocks pointer events.
     UI.Displays.warmup.hidden = false;
-    // hide the overlay + normal label from AT while countdown is active.
+    // Hide the overlay + normal label from AT while the countdown is active.
     UI.Displays.warmup.setAttribute("aria-hidden", "true");
     UI.Displays.tapLabel.setAttribute("aria-hidden", "true");
     UI.Buttons.tap.classList.add("warming-up");
@@ -1576,6 +2298,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     /** Cleans up warmup UI without starting a run (cancelled path). */
     const _cancelWarmupUI = () => {
       isWarmingUp = false;
+      if (currentState !== STATES.RUNNING) releaseWakeLock();
       document.body.classList.remove("state-warming-up");
       if (bar) {
         bar.classList.remove("warmup");
@@ -1584,7 +2307,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       if (stimDisplay) stimDisplay.textContent = "0";
       UI.Displays.warmup.hidden = true;
-      // restore accessibility on cancel path.
+      // Restore accessibility on the cancel path.
       UI.Displays.warmup.removeAttribute("aria-hidden");
       UI.Displays.tapLabel.removeAttribute("aria-hidden");
       UI.Buttons.tap.classList.remove("warming-up");
@@ -1597,18 +2320,25 @@ document.addEventListener("DOMContentLoaded", async () => {
         // means no run started, so genotype selection is live again.
         UI.Inputs.genotypeSelect.disabled = false;
         syncGenotypePickerEnabled();
+        // Likewise Finish Trial, which is only ever available in POISED.
+        if (currentState === STATES.POISED) UI.Buttons.finishTrial.disabled = false;
 
         // Restore the tap button label so it doesn't show the stale "Tap again…" text.
         const sel = UI.Inputs.genotypeSelect.value;
         if (sel) {
-          const at = getActiveTrial(currentAssay);
-          const n  = (at?.runs.filter(r => r.genotype === sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
+          const n  = nextAnimalIndex(getActiveTrial(currentAssay), sel);
           UI.Displays.tapLabel.textContent = `Start ${sel} (Animal ${n})`;
         }
       }
     };
 
     for (let i = warmupDuration; i > 0; i--) {
+      // A newer warmup owns the UI and the isWarmingUp flag now — leave both
+      // alone. Must come before the isWarmingUp checks: the newer warmup has
+      // set that flag back to true, which would otherwise let this cancelled
+      // loop carry on and start the run early.
+      if (superseded()) return;
+
       // Cancel if the state has changed externally (e.g. stop was clicked)
       if (!isWarmingUp || (currentState !== STATES.CONFIGURED && currentState !== STATES.POISED)) {
         _cancelWarmupUI();
@@ -1616,13 +2346,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
 
       UI.Displays.warmupNumber.textContent = i;
-      // cancel running Web Animations instead of triggering a
-      // layout reflow via offsetWidth to restart the digit pop-in each second.
+      // Cancel running Web Animations, rather than forcing a layout reflow
+      // via offsetWidth, to restart the digit pop-in each second.
       UI.Displays.warmupNumber.getAnimations().forEach(a => a.cancel());
       UI.Displays.warmupNumber.style.animation = "";   // re-enable CSS animation
       playWarmupTone(1200);  // High beep each countdown second
 
       await new Promise(r => setTimeout(r, 1000));
+
+      if (superseded()) return;
 
       // Re-check after the await — warmup may have been cancelled while suspended
       if (!isWarmingUp) {
@@ -1631,8 +2363,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     }
 
-    // Countdown finished — tear down warmup state and start the run
-    isWarmingUp = false;
+    // Countdown finished — tear down warmup state and start the run.
+    // isWarmingUp stays true until startRun() is done, as in the no-warmup
+    // branch: Finish Trial and the header logo check it, and startRun()
+    // awaits a write before the run goes live.
     document.body.classList.remove("state-warming-up");
     if (bar) {
       bar.classList.remove("warmup");
@@ -1641,7 +2375,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     if (stimDisplay) stimDisplay.textContent = "0";
     UI.Displays.warmup.hidden = true;
-    // restore accessibility on the success completion path too.
+    // Restore accessibility on the success completion path too.
     UI.Displays.warmup.removeAttribute("aria-hidden");
     UI.Displays.tapLabel.removeAttribute("aria-hidden");
     UI.Buttons.tap.classList.remove("warming-up");
@@ -1654,12 +2388,39 @@ document.addEventListener("DOMContentLoaded", async () => {
       showToast("Failed to start run — storage error. Please try again.", "error");
     }
     if (currentState !== STATES.RUNNING) {
+      releaseWakeLock();
       // Same safety net as the no-warmup branch above: startRun() early-returned
       // or threw without transitioning to RUNNING, so re-enable the picker
       // locked at the top of this function instead of leaving it stuck disabled.
       UI.Inputs.genotypeSelect.disabled = false;
       syncGenotypePickerEnabled();
+      if (currentState === STATES.POISED) UI.Buttons.finishTrial.disabled = false;
+      // The label still reads "Tap again to start…" from the confirmation tap.
+      restoreStartLabel();
     }
+    isWarmingUp = false;
+  }
+
+  /**
+   * Puts the tap button's label back to its idle text: "Start <genotype>
+   * (Animal N)", or the select-a-genotype prompt when none is chosen.
+   *
+   * For paths that leave the assay screen idle without going through
+   * setState() — a run that fails to start never reaches RUNNING, so nothing
+   * else replaces the "Tap again to start…" text left by the confirmation tap.
+   * No-op off the assay screen, where setState() owns the label.
+   */
+  function restoreStartLabel() {
+    if (currentState !== STATES.CONFIGURED && currentState !== STATES.POISED) return;
+
+    const selectedGenotype = UI.Inputs.genotypeSelect.value;
+    if (!selectedGenotype) {
+      UI.Displays.tapLabel.textContent = "Select Genotype to Start";
+      return;
+    }
+
+    const nextIndex   = nextAnimalIndex(getActiveTrial(currentAssay), selectedGenotype);
+    UI.Displays.tapLabel.textContent = `Start ${selectedGenotype} (Animal ${nextIndex})`;
   }
 
 
@@ -1688,10 +2449,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // Snapshot nextDataIntervalTime once to avoid a race with scheduler(), which can
+    // Track the window-boundary clock, not the scoring clock — nextDataIntervalTime
+    // lags by the grace period, which would pin the bar at 100% for that whole span
+    // after each tick. Snapshot it once to avoid a race with scheduler(), which can
     // increment it between consecutive rAF callbacks and cause the bar to flash to 100%
     // or reset to 0% mid-interval before the next frame corrects it.
-    const intervalEnd   = nextDataIntervalTime;
+    const intervalEnd   = nextWindowCloseTime;
     const currentTime   = getAudioTime();
     const intervalStart = intervalEnd - runISI;  // Use cached ISI
 
@@ -1712,8 +2475,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Use cached DOM reference from UI — avoids getElementById on every frame
     if (UI.Displays.metronomeBar) {
       // Drive via scaleX so the compositor layer added by will-change: transform
-      // is used end-to-end. Previously used style.width which forced layout;
-      // scaleX + transform-origin:left is equivalent visually but GPU-accelerated.
+      // is used end-to-end. Animating style.width would force layout every
+      // frame; scaleX + transform-origin:left looks the same but is GPU-accelerated.
       UI.Displays.metronomeBar.style.transform = `scaleX(${progress})`;
       // near-full glow at 90%+ to signal upcoming stimulus
       if (progress >= 0.9) {
@@ -1773,7 +2536,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       savedPitch    = parseInt(localStorage.getItem(LS_KEYS.TICK_PITCH), 10);
       progressPref  = localStorage.getItem(LS_KEYS.PROGRESS_VISIBLE);
     } catch {
-      // H5: localStorage unavailable — fall back to in-memory defaults already
+      // localStorage unavailable — fall back to in-memory defaults already
       // set by the module-level variable initialisers (speechLeadMs, gracePeriodMs, etc.)
       savedTheme     = window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
       savedVoiceMode = "tick";
@@ -1800,6 +2563,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // ── Voice mode ──
     setVoiceMode(savedVoiceMode);
+    warnIfSpeechMissing(savedVoiceMode);
     document.querySelectorAll('input[name="voiceMode"]').forEach(input => {
       if (input.value === savedVoiceMode) input.checked = true;
     });
@@ -1830,11 +2594,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // ── Assay Defaults — restore saved defaults into the sub-page inputs ──
     _restoreAssayDefaultsToUI();
 
-    // Restore progress-table visibility preference.
-    // We don't apply it here at startup because there's no data yet;
-    // it gets applied in completeRunNormally() / stopRunEarly() when
-    // the table is first shown (or kept hidden) according to preference.
-    void progressPref;  // variable read during localStorage phase; consumed later
+    // Progress-table visibility preference: not applied here at startup
+    // because there's no table data yet. applyProgressVisibilityPreference()
+    // re-reads it when an assay or trial starts and after each run ends.
+    void progressPref;  // read with the other settings above, but unused here
   }
 
   /**
@@ -1877,17 +2640,18 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Applies the user's saved progress-table visibility preference.
-   * Called after each run ends so the table respects the user's toggle setting.
+   * Called when an assay or trial starts and after each run ends, so the
+   * table respects the user's toggle setting.
    */
   function applyProgressVisibilityPreference() {
     let pref = null;
-    try { pref = localStorage.getItem(LS_KEYS.PROGRESS_VISIBLE); } catch {} // L7: guard for Private Browsing
+    try { pref = localStorage.getItem(LS_KEYS.PROGRESS_VISIBLE); } catch {} // guard for Private Browsing
     const container = document.getElementById("assayProgress");
     if (!container) return;
     // Default: show the table ("true" or no stored pref = visible)
     const shouldShow = pref !== "false";
     container.hidden = !shouldShow;
-    // the `hidden` attribute already removes the element from the
+    // The `hidden` attribute already removes the element from the
     // accessibility tree — setting aria-hidden on top is redundant and can cause
     // screen readers to announce a hidden element when aria-hidden="false" is present.
     container.removeAttribute("aria-hidden");
@@ -1927,9 +2691,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   /**
    * Shows an inline warning below the ISI field when the current grace period
    * setting would exceed half the ISI (and would therefore be clamped on run start).
-   * Called whenever the ISI input changes.
+   * Called whenever the ISI or grace period changes, and after the setup form
+   * is filled from defaults or a draft.
    *
-   * NOTE: ETA display was intentionally omitted per experimenter preference.
+   * NOTE: no run ETA is displayed, by experimenter preference.
    */
   function updateGraceIsiWarning() {
     const isiEl  = document.getElementById("graceIsiWarning");
@@ -1949,19 +2714,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Updates the numeric run-count badge inside the #toggleProgress button.
-   * Shows the total number of completed+stopped runs in the current trial.
-   * Called after every run ends (normal or early stop).
+   * Shows the number of eligible runs in the active trial; hidden when zero
+   * or when no assay is loaded. Called whenever a run ends, a run's
+   * eligibility is overridden, or the active assay/trial changes.
    */
   function updateProgressBadge() {
     const badge = document.getElementById("progressRunBadge");
     if (!badge || !currentAssay) { if (badge) badge.hidden = true; return; }
     const trial = getActiveTrial(currentAssay);
     if (!trial) { badge.hidden = true; return; }
-    // Count only eligible completed runs — consistent with the genotype-dropdown
-    // counter and what the experimenter actually cares about (usable data points).
-    // stoppedEarly runs are intentionally excluded so the badge isn't inflated
-    // by cancelled or interrupted recordings.
-    const count = trial.runs.filter(r => r.status === "completed" && r.eligibleForAnalysis).length;
+    // Count only eligible runs — consistent with the genotype-dropdown counter
+    // and the export (usable data points). A stopped-early run counts only if
+    // the experimenter manually marked it Eligible.
+    const count = trial.runs.filter(isRunEligible).length;
     if (count === 0) {
       badge.hidden = true;
     } else {
@@ -1973,13 +2738,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   /* -----------------------------------------------------------------------
      Genotype Picker (custom UI over the hidden #genotypeSelect)
 
-     #genotypeSelect (the native <select>) remains the single source of truth
-     for the selected value — every other part of the app reads/writes it
-     exactly as before. Everything below is a purely visual/interaction layer
-     that mirrors it: renderGenotypePicker() rebuilds the on-screen control
-     from the same (genotypes, trial) data populateGenotypeSelect() already
-     computes, and selectGenotype() writes back to the hidden select and
-     dispatches a "change" event so existing listeners fire unchanged.
+     #genotypeSelect (the native <select>) is the single source of truth for
+     the selected value — every other part of the app reads/writes it
+     directly. Everything below is a purely visual/interaction layer that
+     mirrors it: renderGenotypePicker() rebuilds the on-screen control from
+     the same (genotypes, trial) data populateGenotypeSelect() uses, and
+     selectGenotype() writes back to the hidden select and dispatches a
+     "change" event so its listeners fire as for a native selection.
 
      Two display modes (see the CSS comment above .genotype-pills):
        - Pills:            wide viewport, genotype count <= GENOTYPE_PILL_MAX.
@@ -2073,10 +2838,11 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Rebuilds the genotype selection dropdown with current run counts.
-   * The count shows how many runs have been completed (non-active) for each genotype
-   * in the current trial, giving the experimenter live feedback.
+   * The count shows how many eligible runs each genotype has in the active
+   * trial, giving the experimenter live feedback.
    *
-   * Restores the previously selected value after rebuilding.
+   * Restores the previously selected value after rebuilding, then re-renders
+   * the custom picker.
    *
    * Genotype labels are shown as entered and listed in entry order, by design:
    * the experimenter must know which genotype/plate they are handling to place
@@ -2098,9 +2864,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       const option  = document.createElement("option");
       option.value  = g;
 
-      // Count only eligible (completed + eligible for analysis) runs for this genotype
+      // Count only eligible (finished + eligible for analysis) runs for this genotype
       const count   = trial
-        ? trial.runs.filter(r => r.genotype === g && r.status === "completed" && r.eligibleForAnalysis).length
+        ? trial.runs.filter(r => r.genotype === g && isRunEligible(r)).length
         : 0;
 
       option.textContent = count > 0 ? `${g} (${count} eligible)` : g;
@@ -2118,7 +2884,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Re-populates the genotype dropdown to reflect updated run counts
-   * without changing the current selection. Called after each run ends.
+   * without changing the current selection. Called after each run ends and
+   * after a manual eligibility override.
    */
   function refreshGenotypeDropdownCounts() {
     if (!currentAssay) return;
@@ -2177,13 +2944,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   function closeGenotypeOverlay() {
     UI.Inputs.genotypeOverlay.hidden = true;
     UI.Inputs.genotypeTrigger.setAttribute("aria-expanded", "false");
+    // Clear the dropdown geometry positionGenotypePanel() set while wide, or
+    // a later narrow (bottom-sheet) open inherits it and comes out shrunk.
+    const p = UI.Inputs.genotypeListbox.style;
+    p.width = p.left = p.top = p.maxHeight = "";
   }
 
   /**
    * Mirrors #genotypeSelect.disabled onto the custom picker's pills and
    * trigger. setState() toggles the hidden select's .disabled directly
-   * (unchanged legacy behavior) without rebuilding the picker, so this is
-   * called once after every state transition to keep the two in sync.
+   * without rebuilding the picker, so this is called once after every state
+   * transition (and wherever else .disabled changes) to keep the two in sync.
    */
   function syncGenotypePickerEnabled() {
     const disabled = UI.Inputs.genotypeSelect.disabled;
@@ -2207,7 +2978,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const colors   = assignGenotypeColors(genotypes);
 
     const eligibleCount = g => trial
-      ? trial.runs.filter(r => r.genotype === g && r.status === "completed" && r.eligibleForAnalysis).length
+      ? trial.runs.filter(r => r.genotype === g && isRunEligible(r)).length
       : 0;
 
     const usePills = genotypes.length > 0
@@ -2290,7 +3061,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!container) return;  // guard against missing element
     container.innerHTML = "";
 
-    // call getActiveTrial once and reuse — avoids a second .find() scan.
     const trial = currentAssay ? getActiveTrial(currentAssay) : null;
     if (!currentAssay) return;
 
@@ -2369,8 +3139,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   /**
-   * Manually overrides a completed/stopped run's effective eligibility for
-   * analysis. The automatic determination is preserved separately in
+   * Manually overrides a completed/stopped/abandoned run's effective
+   * eligibility for analysis. The automatic determination is preserved separately in
    * autoEligibleForAnalysis/autoIneligibleReason (set once, never changed),
    * so the override is always traceable back to what the system originally
    * decided — surfaced in exports via the "Manual Override" row.
@@ -2383,6 +3153,32 @@ document.addEventListener("DOMContentLoaded", async () => {
     const activeTrial = getActiveTrial(currentAssay);
     if (!activeTrial) return;
 
+    // One save per run at a time. A second click while the first save is
+    // pending would snapshot the first click's unsaved state as `before`,
+    // and its rollback would then put back a state that isn't in IDB.
+    if (overrideSavesInFlight.has(run.runId)) return;
+    overrideSavesInFlight.add(run.runId);
+    try {
+      await applyEligibilityOverride(activeTrial, run, newEligible, reasonText);
+    } finally {
+      overrideSavesInFlight.delete(run.runId);
+    }
+  }
+
+  /** runIds whose eligibility-override save is still pending. */
+  const overrideSavesInFlight = new Set();
+
+  /** The body of toggleRunEligibilityOverride(), run while it holds the run's save slot. */
+  async function applyEligibilityOverride(activeTrial, run, newEligible, reasonText) {
+    // What to put back if the save fails (see below).
+    const before = {
+      eligibleForAnalysis: run.eligibleForAnalysis,
+      manuallyOverridden:  run.manuallyOverridden,
+      overrideReason:      run.overrideReason,
+      overrideAt:          run.overrideAt,
+      ineligibleReason:    run.ineligibleReason,
+    };
+
     run.eligibleForAnalysis = newEligible;
     run.manuallyOverridden  = true;
     run.overrideReason      = reasonText.trim() || null;
@@ -2392,13 +3188,43 @@ document.addEventListener("DOMContentLoaded", async () => {
     // autoIneligibleReason regardless of what happens here.
     run.ineligibleReason    = newEligible ? null : (run.overrideReason || "Manually marked ineligible");
 
-    await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+    try {
+      await saveRun(currentAssay.assayId, activeTrial.trialId, run);
+    } catch (err) {
+      // An unsaved override must not look applied: Finish Trial re-reads the
+      // trial from IDB, so the export would silently score the run with its
+      // old eligibility. Undo it in memory — unless the run is still queued
+      // in unsavedRuns (its final save failed), in which case this same
+      // object goes out with the queue's next retry, override included.
+      console.error("Eligibility override save failed:", err);
+      const queued = unsavedRuns.some(u => u.run === run);
+      if (!queued) Object.assign(run, before);
+      else persistUnsavedRuns();  // keep the on-disk copy of the queue in step
+      updateProgressTable();
+      refreshGenotypeDropdownCounts();
+      updateProgressBadge();
+      showToast(
+        queued
+          ? "Eligibility changed, but not saved yet: it will be saved together with the unsaved run."
+          : "Could not save the eligibility change (storage error), so nothing was changed. Please try again.",
+        "error",
+        6000
+      );
+      return;
+    }
+    // A queued unsaved run is the same object: its on-disk copy must carry
+    // the override too, or the next startup's restore would write the old one.
+    if (unsavedRuns.some(u => u.run === run)) persistUnsavedRuns();
     currentAssay.lastModifiedAt = Date.now();
     saveAssay(currentAssay).catch(err => console.error("Failed to update assay metadata:", err));
 
     updateProgressTable();
     refreshGenotypeDropdownCounts();
     updateProgressBadge();
+    // The eligible-run count drives the next animal index; keep the tap
+    // label in step. Not while the "Tap again" prompt or the countdown owns
+    // the label — those paths recompute it themselves.
+    if (!pendingStart && !isWarmingUp) restoreStartLabel();
     showToast(`Run manually marked ${newEligible ? "eligible" : "ineligible"}.`, "info", 3000);
   }
 
@@ -2416,16 +3242,46 @@ document.addEventListener("DOMContentLoaded", async () => {
         const run   = trial?.runs.find(r => r.runId === runId);
         if (!run) return;
         const reasonInput = btn.closest("tr")?.querySelector(".override-reason-input");
-        toggleRunEligibilityOverride(run, !run.eligibleForAnalysis, reasonInput?.value ?? "");
+        toggleRunEligibilityOverride(run, !run.eligibleForAnalysis, reasonInput?.value ?? "")
+          .catch(err => console.error("Override toggle failed:", err));
       });
     }
   }
 
   /**
+   * Whether any completed trial has runs — i.e. whether the default
+   * "Pooled (completed trials only)" selection holds any data.
+   * @param {Object} assay
+   * @returns {boolean}
+   */
+  function hasCompletedRuns(assay) {
+    return assay.trials.some(t => t.status === "completed" && t.runs.length > 0);
+  }
+
+  /**
+   * Whether the selected datasets contain at least one run, so Export,
+   * CSV and Preview can refuse a selection that would produce no data.
+   * @param {Object}   assay
+   * @param {Object[]} configs - From getExportConfigs().
+   * @returns {boolean}
+   */
+  function selectionHasRuns(assay, configs) {
+    return configs.some(c => c.type === "trial"
+      ? (assay.trials.find(t => String(t.trialId) === String(c.trialId))?.runs.length ?? 0) > 0
+      : collectPooledRuns(assay, { includeAbandoned: c.includeAbandoned }).length > 0);
+  }
+
+  /** Toast shown when the selected datasets hold no runs. */
+  const NO_RUNS_SELECTED_MSG =
+    "The selected datasets contain no runs. Tick an abandoned or unfinished trial, or 'Pooled (all trials…)'.";
+
+  /**
    * Populates the export dataset list with checkboxes for each trial and
    * the two pooled (completed-only vs all-trials) options.
-   * Completed trials are pre-checked; abandoned/active are unchecked.
-   * Shows a per-genotype run breakdown alongside the totals.
+   * Completed trials, and the completed-only pool when it holds runs, are
+   * pre-checked; abandoned/active trials and the all-trials pool are not.
+   * Shows a per-genotype run breakdown alongside the totals, and updates
+   * the #tiExclusionWarning partial-bin advisory.
    * Syncs the Select All checkbox and refreshes button state after building.
    *
    * @param {Object} assay - The full assay object.
@@ -2445,6 +3301,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     assay.trials.forEach(trial => {
       const isCompleted = trial.status === "completed";
       const isAbandoned = trial.status === "abandoned";
+      // Still in progress (e.g. left via the header logo, or restored from
+      // a backup): its runs are partial, so say so rather than look finished.
+      const isActive    = trial.status === "active";
       const total       = trial.runs.length;
       const eligible    = trial.runs.filter(r => r.eligibleForAnalysis).length;
 
@@ -2466,23 +3325,27 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       html +=
         `<label>` +
-        `<input type="checkbox" data-dataset-type="trial" data-trial-id="${trial.trialId}"` +
-        ` aria-label="Trial ${Number(trial.trialIndex)}, ${eligible} eligible of ${total} total${isAbandoned ? ', abandoned' : ''}"` +
+        `<input type="checkbox" data-dataset-type="trial" data-trial-id="${escapeHTML(String(trial.trialId))}"` +
+        ` aria-label="Trial ${Number(trial.trialIndex)}, ${eligible} eligible of ${total} total${isAbandoned ? ', abandoned' : ''}${isActive ? ', not finished' : ''}"` +
         ` ${isCompleted ? "checked" : ""}>` +
         ` Trial ${Number(trial.trialIndex)}` +
         ` — ${eligibleDisplay} eligible (${total} total)` +
         (genotypeSummary ? ` &middot; ${genotypeSummary}` : "") +
         (isAbandoned ? " <em>(abandoned)</em>" : "") +
+        (isActive ? " <em>(not finished)</em>" : "") +
         `</label>`;
     });
 
+    // Tick the completed-trials pool only when it holds runs — ticked over
+    // an empty pool, Export would write a workbook with no data in it.
     html +=
       `<label><input type="checkbox" data-dataset-type="pooled" ` +
-      `data-include-abandoned="false" checked> Pooled (completed trials only)</label>`;
+      `data-include-abandoned="false" ${hasCompletedRuns(assay) ? "checked" : ""}> Pooled (completed trials only)</label>`;
 
+    // includeAbandoned pools every trial, unfinished ones included.
     html +=
       `<label><input type="checkbox" data-dataset-type="pooled" ` +
-      `data-include-abandoned="true"> Pooled (include abandoned)</label>`;
+      `data-include-abandoned="true"> Pooled (all trials, incl. abandoned / unfinished)</label>`;
 
     // Single assignment — all trial rows are parsed in one pass
     container.innerHTML = html;
@@ -2492,12 +3355,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // exact multiple of binSize — those trailing stimuli are dropped in the
     // Touch Index calculation, which can subtly skew per-animal summaries.
     //
-    // NOTE: r.values is the definitive record of recorded stimuli for a run.
-    // stimCount is not stored on individual run objects — only on the assay.
-    // r.values.length is therefore the correct canonical source for the
-    // per-run stimulus count.  If the data model ever changes so that values
-    // is trimmed or normalised separately from the recorded stimulus count,
-    // this check should be updated to use a dedicated run.stimCount field.
+    // NOTE: r.values is the definitive record of recorded stimuli for a run,
+    // and binning drops the remainder of r.values itself, so r.values.length
+    // (not run.expectedStimCount, the target) is the count to check — a
+    // stopped-early run marked Eligible records fewer values than its target.
     const tiWarn = document.getElementById("tiExclusionWarning");
     if (tiWarn) {
       if (assay.binSize) {
@@ -2530,8 +3391,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   /**
-   * Enables or disables the Export and Preview buttons based on whether at
-   * least one dataset checkbox is currently checked.
+   * Enables or disables the Export, CSV and Preview buttons based on whether
+   * at least one dataset checkbox is currently checked.
    */
   function refreshExportButtonState() {
     const anyChecked =
@@ -2554,15 +3415,32 @@ document.addEventListener("DOMContentLoaded", async () => {
     selAll.indeterminate = checked.length > 0 && checked.length < all.length;
   }
 
-  // escapeHTML is imported from utils.js (shared with export.js).
-  // The local copy that was here has been removed.
+  /**
+   * Removes the bulk-delete "Permanently delete N assays?" bar, if showing.
+   * The bar's count describes the selection when it opened, so it must not
+   * outlive that selection: the list being rebuilt, a checkbox changing, or
+   * the screen closing all dismiss it.
+   */
+  function dismissBulkDeleteConfirm() {
+    document.querySelector(".bulk-delete-confirm")?.remove();
+  }
 
   /**
-   * Fetches all saved assays from IndexedDB and renders them as a list
-   * in the Saved Assays overlay. Each entry shows the assay name, date,
-   * and action buttons (Start New Trial, Export, Delete).
+   * Fetches all saved assays from IndexedDB and renders them, newest first,
+   * in the Saved Assays screen. Each row shows the assay name, genotypes and
+   * creation date, a bulk-select checkbox and Start New Trial / Preview /
+   * Export / Delete buttons; a damaged record gets a Delete-only row. The
+   * sparkline charts are filled in afterwards by
+   * enrichSavedAssayRowsWithSparklines().
    */
   async function populateSavedAssaysList() {
+    dismissBulkDeleteConfirm();
+    // Reset the bulk-selection controls before any exit path — the error and
+    // empty-list branches return early, and would otherwise leave Delete
+    // Selected enabled for rows that are gone.
+    UI.Buttons.deleteSelectedAssays.disabled  = true;
+    UI.Inputs.selectAllAssays.checked         = false;
+    UI.Inputs.selectAllAssays.indeterminate   = false;
     // Show a loading indicator while IDB is read
     UI.Displays.savedAssaysList.innerHTML = `<p class="saved-assays-loading">Loading\u2026</p>`;
 
@@ -2598,13 +3476,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
+    // One damaged record (e.g. from a hand-edited backup) must not blank the
+    // whole list. It gets a row of its own with only Delete, so it can be
+    // removed, and every other assay stays reachable.
+    const listed = assays.filter(isWellFormedAssay);
+    const damaged = assays.filter(a => !isWellFormedAssay(a));
+
     // Sort newest first
     let html = "";
-    assays.sort((a, b) => b.createdAt - a.createdAt).forEach(assay => {
+    listed.sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)).forEach(assay => {
       // Name is the primary identifier and gets its own line; genotypes + date
-      // are secondary metadata on a muted line underneath — previously all
-      // three were run together in one sentence-like string that wrapped
-      // awkwardly for assays with several genotypes.
+      // are secondary metadata on a muted line underneath, rather than one
+      // run-on string that wraps awkwardly for assays with several genotypes.
       const metaParts = [];
       if (assay.genotypes && assay.genotypes.length) metaParts.push(escapeHTML(assay.genotypes.join(", ")));
       metaParts.push(formatDateTime(assay.createdAt));
@@ -2630,16 +3513,37 @@ document.addEventListener("DOMContentLoaded", async () => {
       `;
     });
 
+    damaged.forEach(assay => {
+      // A record only reaches the store with a valid IDB key, but it may not
+      // be one a data-attribute can carry back to deleteAssay() (e.g. an
+      // array key) — then there is nothing the row could delete.
+      const id = assay?.assayId;
+      const deletable = typeof id === "string" || Number.isFinite(id);
+      console.warn("Saved Assays: damaged assay record", assay);
+      html += `
+        <div class="saved-assay-row">
+          <div class="assay-row-header">
+            <div class="assay-info">
+              <div class="assay-info-name">Unreadable assay record</div>
+              <div class="assay-info-meta">This record is damaged and can't be opened.${deletable ? " Delete it to tidy the list." : ""}</div>
+            </div>
+          </div>
+          ${deletable ? `<div class="assay-actions">
+            <button class="btn-danger-outline" data-action="delete" data-assay-id="${escapeHTML(String(id))}"
+              data-assay-name="unreadable assay record">Delete</button>
+          </div>` : ""}
+        </div>
+      `;
+    });
+
     UI.Displays.savedAssaysList.innerHTML = html;
-    UI.Buttons.deleteSelectedAssays.disabled  = true;
-    UI.Inputs.selectAllAssays.checked         = false;
-    UI.Inputs.selectAllAssays.indeterminate   = false;  // clear indeterminate on every rebuild
 
     // Charts are filled in progressively after the list itself is already
     // interactive — each one needs a full hydrate + pooled-binning pass,
     // which is too slow to block the initial render on for lists with many
     // saved assays.
-    enrichSavedAssayRowsWithSparklines(assays);
+    enrichSavedAssayRowsWithSparklines(listed)
+      .catch(err => console.warn("Saved Assays: sparklines failed:", err));
   }
 
   // Bumped on every populateSavedAssaysList() call so an in-flight
@@ -2667,7 +3571,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     await Promise.all(assays.map(async assay => {
       let hydrated;
       try {
-        hydrated = await hydrateAssay(assay.assayId);
+        hydrated = overlayUnsavedRuns(await hydrateAssay(assay.assayId));
       } catch {
         return;  // assay may have been deleted while this was in flight
       }
@@ -2774,12 +3678,12 @@ document.addEventListener("DOMContentLoaded", async () => {
    *   with the assay screen's genotype picker.
    * @param {Object}  [opts]
    * @param {number}  [opts.yMin] - Defaults to min(0, data).
-   * @param {number}  [opts.yMax] - Defaults to max(data).
+   * @param {number}  [opts.yMax] - Defaults to max(data, opts.referenceY).
    * @param {number}  [opts.referenceY] - Draws a dashed horizontal line at this Y value (e.g. Touch Index baseline = 1).
-   * @param {boolean} [opts.mini=false] - true = tiny inline sparkline for a collapsed section's <summary>: no gridlines, no point markers.
+   * @param {boolean} [opts.mini=false] - true = tiny inline sparkline for a collapsed section's <summary>: no gridlines, SEM band or point markers.
    * @param {number}  [opts.width] - Overrides the default viewBox width for the mini/full size.
    * @param {number}  [opts.height] - Overrides the default viewBox height for the mini/full size (e.g. a taller mini chart elsewhere).
-   * @returns {string} SVG markup, or "" if there's no data to plot.
+   * @returns {string} SVG markup, or "" if there's no data to plot (or a mini chart has only one bin).
    */
   function buildSparklineSVG(seriesByGenotype, colorByGenotype, opts = {}) {
     const genotypes = Object.keys(seriesByGenotype).filter(g => seriesByGenotype[g].means.some(m => m != null));
@@ -2808,6 +3712,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (yMin === yMax) { yMin -= 1; yMax += 1; }  // guard perfectly flat data
 
     const numBins = Math.max(...genotypes.map(g => seriesByGenotype[g].bins.length));
+    // A mini sparkline has no point markers, and a one-point polyline paints
+    // nothing; return no chart so the caller doesn't reserve space for it.
+    if (mini && numBins <= 1) return "";
     const xFor = i => numBins <= 1 ? width / 2 : padL + (i / (numBins - 1)) * (width - padL - padR);
     const yFor = v => height - padB - ((v - yMin) / (yMax - yMin)) * (height - padT - padB);
 
@@ -2901,8 +3808,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   /**
    * Populates the Data Preview modal from buildAllSections()' output.
    *
-   * Unlike the old single-innerHTML-dump approach, this builds one
-   * collapsible <details> per section plus a jump-menu, and — critically —
+   * Builds one collapsible <details> per section plus a jump-menu, and
    * only calls buildHtmlTableFrom2D() (i.e. only builds that section's DOM)
    * the first time it's actually expanded. A large pooled export at a
    * realistic scale (3 trials x 20 animals x 100 stimuli) was measured at
@@ -2916,7 +3822,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    *
    * @param {Array<{ name: string, data2D: any[][], large?: boolean, charts?: Object }>} sections
    */
-  function renderPreviewModal(sections) {
+  function renderPreviewModal(sections, assay = currentAssay) {
     const nav       = UI.Displays.previewNav;
     const container = UI.Displays.previewContainer;
     nav.innerHTML       = "";
@@ -2931,7 +3837,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // the same color everywhere in this modal — and matches the same
     // adjacency-guarded palette already used by the assay screen's
     // genotype picker (assignGenotypeColors), not a separate chart palette.
-    const genotypeColors = assignGenotypeColors(currentAssay?.genotypes || []);
+    const genotypeColors = assignGenotypeColors(assay?.genotypes || []);
 
     sections.forEach((section, i) => {
       const sectionId = `preview-section-${i}`;
@@ -3028,10 +3934,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   /**
    * Fires when the app is sent to the background (visibilityState = "hidden").
-   * Emergency-flushes the current run data to IDB before the browser suspends us.
+   * Stops a run in progress as interrupted (stopRunEarly() also saves it).
    *
-   * The scheduler's timing gap check will stop the run when the app resumes
-   * (because the gap will exceed 2×ISI), so we only need to save here, not stop.
+   * The experimenter can't tap a hidden page, so every window scored while
+   * hidden would be stored as a response. On phones the page is suspended
+   * and the scheduler's timing-gap check stopped such a run on resume, but
+   * desktop browsers keep an audible tab and its worker ticking in the
+   * background: the gap check never fires there, and the run used to finish
+   * as eligible.
    *
    * Also re-requests the Wake Lock when the app returns to the foreground,
    * because Wake Locks are released automatically when the page is hidden.
@@ -3042,25 +3952,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (document.visibilityState === "hidden") stopTestRig();
 
     if (document.visibilityState === "hidden" && currentState === STATES.RUNNING && currentAssay) {
-      // Emergency flush: persist whatever is recorded so far before the browser suspends us.
-      // Do NOT call stopRunEarly() here — the scheduler's gap check (Step 0) will stop the
-      // run cleanly when the app resumes once the gap exceeds 2×ISI. Calling stopRunEarly()
-      // here AND letting the gap check fire on resume creates a double-stop race where two
-      // concurrent IDB writes target the same run record.
-      const activeTrial = getActiveTrial(currentAssay);
-      const run = activeRun || activeTrial?.runs.find(r => r.status === "active");
-      if (run && activeTrial) {
-        saveRun(currentAssay.assayId, activeTrial.trialId, run).catch(() => {});
-      }
+      // No double stop with the scheduler's gap check: stopRunEarly() leaves
+      // RUNNING and nulls activeRun synchronously, so no later tick can
+      // reach that check for this run.
+      stopRunEarly("App was hidden mid-run, so taps could not be recorded");
     }
 
     // Wake Locks are released when hidden; re-acquire when visible, but only
-    // if a run is still active — there is no point holding the lock otherwise.
-    // Also check activeRun !== null. On slow devices the timing-gap auto-stop
-    // in scheduler() fires on the first tick after resume, which means currentState
-    // is still RUNNING when this handler fires. Without the activeRun guard, we
-    // re-acquire a lock that will be released again moments later.
-    if (wantsWakeLock && document.visibilityState === "visible" && currentState === STATES.RUNNING && activeRun !== null) {
+    // while a run or its warmup countdown is still going — there is no point
+    // holding the lock otherwise. The activeRun check covers the moment a
+    // run is being torn down while currentState still reads RUNNING.
+    if (wantsWakeLock && document.visibilityState === "visible" &&
+        ((currentState === STATES.RUNNING && activeRun !== null) || isWarmingUp)) {
       await requestWakeLock();
     }
   });
@@ -3074,6 +3977,13 @@ document.addEventListener("DOMContentLoaded", async () => {
    * cleanup on next launch catches any that slip through.
    */
   window.addEventListener("beforeunload", e => {
+    // A completed run that couldn't be saved exists only in memory: ask
+    // before leaving, and keep a copy the next startup can save.
+    if (unsavedRuns.length > 0) {
+      e.preventDefault();
+      e.returnValue = "";
+      persistUnsavedRuns();
+    }
     if (currentState !== STATES.RUNNING || !currentAssay) return;
 
     // Show the browser's native "Leave site?" dialog when a run is active.
@@ -3151,6 +4061,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function resetTimingState() {
     isWarmingUp            = false;
     currentStimulusIndex   = 0;
+    closedWindowIndex      = 0;
     // Also reset the two speech/audio index counters so a fresh session after
     // resetToSetup() cannot inherit stale values from a previous run.
     nextSpeechIndex        = 0;
@@ -3158,9 +4069,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     tapTimestamps          = [];
     tapReadIndex           = 0;
     lastSchedulerTime      = 0;
+    lastSchedulerWallMs    = 0;
+    lastSchedulerPerfMs    = 0;
+    lastAudioAdvancePerfMs = 0;
+    runOutputLatencySec    = 0;
     nextAudioScheduleTime  = 0.0;
     nextSpeechTime         = 0.0;
     nextDataIntervalTime   = 0.0;
+    nextWindowCloseTime    = 0.0;
   }
 
   /**
@@ -3184,6 +4100,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Screens.savedAssays.hidden   = true;
     UI.Screens.assayDefaults.hidden = true;
     document.body.classList.remove("state-overlay");
+    // Settings may have been showing a running Test Rig. Its Stop button is
+    // gone now, so stop the loop rather than leave it ticking/vibrating.
+    stopTestRig();
     // also remove state-warming-up so the amber countdown bar and live
     // counter don't remain visible when the user navigates home mid-warmup.
     document.body.classList.remove("state-warming-up");
@@ -3196,16 +4115,44 @@ document.addEventListener("DOMContentLoaded", async () => {
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
 
     currentAssay = null;
+    updateProgressBadge();  // hides it: no assay, so no count to show
     UI.Forms.setup.reset();
     UI.Inputs.assayName.value     = generateAutoID();
     UI.Displays.binWarning.hidden = true;
 
-    // form.reset() clears the hidden #genotypes input value but does NOT
-    // clear the chip DOM elements — chips from the previous assay would remain
-    // visually, while the hidden input is empty, causing a confusing validation
-    // error on next submit. Clear the chip list explicitly.
-    const chipList = document.getElementById("chipList");
-    if (chipList) chipList.innerHTML = "";
+    // form.reset() does NOT reset a type="hidden" input, so the previous
+    // assay's genotype list survives in #genotypes even though the chips are
+    // gone from view — submitting again would silently create a new assay
+    // carrying the old genotypes. Nor does reset() clear the `disabled` flag
+    // the 20-genotype cap sets on the text input, which locked genotype entry
+    // out for the rest of the session.
+    //
+    // Route through the ChipInput API rather than clearing #chipList by hand:
+    // clearChips() also re-syncs the hidden input and re-runs the max-genotype
+    // hint (which is what re-enables the text input).
+    if (window.ChipInput) {
+      window.ChipInput.clearChips();
+    } else {
+      // ChipInput lives in an index.html module that may not have evaluated
+      // yet — clear both halves manually so neither stale value can leak.
+      const chipList = document.getElementById("chipList");
+      if (chipList) chipList.innerHTML = "";
+      UI.Inputs.genotypes.value = "";
+    }
+
+    // form.reset() restored index.html's compile-time values, not the user's
+    // configured Assay Defaults — reapply them, then refresh the two warnings
+    // that are derived from these fields.
+    applyAssayDefaultsToForm();
+    updateBinWarning();
+    updateGraceIsiWarning();
+
+    // clearChips() above dispatched a synthetic `change`, which queued a draft
+    // save of nothing but programmatic values (the auto-generated ID and the
+    // defaults). Left alone, the next page load would restore that as if the
+    // user had typed it — a stale Experiment ID and whatever the defaults were
+    // at the time. A reset is an explicit discard, so drop the draft too.
+    clearSetupDraft();
 
     // Clear progress table from the previous assay
     const progressContainer = document.getElementById("assayProgress");
@@ -3281,17 +4228,23 @@ document.addEventListener("DOMContentLoaded", async () => {
       // removeEventListener moved into cleanup() so it fires on
       // every close path (OK, Cancel, backdrop, Escape) — not just Escape.
       const cleanup = result => {
-        document.removeEventListener("keydown", onKey);
+        window.removeEventListener("keydown", onKey, true);
         document.body.removeChild(overlay);
         resolve(result);
       };
       overlay.querySelector("[data-modal-ok]").addEventListener("click",     () => cleanup(true));
       overlay.querySelector("[data-modal-cancel]").addEventListener("click", () => cleanup(false));
       overlay.addEventListener("click", e => { if (e.target === overlay) cleanup(false); });
+      // Capture phase on window runs before every document listener, so this
+      // Escape closes only the dialog — not also the Saved Assays/Settings
+      // screen beneath it (main handler) or a toast (toast.js).
       const onKey = e => {
-        if (e.key === "Escape") cleanup(false);
+        if (e.key !== "Escape") return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        cleanup(false);
       };
-      document.addEventListener("keydown", onKey);
+      window.addEventListener("keydown", onKey, true);
     });
   }
 
@@ -3326,6 +4279,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   /**
+   * Writes the user's saved Assay Defaults into the setup form's numeric fields.
+   *
+   * Shared by restoreSetupDraft() (page load) and resetToSetup() ("New Assay"),
+   * because form.reset() only restores the HTML compile-time defaults baked
+   * into index.html — which have nothing to do with whatever the user
+   * configured on the Assay Defaults sub-page. Without this, starting a new
+   * assay silently discarded those defaults until the next page load.
+   */
+  function applyAssayDefaultsToForm() {
+    const defaults = _loadAssayDefaults();
+    UI.Inputs.isi.value         = defaults.isi;
+    UI.Inputs.stimCount.value   = defaults.stimCount;
+    UI.Inputs.binSize.value     = defaults.binSize;
+    UI.Inputs.temperature.value = defaults.temperature;
+    UI.Inputs.humidity.value    = defaults.humidity;
+  }
+
+  /**
    * Restores a saved setup draft into the form fields and genotype chips.
    * Only runs if there is a non-empty draft in localStorage.
    */
@@ -3334,12 +4305,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     // even when there is no saved draft. User-entered drafts below will
     // overwrite these if a draft exists, so defaults are only visible on
     // a truly fresh setup screen.
-    const defaults = _loadAssayDefaults();
-    UI.Inputs.isi.value         = defaults.isi;
-    UI.Inputs.stimCount.value   = defaults.stimCount;
-    UI.Inputs.binSize.value     = defaults.binSize;
-    UI.Inputs.temperature.value = defaults.temperature;
-    UI.Inputs.humidity.value    = defaults.humidity;
+    applyAssayDefaultsToForm();
+    // Evaluate both warnings for those defaults now: the no-draft early
+    // returns below would otherwise skip the calls at the end of this function.
+    updateBinWarning();
+    updateGraceIsiWarning();
 
     let draft;
     try {
@@ -3352,9 +4322,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (draft.isi)                                 UI.Inputs.isi.value          = draft.isi;
     if (draft.stimCount)                           UI.Inputs.stimCount.value    = draft.stimCount;
     if (draft.binSize)                             UI.Inputs.binSize.value      = draft.binSize;
-    // Use != null (not truthiness) so that valid values of 0 (e.g. 0 °C, 0% RH) are restored.
-    if (draft.temperature != null && draft.temperature !== "") UI.Inputs.temperature.value  = draft.temperature;
-    if (draft.humidity    != null && draft.humidity    !== "") UI.Inputs.humidity.value     = draft.humidity;
+    // Temperature and humidity are optional, so a blank string is a value the
+    // user chose ("not recorded" → exported as N/A), not an absent field. Both
+    // the truthiness test and an extra `!== ""` guard would drop it and leave
+    // the assay default applied above in place — silently substituting a
+    // fabricated ambient reading into the recorded metadata after a reload.
+    // != null restores "" verbatim while still falling through to the default
+    // for a key an older draft never wrote (undefined) — and still keeps
+    // genuine zeroes (0 °C, 0 % RH) from being treated as blank.
+    if (draft.temperature != null) UI.Inputs.temperature.value  = draft.temperature;
+    if (draft.humidity    != null) UI.Inputs.humidity.value     = draft.humidity;
 
     // Restore genotype chips through the shared chip-input infrastructure
     // (window.ChipInput, exposed by index.html) so restored chips get the same
@@ -3377,8 +4354,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateGraceIsiWarning();
   }
 
-  /** Clears the setup draft from localStorage. Called after a successful Begin. */
+  /**
+   * Clears the setup draft from localStorage, and cancels any debounced save
+   * still pending so it can't write the draft straight back. Called after a
+   * successful Begin and when the setup form is reset.
+   */
   function clearSetupDraft() {
+    clearTimeout(_draftSaveTimer);
     try { localStorage.removeItem(LS_KEYS.SETUP_DRAFT); } catch { /* noop */ }
   }
 
@@ -3431,21 +4413,47 @@ document.addEventListener("DOMContentLoaded", async () => {
       validation.warnings.forEach(w => showToast(w, "warning", 7000));
     }
 
-    // Create and persist the assay and its first trial
-    currentAssay = createAssay(setupValues);
-    await saveAssay(currentAssay);
+    // A second Begin while the writes below are in flight would create a
+    // duplicate assay.
+    if (isCreatingAssay) return;
+    isCreatingAssay = true;
+    try {
+      // Create and persist the assay and its first trial. currentAssay is
+      // only set once both are stored, so a failed write leaves the Setup
+      // screen as it was, ready to try again.
+      const assay = createAssay(setupValues);
+      const firstTrial = createTrial(1);
+      try {
+        await saveAssay(assay);
+      } catch (err) {
+        console.error("Begin Assay: could not save the assay:", err);
+        showToast("Could not save the new assay (storage error). Please try again.", "error", 6000);
+        return;
+      }
+      try {
+        await saveTrial(assay.assayId, firstTrial);
+      } catch (err) {
+        console.error("Begin Assay: could not save its first trial:", err);
+        // Don't leave an assay with no trial behind in Saved Assays.
+        deleteAssay(assay.assayId).catch(() => {});
+        showToast("Could not save the new assay (storage error). Please try again.", "error", 6000);
+        return;
+      }
+      assay.trials.push(firstTrial);
+      currentAssay = assay;
 
-    const firstTrial = createTrial(1);
-    currentAssay.trials.push(firstTrial);
-    await saveTrial(currentAssay.assayId, firstTrial);
+      // Clear the draft now that the assay has been saved
+      clearSetupDraft();
+      requestPersistentStorage();
 
-    // Clear the draft now that the assay has been saved
-    clearSetupDraft();
-
-    populateGenotypeSelect(setupValues.genotypes);
-    updateProgressTable();
-    applyProgressVisibilityPreference();
-    setState(STATES.CONFIGURED);
+      populateGenotypeSelect(setupValues.genotypes);
+      updateProgressTable();
+      updateProgressBadge();
+      applyProgressVisibilityPreference();
+      setState(STATES.CONFIGURED);
+    } finally {
+      isCreatingAssay = false;
+    }
   });
 
   // ── Bin warning live update ─────────────────────────────────────────────
@@ -3456,9 +4464,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Fires whenever the ISI changes so the experimenter sees the conflict
   // before clicking Begin, not just at run-start.
   UI.Inputs.isi.addEventListener("input", updateGraceIsiWarning);
-  // The gracePeriod slider listener (registered later in initializeSettings)
-  // already updates gracePeriodMs and calls updateGraceIsiWarning() from
-  // within the canonical settings listener — no second listener needed here.
+  // The grace-period slider's listener (in the Settings section below)
+  // updates gracePeriodMs and calls updateGraceIsiWarning() itself, so no
+  // second listener is needed here.
 
   // feature-detect PointerEvent so only one event fires per touch.
   // On modern iOS/Android *both* pointerdown and touchstart fire for the same
@@ -3467,13 +4475,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (window.PointerEvent) {
     UI.Buttons.tap.addEventListener("pointerdown", e => {
       e.preventDefault();  // Prevents ghost click / double-fire on touch devices
-      executeTapAction();
+      executeTapAction(e.timeStamp);
     });
   } else {
     // Fallback for legacy Android WebViews that do not implement Pointer Events
     UI.Buttons.tap.addEventListener("touchstart", e => {
       e.preventDefault();  // Suppress the following 300ms-delayed click
-      executeTapAction();
+      executeTapAction(e.timeStamp);
     }, { passive: false });
   }
 
@@ -3486,6 +4494,39 @@ document.addEventListener("DOMContentLoaded", async () => {
     // user isn't actively mid-selection. Escape still needs to fall through
     // so the check further below can close the panel.
     if (!UI.Inputs.genotypeOverlay.hidden && event.key !== "Escape") return;
+
+    // Likewise while typing in a text field (e.g. an override reason in the
+    // progress table): Space and Enter belong to the field. Without this, the
+    // assay-screen handling below swallows every space and treats it as a tap,
+    // which arms and starts a run. Escape still falls through so double-Escape
+    // stop and warmup cancel keep working.
+    //
+    // Not during a run, though: then Space is the experimenter scoring the
+    // animal. If focus was left in such a field, every press would type a
+    // space instead of recording a tap, and each missed window would be
+    // stored as a response. Letter keys still reach the field.
+    const focused = document.activeElement;
+    const isTextEntry = focused instanceof HTMLElement && (
+      focused.isContentEditable ||
+      focused.tagName === "TEXTAREA" ||
+      (focused.tagName === "INPUT" &&
+        !/^(button|checkbox|radio|range|submit|reset|file|color)$/i.test(focused.type))
+    );
+    if (isTextEntry && event.key !== "Escape" && currentState !== STATES.RUNNING) return;
+
+    // Outside a run, an open overlay screen, preview or confirm dialog owns
+    // Space and Enter (its own toggles and buttons). Without this, the
+    // assay-screen handling below blocks them there and Space arms and
+    // starts a run hidden behind the overlay. Escape still falls through so
+    // it can close the overlay. During a run Space must keep tapping.
+    const overlayOrModalOpen =
+         !UI.Screens.settings.hidden    || !UI.Screens.guidelines.hidden
+      || !UI.Screens.savedAssays.hidden || !UI.Screens.assayDefaults.hidden
+      || !UI.Displays.previewModal.hidden
+      // showConfirmModal()'s dialogs. :not([hidden]) because #previewModal
+      // carries the same class permanently and is only hidden.
+      || document.querySelector(".modal-overlay:not([hidden])") !== null;
+    if (overlayOrModalOpen && currentState !== STATES.RUNNING && event.key !== "Escape") return;
 
     // Prevent Space from scrolling the page while on the trial screen,
     // even during key-repeat (held key). Do this before the repeat-guard
@@ -3504,12 +4545,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     // First Escape press: show a confirmation toast. Second press within 2 s
     // (after the first) calls stopRunEarly(). This prevents accidental stops.
     if (event.key === "Escape" && currentState === STATES.RUNNING && !isWarmingUp) {
+      // Escape during a run belongs to this double-Escape stop alone. Stop
+      // propagation on BOTH presses: toast.js's document-level Escape
+      // listener is registered after this one whenever a toast is already
+      // on screen, and would otherwise dismiss the newest toast in the same
+      // dispatch — on the first press that is the "Press Esc again" prompt
+      // posted below, so the second press would stop the run unwarned.
+      event.stopImmediatePropagation();
       const now = Date.now();
       if (lastEscapeTime > 0 && now - lastEscapeTime <= 2000) {
-        // Second press within window — stop propagation so toast.js's global
-        // Escape listener doesn't fire after us and immediately dismiss
-        // whichever toast is newest once stopRunEarly() posts its own below.
-        event.stopImmediatePropagation();
         lastEscapeTime = 0;
         // dismissLatestToast() dismisses whatever toast is currently newest,
         // so it must come BEFORE stopRunEarly(): at this point the newest
@@ -3545,8 +4589,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Because _cancelWarmupUI is a closure inside runWarmup() and is not accessible
       // here, we replicate only what it can't do (the timer cancel) and rely on the
       // runWarmup loop to call _cancelWarmupUI itself on the very next setTimeout tick.
-      // The UI elements that were previously updated inline are now left for that tick,
-      // which fires within ≤1 s — acceptable for a cancel action.
+      // The remaining UI reset is left to that tick, which fires within ≤1 s —
+      // acceptable for a cancel action.
       isWarmingUp = false;
       // also cancel the pendingStart reset timer — if the warmup
       // started while startTimeout was still running, the timer would fire
@@ -3569,8 +4613,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       UI.Buttons.tap.classList.remove("warming-up");
       const _sel = UI.Inputs.genotypeSelect.value;
       if (_sel && (currentState === STATES.CONFIGURED || currentState === STATES.POISED)) {
-        const _at = getActiveTrial(currentAssay);
-        const _n  = (_at?.runs.filter(r => r.genotype === _sel && r.status === "completed" && r.eligibleForAnalysis).length ?? 0) + 1;
+        const _n  = nextAnimalIndex(getActiveTrial(currentAssay), _sel);
         UI.Displays.tapLabel.textContent = `Start ${_sel} (Animal ${_n})`;
       }
       return;
@@ -3638,7 +4681,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // RUNNING: tap unconditionally takes priority over everything
       if (currentState === STATES.RUNNING) {
-        if (!UI.Buttons.tap.disabled) executeTapAction();
+        if (!UI.Buttons.tap.disabled) executeTapAction(event.timeStamp);
         return;
       }
 
@@ -3649,20 +4692,24 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Outside a run: Space dismisses the newest visible toast first
       if (dismissLatestToast()) return;
 
-      if (!UI.Buttons.tap.disabled) executeTapAction();
+      if (!UI.Buttons.tap.disabled) executeTapAction(event.timeStamp);
       return;
     }
 
     // ── Non-assay screens ─────────────────────────────────────────────────
-    // Allow normal keyboard input in form fields (text inputs, selects, etc.)
-    if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "SELECT") return;
+    // Let focused form fields and activatable controls (including a toast's
+    // Reload button) keep their native Space/Enter behaviour — Space clicks
+    // a focused button on keyup, which preventDefault() here would cancel.
+    // (`focused` is document.activeElement, read at the top of this handler.)
+    if (focused && focused !== document.body &&
+        focused.matches("input, select, textarea, button, a[href], summary, [role='button'], [contenteditable]")) return;
 
     // Space only: dismiss toast or trigger tap
     if (event.key === " ") {
       event.preventDefault();
       if (document.activeElement?.classList.contains("toast")) return;
       if (dismissLatestToast()) return;
-      if (!UI.Buttons.tap.disabled) executeTapAction();
+      if (!UI.Buttons.tap.disabled) executeTapAction(event.timeStamp);
     }
   });
 
@@ -3679,6 +4726,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Track last-alerted battery threshold so toasts fire only once per crossing.
     // 100 = "haven't warned yet"; reset to 100 on reconnect so warnings re-arm.
     let _lastBattWarnLevel = 100;
+    // Most recent battery reading, or null when unknown. The first reading
+    // arrives during armbandConnect(), before _setArmbandConnectedUI() runs,
+    // which must show it rather than overwrite it.
+    let _lastArmbandLevel = null;
 
     /**
      * Handles battery level updates pushed by the armband BLE notification.
@@ -3687,6 +4738,7 @@ document.addEventListener("DOMContentLoaded", async () => {
      * @param {number} level  Battery percentage 0-100.
      */
     function _handleArmbandBattery(level) {
+      _lastArmbandLevel = level;
       // -- Header badge ----------------------------------------------------
       const badge = UI.Displays.armbandBatteryLevel;
       badge.textContent = level + "%";
@@ -3730,7 +4782,9 @@ document.addEventListener("DOMContentLoaded", async () => {
      * Called from both the normal connect path and the auto-reconnect callback.
      */
     function _setArmbandConnectedUI() {
-      UI.Displays.armbandStatusSettings.textContent = "Connected \u2713";
+      const lvl = _lastArmbandLevel;
+      UI.Displays.armbandStatusSettings.textContent =
+        lvl === null ? "Connected \u2713" : "Connected \u2713  \u00b7  " + lvl + "%";
       UI.Displays.armbandStatusSettings.className   = "armband-status armband-connected";
       // Restore header icon button — remove the "connecting" pending class and
       // re-enable it (it was disabled during the picker/GATT handshake).
@@ -3738,8 +4792,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       UI.Buttons.armbandHeaderBtn.disabled = false;
       UI.Buttons.armbandHeaderBtn.classList.add("armband-connected");
       UI.Buttons.armbandHeaderBtn.classList.remove("armband-disconnected");
-      UI.Buttons.armbandHeaderBtn.setAttribute("title", "Armband Connected");
-      UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Armband Connected");
+      UI.Buttons.armbandHeaderBtn.setAttribute("title",
+        lvl === null ? "Armband Connected" : "Armband connected \u2014 " + lvl + "%");
+      UI.Buttons.armbandHeaderBtn.setAttribute("aria-label",
+        lvl === null ? "Armband Connected" : "Armband connected \u2014 " + lvl + "% battery");
       UI.Buttons.connectArmband.textContent = "Connected \u2713";
       UI.Buttons.connectArmband.disabled    = true;
       // Show disconnect button so user can cleanly switch armbands
@@ -3759,6 +4815,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (isArmbandConnected()) return;
 
       const isHeaderBtn = btn === UI.Buttons.armbandHeaderBtn;
+      const prevLabel = isHeaderBtn ? null : btn.textContent;  // "Connect" or "Reconnect"
       btn.disabled = true;
       if (isHeaderBtn) {
         // Do NOT set textContent here — it would destroy the SVG icon child node.
@@ -3777,11 +4834,14 @@ document.addEventListener("DOMContentLoaded", async () => {
             UI.Buttons.armbandHeaderBtn.classList.remove("armband-connected");
             UI.Buttons.armbandHeaderBtn.classList.add("armband-disconnected");
             UI.Buttons.armbandHeaderBtn.setAttribute("title", "Reconnect Armband");
+            UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Reconnect haptic armband");
             UI.Displays.armbandBatteryLevel.setAttribute("hidden", "");
             UI.Buttons.connectArmband.disabled    = false;
             UI.Buttons.connectArmband.textContent = "Reconnect";
             UI.Buttons.disconnectArmband.setAttribute("hidden", "");  // hide disconnect btn
+            UI.Buttons.testArmband.disabled = true;  // nothing to test until it reconnects
             _lastBattWarnLevel = 100;  // re-arm threshold warnings after reconnect
+            _lastArmbandLevel  = null; // a reconnect without Battery Service shows none
             showToast("Haptic armband disconnected", "warning", 4000);
           },
           // onBatteryUpdate callback
@@ -3798,15 +4858,22 @@ document.addEventListener("DOMContentLoaded", async () => {
         showToast("Haptic armband connected", "success", 3000);
 
       } catch (err) {
+        // A background auto-reconnect may have succeeded while the picker
+        // was open; show that rather than a "Connect" button that does nothing.
+        if (isArmbandConnected()) {
+          if (isHeaderBtn) btn.classList.remove("armband-connecting");
+          _setArmbandConnectedUI();
+          return;
+        }
         // NotFoundError = user cancelled the browser picker -- silent
         if (err.name !== "NotFoundError") {
           showToast("Could not connect armband: " + err.message, "error");
         }
         btn.disabled = false;
-        if (btn === UI.Buttons.armbandHeaderBtn) {
+        if (isHeaderBtn) {
           btn.classList.remove("armband-connecting");
         } else {
-          btn.textContent = "Connect";
+          btn.textContent = prevLabel || "Connect";
         }
       }
     }
@@ -3826,12 +4893,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       UI.Buttons.armbandHeaderBtn.classList.remove("armband-connected");
       UI.Buttons.armbandHeaderBtn.classList.add("armband-disconnected");
       UI.Buttons.armbandHeaderBtn.setAttribute("title", "Connect Armband");
+      UI.Buttons.armbandHeaderBtn.setAttribute("aria-label", "Connect haptic armband");
       UI.Displays.armbandBatteryLevel.setAttribute("hidden", "");
       UI.Buttons.connectArmband.disabled    = false;
       UI.Buttons.connectArmband.textContent = "Connect";
       UI.Buttons.disconnectArmband.setAttribute("hidden", "");
       UI.Buttons.testArmband.disabled = true;  // disable test btn — no armband connected
       _lastBattWarnLevel = 100;
+      _lastArmbandLevel  = null;
       showToast("Haptic armband disconnected", "info", 3000);
     });
 
@@ -3840,7 +4909,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       const btn = UI.Buttons.testArmband;
       btn.disabled = true;  // prevent BLE spam by disabling during operation
       const t0 = performance.now();
-      await armbandTest();
+      if (!(await armbandTest())) {
+        // Not connected (e.g. it dropped and hasn't reconnected), or the
+        // write failed — don't report a dispatch that never happened.
+        showToast(
+          isArmbandConnected() ? "Test vibration could not be sent — try again" : "Armband not connected — reconnect first",
+          "warning", 3000
+        );
+        btn.disabled = !isArmbandConnected();
+        return;
+      }
       // writeValueWithoutResponse resolves when the packet enters the
       // BLE radio transmit buffer (~1 ms), NOT when the armband actually vibrates.
       // The value is therefore the BLE stack dispatch latency, not a round-trip
@@ -3859,7 +4937,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Previous value of 1500ms was shorter than the toast, contrary to the comment.
       setTimeout(() => {
         btn.classList.remove("armband-test-active");
-        btn.disabled = false;
+        btn.disabled = !isArmbandConnected();
       }, 2000);
     });
   }
@@ -3874,6 +4952,12 @@ document.addEventListener("DOMContentLoaded", async () => {
    */
   let testRigInterval = null;
 
+  /** True while startTestRig() is awaiting the AudioContext resume. */
+  let testRigStarting = false;
+
+  /** Bumped by stopTestRig() so a start still awaiting warmUpAudio() gives up. */
+  let testRigStartToken = 0;
+
   /**
    * Starts a 1 Hz loop that plays a tick tone, flashes a visual indicator,
    * and (if the armband is connected) sends a test haptic pulse — all in
@@ -3884,7 +4968,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Writes nothing to IDB and requires no assay/genotype selection.
    */
   async function startTestRig() {
-    if (testRigInterval !== null) return;  // already running
+    if (testRigInterval !== null || testRigStarting) return;  // running or starting
 
     if (currentState === STATES.RUNNING) {
       showToast("Stop the current run before using the Test Rig.", "info", 3000);
@@ -3893,6 +4977,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Test Rig is started by a real user gesture (button click), so this is a
     // valid place to resume the AudioContext if it isn't already.
+    const token = ++testRigStartToken;
+    testRigStarting = true;
     try {
       await warmUpAudio();
     } catch {
@@ -3902,7 +4988,18 @@ document.addEventListener("DOMContentLoaded", async () => {
         5000
       );
       return;
+    } finally {
+      // A start that stopTestRig() superseded must not clear the flag for a
+      // newer start that is still pending.
+      if (token === testRigStartToken) testRigStarting = false;
     }
+
+    // Anything may have changed during that await: a Stop click, Settings
+    // closed, the page hidden, or a run started. Starting anyway would leave
+    // a loop running that nothing stops.
+    if (token !== testRigStartToken || testRigInterval !== null ||
+        UI.Screens.settings.hidden || document.visibilityState === "hidden" ||
+        currentState === STATES.RUNNING) return;
 
     const pulse = () => {
       playTick();
@@ -3927,6 +5024,8 @@ document.addEventListener("DOMContentLoaded", async () => {
    * run-start paths without checking state first.
    */
   function stopTestRig() {
+    testRigStartToken++;       // cancel a start still awaiting warmUpAudio()
+    testRigStarting = false;
     if (testRigInterval === null) return;
     clearInterval(testRigInterval);
     testRigInterval = null;
@@ -3941,6 +5040,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (UI.Buttons.testRigBtn) {
     UI.Buttons.testRigBtn.addEventListener("click", () => {
+      // A click while the AudioContext is still resuming (a few ms) is the
+      // second half of a double-click: ignore it rather than cancel the start.
+      if (testRigStarting) return;
       if (testRigInterval === null) startTestRig();
       else stopTestRig();
     });
@@ -3948,6 +5050,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Finish trial button ─────────────────────────────────────────────────
   UI.Buttons.finishTrial.addEventListener("click", async () => {
+    // A trial can only be finished between runs. The button is disabled
+    // outside POISED and during the warmup, but check here too: a click
+    // already in flight, or a second click while this handler is still
+    // working, must not get through.
+    if (isFinishingTrial || isWarmingUp || currentState !== STATES.POISED) return;
+
     // replace browser-native confirm() (which is blocking, cannot be
     // styled, and may be suppressed in PWA mode on some Android browsers) with a
     // lightweight async modal that respects the app's theme.
@@ -3958,35 +5066,64 @@ document.addEventListener("DOMContentLoaded", async () => {
     );
     if (!confirmed) return;
 
-    const activeTrial = getActiveTrial(currentAssay);
-
-    // Guard against null (can occur if the trial was already completed via another
-    // path, e.g. a rapid double-click or a race with the crash-guard cleanup).
-    if (!activeTrial) {
-      showToast("No active trial to finish.", "warning", 4000);
+    // The dialog doesn't block the keyboard: Space can arm and start a run
+    // while it is open. Finishing now would leave that run live behind the
+    // Export screen.
+    if (isWarmingUp || currentState !== STATES.POISED) {
+      showToast("A run started — stop it before finishing the trial.", "warning", 4000);
       return;
     }
 
-    // markTrialAbandoned/Completed rejects when the trial record is not
-    // found in IDB (e.g. a first-launch write was dropped on mobile). Without this
-    // try/catch the promise rejection is unhandled, leaving the UI frozen on the
-    // assay screen with no error feedback to the experimenter.
+    // From here until the Export screen is showing, executeTapAction() ignores
+    // taps, so nothing can start a run during the awaits below.
+    isFinishingTrial = true;
     try {
-      if (activeTrial.runs.length === 0) {
-        await markTrialAbandoned(currentAssay.assayId, activeTrial.trialId, "No runs recorded");
-      } else {
-        await markTrialCompleted(currentAssay.assayId, activeTrial.trialId);
+      // A run whose final save failed lives only in memory, and the hydrate
+      // below re-reads the trial from IDB — it would silently drop out of the
+      // export. Give the save one more go, and ask before finishing without it.
+      if (unsavedRuns.length > 0 && !(await flushUnsavedRuns())) {
+        const proceed = await showConfirmModal(
+          "Finish without the unsaved run?",
+          "A completed run still could not be saved (storage error). If you finish now it is included in this session's exports, " +
+          "but it exists only in memory: export now, and don't reload or close the app.",
+          "Finish Anyway"
+        );
+        if (!proceed) return;
       }
-    } catch (err) {
-      console.error("finishTrial: IDB write failed:", err);
-      showToast("Could not save trial — please try again. If the problem persists, export your data now.", "error", 7000);
-      return;
-    }
 
-    // Hydrate FIRST so the export list reflects the updated trial status
-    currentAssay = await hydrateAssay(currentAssay.assayId);
-    populateExportDatasetList(currentAssay);
-    setState(STATES.EXPORT);
+      const activeTrial = getActiveTrial(currentAssay);
+
+      // Guard against null (can occur if the trial was already completed via another
+      // path, e.g. a rapid double-click or a race with the crash-guard cleanup).
+      if (!activeTrial) {
+        showToast("No active trial to finish.", "warning", 4000);
+        return;
+      }
+
+      // markTrialAbandoned/Completed rejects when the trial record is not
+      // found in IDB (e.g. a first-launch write was dropped on mobile). Without this
+      // try/catch the promise rejection is unhandled, leaving the UI frozen on the
+      // assay screen with no error feedback to the experimenter.
+      await repersistIfWiped();
+      try {
+        if (activeTrial.runs.length === 0) {
+          await markTrialAbandoned(currentAssay.assayId, activeTrial.trialId, "No runs recorded");
+        } else {
+          await markTrialCompleted(currentAssay.assayId, activeTrial.trialId);
+        }
+      } catch (err) {
+        console.error("finishTrial: IDB write failed:", err);
+        showToast("Could not save trial — please try again. If the problem persists, export your data now.", "error", 7000);
+        return;
+      }
+
+      // Hydrate FIRST so the export list reflects the updated trial status
+      currentAssay = overlayUnsavedRuns(await hydrateAssay(currentAssay.assayId));
+      populateExportDatasetList(currentAssay);
+      setState(STATES.EXPORT);
+    } finally {
+      isFinishingTrial = false;
+    }
   });
 
   // ── Show/hide progress table ────────────────────────────────────────────
@@ -4015,11 +5152,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   UI.Inputs.genotypeSelect.addEventListener("change", e => {
     if (currentState === STATES.CONFIGURED || currentState === STATES.POISED) {
       const selected    = e.target.value;
-      // activeTrial can be null; use optional chaining to prevent crash.
-      const activeTrial = getActiveTrial(currentAssay);
-      const nextIndex   = (activeTrial?.runs.filter(
-        r => r.genotype === selected && r.status === "completed" && r.eligibleForAnalysis
-      ).length ?? 0) + 1;
+      // activeTrial can be null; nextAnimalIndex() handles that.
+      const nextIndex   = nextAnimalIndex(getActiveTrial(currentAssay), selected);
 
       UI.Displays.tapLabel.textContent = `Start ${selected} (Animal ${nextIndex})`;
 
@@ -4032,6 +5166,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // ── New assay ────────────────────────────────────────────────────
   // replace blocking confirm() with async showConfirmModal.
   UI.Buttons.newAssay.addEventListener("click", async () => {
+    if (!(await confirmLeavingUnsavedRuns())) return;
     if (currentAssay) {
       const completedTrials = (currentAssay.trials || []).filter(t => t.status === "completed");
       if (completedTrials.length > 0) {
@@ -4046,30 +5181,138 @@ document.addEventListener("DOMContentLoaded", async () => {
     resetToSetup();
   });
 
+  /**
+   * The number for a new trial: one past the highest existing trialIndex,
+   * not trials.length + 1, which repeats a number when the indices have a
+   * gap or a legacy record has none — and the Excel export names a sheet
+   * after each trial.
+   * @param {Object} assay
+   * @returns {number}
+   */
+  function nextTrialIndex(assay) {
+    return Math.max(0, ...assay.trials.map(t => Number(t.trialIndex) || 0)) + 1;
+  }
+
+  /**
+   * Before leaving the assay: retry any unsaved run, and if one still can't
+   * be saved, ask — once the assay is left, nothing shows it again.
+   * @returns {Promise<boolean>} True to go ahead.
+   */
+  async function confirmLeavingUnsavedRuns() {
+    if (unsavedRuns.length === 0 || (await flushUnsavedRuns())) return true;
+    return showConfirmModal(
+      "Leave without the unsaved run?",
+      "A completed run could not be saved (storage error). It is kept on this device and saved when the app next starts, " +
+      "but it won't appear in this assay until then. Export now if you need it.",
+      "Leave Anyway"
+    );
+  }
+
   // ── Start new trial (from export screen) ───────────────────────────────
   UI.Buttons.backToAssay.addEventListener("click", async () => {
     // guard against currentAssay being null — rapid navigation or state
     // corruption could leave it null, causing .assayId to throw TypeError.
     if (!currentAssay) return;
-    // Re-hydrate from IDB so trialIndex is always correct, even if the user has
-    // looped through export → backToAssay multiple times, and to pick up any
-    // run records written since the last hydrateAssay() call.
-    currentAssay = await hydrateAssay(currentAssay.assayId);
-    const trial = createTrial(currentAssay.trials.length + 1);
-    currentAssay.trials.push(trial);
-    await saveTrial(currentAssay.assayId, trial);  // await: run start must not race DB write
-    populateGenotypeSelect(currentAssay.genotypes);
-    updateProgressTable();
-    // POISED (not CONFIGURED): this assay already exists; Finish Trial must be
-    // immediately available in case the experimenter only needs one run.
-    setState(STATES.POISED);
+    // A double activation would create two new trials.
+    if (isStartingTrial) return;
+    isStartingTrial = true;
+    try {
+      // Re-hydrate from IDB so trialIndex is always correct, even if the user has
+      // looped through export → backToAssay multiple times, and to pick up any
+      // run records written since the last hydrateAssay() call.
+      let assay;
+      try {
+        assay = overlayUnsavedRuns(await hydrateAssay(currentAssay.assayId));
+      } catch (err) {
+        // e.g. the assay was deleted in another tab. Stay on the Export
+        // screen: its in-memory copy can still be exported.
+        console.error("Start New Trial: could not re-read the assay:", err);
+        showToast("This assay could not be loaded from storage, so no new trial was started.", "error", 6000);
+        return;
+      }
+
+      try {
+        // A trial can still be active here (a reload whose startup cleanup
+        // didn't run, or an older build's header-logo exit). Close it, as the
+        // Saved Assays "Start New Trial" does, or new runs would be recorded
+        // into it instead of the new trial.
+        const reason = "Started new trial from export screen";
+        for (const stale of assay.trials.filter(t => t.status === "active")) {
+          await markTrialAbandoned(assay.assayId, stale.trialId, reason);
+          abandonTrial(stale, reason);
+        }
+
+        const trial = createTrial(nextTrialIndex(assay));
+        await saveTrial(assay.assayId, trial);  // await: run start must not race DB write
+        assay.trials.push(trial);
+      } catch (err) {
+        console.error("Start New Trial: storage write failed:", err);
+        showToast("Could not start a new trial (storage error). Please try again.", "error", 6000);
+        return;
+      }
+
+      currentAssay = assay;
+      populateGenotypeSelect(currentAssay.genotypes);
+      updateProgressTable();
+      updateProgressBadge();
+      // POISED (not CONFIGURED): this assay already exists; Finish Trial must be
+      // immediately available in case the experimenter only needs one run.
+      setState(STATES.POISED);
+    } finally {
+      isStartingTrial = false;
+    }
   });
 
 
   // ── Header home (logo / title) → back to setup ─────────────────────────
-  UI.Buttons.headerHome.addEventListener("click", () => {
-    // Do not navigate away while a run is actively recording data
-    if (currentState === STATES.RUNNING) return;
+  UI.Buttons.headerHome.addEventListener("click", async () => {
+    // Do not navigate away while a run is recording, its warmup is counting
+    // down, or a trial is being finished.
+    if (currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) return;
+
+    // Nothing can resume or finish the trial in progress once the assay
+    // screen is left, so close it here, explicitly, rather than leaving it
+    // "active" for a later cleanup to abandon without a word.
+    const onAssayScreen = currentState === STATES.CONFIGURED || currentState === STATES.POISED;
+    const active = onAssayScreen ? getActiveTrial(currentAssay) : null;
+    if (active) {
+      const runCount = active.runs.length;
+      if (runCount > 0) {
+        const go = await showConfirmModal(
+          "Leave this trial?",
+          `It will be marked abandoned and can't take any more runs. Its ${runCount} run${runCount !== 1 ? "s are" : " is"} ` +
+          `kept, but the default export (completed trials only) leaves ${runCount !== 1 ? "them" : "it"} out. ` +
+          `To keep ${runCount !== 1 ? "them" : "it"} in, use Finish Trial instead.`,
+          "Leave Trial"
+        );
+        // Re-check: the state can change while the dialog is open.
+        if (!go || currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) return;
+      }
+      // A run whose final save failed is retried before the trial closes,
+      // so the abandoned trial at least holds it; ask if it still can't be.
+      if (!(await confirmLeavingUnsavedRuns()) ||
+          currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) return;
+      const reason = runCount > 0 ? "Left the trial from the header" : "No runs recorded";
+      try {
+        await markTrialAbandoned(currentAssay.assayId, active.trialId, reason);
+        abandonTrial(active, reason);
+      } catch (err) {
+        console.error("Header home: could not close the trial:", err);
+        // Don't trap the user on the assay screen: the write can fail for
+        // good (e.g. the assay was deleted in another tab), and nothing else
+        // there leads back to Setup. A trial left active is abandoned by
+        // the startup cleanup next time the app opens.
+        const leaveAnyway = await showConfirmModal(
+          "Leave without closing the trial?",
+          "The trial could not be marked abandoned in storage. If you leave now it stays open until the app is next started, which closes it automatically.",
+          "Leave Anyway"
+        );
+        if (!leaveAnyway || currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) return;
+      }
+    } else if (!(await confirmLeavingUnsavedRuns()) ||
+               currentState === STATES.RUNNING || isWarmingUp || isFinishingTrial) {
+      return;
+    }
     resetToSetup();
   });
 
@@ -4083,13 +5326,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("openAssayDefaults").addEventListener("click", () => {
     // Mirror showScreen() fully: collapse the overflow menu, reset aria-expanded,
     // and add state-overlay so CSS dimming is consistent with other overlays.
-    // Previously state-overlay was only set when Settings was first opened via
-    // showScreen() — navigating into Assay Defaults from Settings didn't change
-    // it, which is fine in practice (it was already set), but for correctness we
-    // explicitly add it here so the sub-page works even if entered independently.
+    // Settings has normally set state-overlay already; adding it here as well
+    // keeps the sub-page correct even if it is entered some other way.
     UI.Displays.overflowMenu.hidden = true;
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", "false");
     document.body.classList.add("state-overlay");
+    stopTestRig();  // Settings (and the rig's Stop button) is about to be hidden
     UI.Screens.settings.hidden      = true;
     UI.Screens.assayDefaults.hidden = false;
   });
@@ -4106,8 +5348,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   UI.Buttons.openSavedAssays.addEventListener("click", () => {
     showScreen(UI.Screens.savedAssays);
-    // propagate async errors — previously the returned Promise was
-    // discarded so IDB failures produced a silent empty list with no user feedback.
+    // Surface async failures: without the catch, an IDB error would leave a
+    // silently empty list with no feedback to the user.
     populateSavedAssaysList().catch(err => {
       console.error("Failed to load saved assays:", err);
       showToast("Could not load saved assays. Please try again.", "error", 4000);
@@ -4125,7 +5367,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (UI.Buttons.exportBackup) {
     UI.Buttons.exportBackup.addEventListener("click", async () => {
       const btn = UI.Buttons.exportBackup;
-      const original = btn.textContent;
       try {
         btn.disabled = true;
         const data = await exportAllDataAsJSON();
@@ -4150,7 +5391,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         showToast("Backup export failed: " + err.message, "error", 6000);
       } finally {
         btn.disabled = false;
-        btn.textContent = original;
       }
     });
   }
@@ -4175,6 +5415,14 @@ document.addEventListener("DOMContentLoaded", async () => {
         return;
       }
 
+      // A recovery file from an older version nests the trials and runs
+      // inside one assay; flatten it into the backup shape.
+      // (Saved after returning to Setup, it holds only "assay": {} and the
+      // unsaved runs.)
+      if (data && !Array.isArray(data.assays) && (data.assay || Array.isArray(data.unsavedRuns))) {
+        data = assayToBackup(data.assay ?? null, Array.isArray(data.unsavedRuns) ? data.unsavedRuns : []);
+      }
+
       if (!data || !Array.isArray(data.assays) || !Array.isArray(data.trials) || !Array.isArray(data.runs)) {
         showToast("This file doesn't look like a valid Touch Assay Timer backup.", "error", 5000);
         return;
@@ -4183,8 +5431,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       const confirmed = await showConfirmModal(
         "Import backup?",
         `This file contains ${data.assays.length} assay(s), ${data.trials.length} trial(s), and ` +
-        `${data.runs.length} run(s). Importing will add/update matching records on this device — ` +
-        `nothing already here will be deleted. Continue?`,
+        `${data.runs.length} run(s). Importing adds records that aren't on this device and updates ` +
+        `older copies of ones that are — newer records already here are kept, and nothing is deleted. Continue?`,
         "Import",
         "primary"
       );
@@ -4193,9 +5441,24 @@ document.addEventListener("DOMContentLoaded", async () => {
       try {
         const counts = await importAllDataFromJSON(data);
         showToast(
-          `Backup imported: ${counts.assays} assay(s), ${counts.trials} trial(s), ${counts.runs} run(s).`,
-          "success", 4000
+          `Backup imported: ${counts.assays} assay(s), ${counts.trials} trial(s), ${counts.runs} run(s).` +
+          (counts.keptNewer > 0
+            ? ` ${counts.keptNewer} record(s) on this device were newer and were kept.`
+            : ""),
+          "success", counts.keptNewer > 0 ? 7000 : 4000
         );
+        // The Export screen can be underneath (Saved Assays opens over it).
+        // Its assay and dataset list are an in-memory snapshot from before
+        // the import, so Export and Preview would silently leave out any
+        // trials and runs just imported for that assay. Re-read it.
+        if (currentAssay && currentState === STATES.EXPORT) {
+          try {
+            currentAssay = overlayUnsavedRuns(await hydrateAssay(currentAssay.assayId));
+            populateExportDatasetList(currentAssay);
+          } catch (err) {
+            console.error("Failed to refresh the open assay after import:", err);
+          }
+        }
         // Refresh the list if it's currently open so the imported assays appear immediately.
         if (!UI.Screens.savedAssays.hidden) {
           populateSavedAssaysList().catch(err => console.error("Failed to refresh saved assays list:", err));
@@ -4212,9 +5475,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     e.stopPropagation();  // Prevent the document click handler from immediately closing it
     const willBeOpen = UI.Displays.overflowMenu.hidden;  // true = it is currently closed → we are opening it
     UI.Displays.overflowMenu.hidden = !willBeOpen;
-    // keep aria-expanded in sync so screen readers announce the correct
-    // open/closed state. Previously the attribute was hard-coded to "false" in HTML
-    // and never updated, so assistive technologies always reported the menu as collapsed.
+    // Keep aria-expanded in sync so screen readers announce the correct
+    // open/closed state.
     UI.Buttons.overflowMenu.setAttribute("aria-expanded", String(willBeOpen));
   });
 
@@ -4241,10 +5503,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Reposition (or switch dropdown<->sheet mode) if the viewport crosses the
-  // wide/narrow breakpoint while the app is open — e.g. a tablet rotation —
-  // and re-render so pills<->trigger mode stays correct for the new width.
+  // If the viewport crosses the wide/narrow breakpoint while the app is open
+  // — e.g. a tablet rotation — close the panel (the next open picks the mode
+  // for the new width) and re-render so pills<->trigger mode stays correct.
   GENOTYPE_WIDE_MQ.addEventListener("change", () => {
+    closeGenotypeOverlay();
     if (currentAssay) renderGenotypePicker(currentAssay.genotypes);
   });
   window.addEventListener("resize", () => {
@@ -4279,6 +5542,35 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // ── Saved assays list — event delegation ───────────────────────────────
+  /**
+   * Whether `assayId` (a data-attribute string) is the assay currently
+   * loaded — the one the Export screen under Saved Assays is showing.
+   */
+  function isLoadedAssay(assayId) {
+    return currentAssay !== null && String(currentAssay.assayId) === String(assayId);
+  }
+
+  /**
+   * Called once the loaded assay has been deleted from Saved Assays. Its
+   * in-memory copy is now stale: Start New Trial on the Export screen would
+   * re-read a record that no longer exists, and Export would write out
+   * deleted data. Go back to Setup, keeping Saved Assays open on top.
+   */
+  function leaveDeletedAssay() {
+    resetToSetup();
+    showScreen(UI.Screens.savedAssays);
+  }
+
+  /**
+   * Reports a Saved Assays row whose assay could not be read (typically
+   * deleted in another tab), and refreshes the list so the row goes away.
+   */
+  function reportUnloadableAssay(err) {
+    console.error("Saved Assays: could not load assay:", err);
+    showToast("That assay could not be loaded. It may have been deleted in another tab.", "error", 5000);
+    populateSavedAssaysList().catch(e => console.error("Failed to refresh saved assays list:", e));
+  }
+
   UI.Displays.savedAssaysList.addEventListener("click", async e => {
     const btn = e.target.closest("button[data-action]");
     if (!btn) return;
@@ -4287,51 +5579,84 @@ document.addEventListener("DOMContentLoaded", async () => {
     const assayId = btn.dataset.assayId;
 
     if (action === "start") {
-      currentAssay = await hydrateAssay(assayId);
-      populateGenotypeSelect(currentAssay.genotypes);
+      // A double activation would create two new trials.
+      if (isStartingTrial) return;
+      isStartingTrial = true;
+      try {
+        let assay;
+        try {
+          assay = overlayUnsavedRuns(await hydrateAssay(assayId));
+        } catch (err) {
+          reportUnloadableAssay(err);
+          return;
+        }
 
-      // Abandon any previously active trial (shouldn't exist, but guard anyway)
-      const active = getActiveTrial(currentAssay);
-      if (active) {
-        await markTrialAbandoned(currentAssay.assayId, active.trialId, "Started new trial from saved assays");
-        // update the in-memory trial object to match what was
-        // just written to IDB. Without this, getActiveTrial() would still
-        // find this trial (status is "active" in memory), causing the new
-        // trial created below to be shadowed.
-        abandonTrial(active, "Started new trial from saved assays");
+        // Nothing below touches currentAssay until every write has succeeded,
+        // so a failure leaves whatever screen is underneath consistent.
+        try {
+          // Close every trial still active (one is left behind if a reload's
+          // startup cleanup didn't run), so the new trial is the only one.
+          const reason = "Started new trial from saved assays";
+          for (const stale of assay.trials.filter(t => t.status === "active")) {
+            await markTrialAbandoned(assay.assayId, stale.trialId, reason);
+            // Mirror the write in memory, or getActiveTrial() would still find
+            // this trial and shadow the new one created below.
+            abandonTrial(stale, reason);
+          }
+
+          const newTrial = createTrial(nextTrialIndex(assay));
+          await saveTrial(assay.assayId, newTrial);
+          assay.trials.push(newTrial);
+        } catch (err) {
+          console.error("Saved Assays: could not start a new trial:", err);
+          showToast("Could not start a new trial (storage error). Please try again.", "error", 5000);
+          return;
+        }
+
+        currentAssay = assay;
+        // Built only now that the new trial is the active one, so the picker's
+        // per-genotype counts are the new trial's, not the abandoned one's.
+        populateGenotypeSelect(currentAssay.genotypes);
+
+        // Initialize progress table for the new trial and apply visibility preference
+        updateProgressTable();
+        updateProgressBadge();
+        applyProgressVisibilityPreference();
+
+        hideScreenAndRestore(UI.Screens.savedAssays);
+        setState(STATES.POISED);
+      } finally {
+        isStartingTrial = false;
       }
-
-      const newTrial = createTrial(currentAssay.trials.length + 1);
-      currentAssay.trials.push(newTrial);
-      await saveTrial(currentAssay.assayId, newTrial);
-
-      // Initialize progress table for the new trial and apply visibility preference
-      updateProgressTable();
-      applyProgressVisibilityPreference();
-
-      hideScreenAndRestore(UI.Screens.savedAssays);
-      setState(STATES.POISED);
 
     } else if (action === "preview") {
-      // Quick preview without leaving the saved-assays list: hydrate the
-      // assay, populate the (offscreen) export dataset list to get sensible
-      // default configs — same defaults the Export screen starts with — then
-      // open the preview modal directly. Since #previewModal is a fixed,
-      // full-viewport overlay, it renders fine on top of this screen and
-      // closing it returns straight to the list, no navigation round-trip.
-      currentAssay = await hydrateAssay(assayId);
-      populateExportDatasetList(currentAssay);
-      const configs = getExportConfigs();
-      if (configs.length === 0) {
-        showToast("No data available to preview.", "info", 3000);
+      // Quick preview without leaving the saved-assays list. Side-effect
+      // free: the previewed assay is NOT loaded into currentAssay or the
+      // Export screen's dataset list — doing so made a later Export or Start
+      // New Trial on the Export screen underneath act on the previewed assay.
+      // Since #previewModal is a fixed, full-viewport overlay, it renders fine
+      // on top of this screen and closing it returns straight to the list.
+      let assay;
+      try {
+        assay = overlayUnsavedRuns(await hydrateAssay(assayId));
+      } catch (err) {
+        reportUnloadableAssay(err);
         return;
       }
+      // The same defaults populateExportDatasetList() ticks: every completed
+      // trial, plus pooled (completed trials only) when that pool has runs.
+      if (!hasCompletedRuns(assay)) {
+        showToast("No completed trials to preview. Open Export and tick the abandoned or unfinished trial, or 'Pooled (all trials…)'.", "info", 6000);
+        return;
+      }
+      const configs = [
+        ...assay.trials
+          .filter(t => t.status === "completed")
+          .map(t => ({ type: "trial", trialId: String(t.trialId), includeAbandoned: false })),
+        { type: "pooled", includeAbandoned: false }
+      ];
       try {
-        await runWithSpinner(btn, "Loading…", () => {
-          const sections = buildAllSections(currentAssay, configs, getExportOptions());
-          renderPreviewModal(sections);
-          UI.Displays.previewModal.hidden = false;
-        });
+        await runWithSpinner(btn, "Loading…", () => openPreview(assay, configs, getExportOptions()));
       } catch (err) {
         // Without this catch, a data-shape edge case in buildAllSections/
         // renderPreviewModal becomes an unhandled rejection that the global
@@ -4342,7 +5667,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
 
     } else if (action === "export") {
-      currentAssay = await hydrateAssay(assayId);
+      let assay;
+      try {
+        assay = overlayUnsavedRuns(await hydrateAssay(assayId));
+      } catch (err) {
+        reportUnloadableAssay(err);
+        return;
+      }
+      currentAssay = assay;
       hideScreenAndRestore(UI.Screens.savedAssays);
       populateExportDatasetList(currentAssay);
       setState(STATES.EXPORT);
@@ -4358,6 +5690,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (confirmed) {
         try {
           await deleteAssay(assayId);
+          if (isLoadedAssay(assayId)) leaveDeletedAssay();
           await populateSavedAssaysList();
           showToast(`"${name}" deleted.`, "success", 3000);
         } catch (err) {
@@ -4371,20 +5704,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   // ── Saved assays bulk selection ─────────────────────────────────────────
   UI.Displays.savedAssaysList.addEventListener("change", e => {
     if (!e.target.classList.contains("assay-select-checkbox")) return;
+    dismissBulkDeleteConfirm();
 
     const all     = document.querySelectorAll(".assay-select-checkbox");
     const checked = document.querySelectorAll(".assay-select-checkbox:checked");
 
     UI.Buttons.deleteSelectedAssays.disabled  = checked.length === 0;
     UI.Inputs.selectAllAssays.checked         = checked.length === all.length && all.length > 0;
-    // set indeterminate when some (but not all) checkboxes are checked.
-    // Previously indeterminate was never set here, so the master checkbox only
-    // showed checked/unchecked, losing the "partial selection" affordance.
-    // Compare with syncExportSelectAll() which handles this correctly for exports.
+    // Show the master checkbox as indeterminate when some (but not all) rows
+    // are checked — the same "partial selection" affordance syncExportSelectAll()
+    // gives the export list.
     UI.Inputs.selectAllAssays.indeterminate   = checked.length > 0 && checked.length < all.length;
   });
 
   UI.Inputs.selectAllAssays.addEventListener("change", e => {
+    dismissBulkDeleteConfirm();
     const isChecked = e.target.checked;
     document.querySelectorAll(".assay-select-checkbox").forEach(cb => {
       cb.checked = isChecked;
@@ -4418,25 +5752,31 @@ document.addEventListener("DOMContentLoaded", async () => {
     confirmRow.querySelector(".confirm-yes").addEventListener("click", async () => {
       confirmRow.remove();
 
-      const idsToDelete = Array.from(checked).map(cb => cb.dataset.assayId);
+      // Read the selection now, not the snapshot from when the bar opened.
+      // (Any change to it dismisses the bar too — see dismissBulkDeleteConfirm.)
+      const idsToDelete = Array.from(
+        document.querySelectorAll(".assay-select-checkbox:checked")
+      ).map(cb => cb.dataset.assayId);
+      if (idsToDelete.length === 0) return;
       UI.Buttons.deleteSelectedAssays.textContent = "Deleting...";
       UI.Buttons.deleteSelectedAssays.disabled    = true;
       let failCount = 0;
 
       try {
+        let deletedLoaded = false;
         for (const id of idsToDelete) {
           try {
             await deleteAssay(id);
+            if (isLoadedAssay(id)) deletedLoaded = true;
           } catch (err) {
             console.error(`Failed to delete assay ${id}:`, err);
             failCount++;
           }
         }
+        if (deletedLoaded) leaveDeletedAssay();
 
         if (failCount > 0) {
           showToast(`${failCount} assay(s) could not be deleted. The rest were removed.`, "error", 5000);
-          // previously both branches ran when failCount > 0 because there
-          // was no `else` — users saw a success toast and an error toast simultaneously.
         } else {
           showToast(`${idsToDelete.length} assay${idsToDelete.length !== 1 ? "s" : ""} deleted.`, "success", 3000);
         }
@@ -4511,12 +5851,26 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll('input[name="voiceMode"]').forEach(input => {
     input.addEventListener("change", () => {
       if (!input.checked) return;
-      stopSpeech();
+      // The running run keeps the mode it started with (runVoiceMode), so
+      // don't cut off its current cue.
+      if (currentState !== STATES.RUNNING) stopSpeech();
       setVoiceMode(input.value);
+      warnIfSpeechMissing(input.value);
       // wrap in try/catch for Private Browsing / QuotaExceededError.
       try { localStorage.setItem(LS_KEYS.VOICE_MODE, input.value); } catch { /* storage unavailable */ }
     });
   });
+
+  /**
+   * Tells the user when a spoken cue mode can't speak here, so the ticks
+   * they will hear instead (see scheduleWebAudioTick) aren't a surprise.
+   * @param {string} mode - The cue mode just selected.
+   */
+  function warnIfSpeechMissing(mode) {
+    if ((mode === "count" || mode === "tens") && !isSpeechAvailable()) {
+      showToast("Speech isn't available in this browser — ticks will play instead.", "warning", 5000);
+    }
+  }
 
   // ── Settings: audio controls ──────────────────────────────────────
 
@@ -4635,10 +5989,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         _popBadge(UI.Settings.gracePeriodDisplay);
       }
       // Re-evaluate the grace×ISI warning on the setup screen whenever the
-      // slider moves — gracePeriodMs is now up-to-date so updateGraceIsiWarning()
-      // will reflect the correct effective value. This is the single canonical
-      // place to trigger the warning; the duplicate listener that previously
-      // existed near the ISI input wiring has been removed.
+      // slider moves — gracePeriodMs is already updated above, so
+      // updateGraceIsiWarning() reflects the new effective value. This is the
+      // only place a grace-period change triggers the warning.
       updateGraceIsiWarning();
     });
     // Badge input → slider
@@ -4673,8 +6026,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     /**
-     * Wires a stepper button pair (+/−) for an assay default input.
-     * On click: applies delta, clamps to input min/max, updates field, persists.
+     * Wires persistence for an assay default input.
+     *
+     * Deliberately does NOT bind the +/− buttons: index.html already binds a
+     * single delegated handler to every `.stepper-btn` on the page, and that
+     * handler clamps, writes the field, and dispatches `change`. Binding a
+     * second click handler here would make each button apply its delta twice
+     * (20 → 22 °C, 100 → 102 stimuli, 1.0 → 1.2 s ISI) and persist the doubled
+     * value. Listening for the `change` that handler dispatches
+     * keeps one source of truth for the arithmetic and one for the storage.
+     *
      * @param {HTMLInputElement} input - The number input.
      * @param {string}           storageField - Key suffix for localStorage.
      */
@@ -4712,33 +6073,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         _saveAssayDefault(storageField, val);
       }
 
-      // Persist on direct keyboard/spinner changes
+      // Persist on every committed change — typed/spinner edits, and the
+      // `change` the shared index.html stepper handler dispatches after a
+      // +/− click. _applyAndSave re-clamps to min/max/step, so the value that
+      // reaches localStorage is correct regardless of which path produced it.
       input.addEventListener("change", () => _applyAndSave(input.value));
-
-      // Wire stepper buttons via event delegation on the wrapper
-      const wrapper = input.closest(".stepper-wrapper");
-      if (!wrapper) return;
-      wrapper.querySelectorAll(".stepper-btn").forEach(btn => {
-        btn.addEventListener("click", () => {
-          const delta    = parseFloat(btn.dataset.delta) || 0;
-          const step     = parseFloat(input.step) || 1;
-          const decimals = (step.toString().split(".")[1] || "").length;
-          const current  = isNaN(parseFloat(input.value)) ? lastValid : parseFloat(input.value);
-          const raw      = parseFloat((current + delta).toFixed(decimals));
-          // Pre-clamp to [min, max] BEFORE setting input.value so that any
-          // synchronous "change" listener reading input.value sees the final
-          // committed value, not a transient out-of-range intermediate.
-          // _applyAndSave (triggered by the change event below) will also clamp
-          // and call toFixed, so this is a belt-and-suspenders guard.
-          const min     = input.min !== "" ? parseFloat(input.min) : -Infinity;
-          const max     = input.max !== "" ? parseFloat(input.max) :  Infinity;
-          const clamped = parseFloat(Math.max(min, Math.min(max, raw)).toFixed(decimals));
-          // Dispatch a change event so external listeners receive the
-          // update through standard DOM event bubbling.
-          input.value = clamped;
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        });
-      });
     }
 
     _wireDefaultStepper(UI.Settings.defaultISI,         "ISI");
@@ -4756,15 +6095,67 @@ document.addEventListener("DOMContentLoaded", async () => {
    * synchronous export to ensure the spinner appears before blocking.
    *
    */
+  /**
+   * What the open preview modal shows, so its "Export to Excel" button
+   * exports exactly that: the assay, dataset selection and options it was
+   * built from. A preview opened from Saved Assays is of an assay that is
+   * not loaded, so the Export screen's own handler can't be reused for it.
+   * @type {{assay: Object, configs: Object[], options: Object}|null}
+   */
+  let previewContext = null;
+
+  /**
+   * Builds the preview for `assay` and opens the modal. Throws if the
+   * sections can't be built; callers report that.
+   */
+  function openPreview(assay, configs, options) {
+    const sections = buildAllSections(assay, configs, options);
+    renderPreviewModal(sections, assay);
+    previewContext = { assay, configs, options };
+    UI.Displays.previewModal.hidden = false;
+  }
+
+  /**
+   * Exports `assay` to Excel, falling back to CSV when SheetJS isn't loaded
+   * (offline / CDN failure) and offering CSV when the Excel build fails.
+   *
+   * @param {HTMLButtonElement} btn - Button that shows the busy state.
+   */
+  function exportExcelWithFallback(btn, assay, configs, exportOptions) {
+    if (typeof XLSX === "undefined") {
+      return runWithSpinner(btn, "Exporting…", () => {
+        const result = performCSVExport(assay, configs, exportOptions);
+        if (!result.success) showToast("Export failed: " + result.error, "error", 6000);
+      });
+    }
+
+    return runWithSpinner(btn, "Exporting…", async () => {
+      const result = performExcelExport(assay, configs, exportOptions);
+      if (!result.success) {
+        // Non-destructive alternative-format offer — "primary" styling (not "danger")
+        // since accepting isn't a destructive action, unlike the modal's other call-sites.
+        const useCSV = await showConfirmModal(
+          "Excel export failed",
+          `${result.error} Would you like to export as CSV instead?`,
+          "Export CSV",
+          "primary"
+        );
+        if (useCSV) performCSVExport(assay, configs, exportOptions);
+      }
+    });
+  }
+
   async function runWithSpinner(btn, label, fn) {
-    const original = btn.textContent;
+    // Keep the child nodes, not just the text: these buttons carry an SVG
+    // icon that a textContent round-trip would strip for good.
+    const originalNodes = Array.from(btn.childNodes, n => n.cloneNode(true));
     btn.textContent = label;
     btn.classList.add("btn-loading");
     try {
       await new Promise(r => setTimeout(r, 0));  // yield one frame
       await fn();
     } finally {
-      btn.textContent = original;
+      btn.replaceChildren(...originalNodes);
       btn.classList.remove("btn-loading");
     }
   }
@@ -4777,31 +6168,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       showToast("Please select a dataset.", "info", 3000);
       return;
     }
-    const exportOptions = getExportOptions();
-
-    // If SheetJS isn't loaded (offline / CDN failure), fall back to CSV silently
-    if (typeof XLSX === "undefined") {
-      runWithSpinner(UI.Buttons.exportExcel, "Exporting…", () => {
-        const result = performCSVExport(currentAssay, configs, exportOptions);
-        if (!result.success) showToast("Export failed: " + result.error, "error", 6000);
-      });
+    if (!selectionHasRuns(currentAssay, configs)) {
+      showToast(NO_RUNS_SELECTED_MSG, "info", 5000);
       return;
     }
-
-    runWithSpinner(UI.Buttons.exportExcel, "Exporting…", async () => {
-      const result = performExcelExport(currentAssay, configs, exportOptions);
-      if (!result.success) {
-        // Non-destructive alternative-format offer — "primary" styling (not "danger")
-        // since accepting isn't a destructive action, unlike the modal's other call-sites.
-        const useCSV = await showConfirmModal(
-          "Excel export failed",
-          `${result.error} Would you like to export as CSV instead?`,
-          "Export CSV",
-          "primary"
-        );
-        if (useCSV) performCSVExport(currentAssay, configs, exportOptions);
-      }
-    });
+    exportExcelWithFallback(UI.Buttons.exportExcel, currentAssay, configs, getExportOptions());
   });
 
   // Dedicated CSV export button
@@ -4811,6 +6182,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       const configs = getExportConfigs();
       if (configs.length === 0) {
         showToast("Please select a dataset.", "info", 3000);
+        return;
+      }
+      if (!selectionHasRuns(currentAssay, configs)) {
+        showToast(NO_RUNS_SELECTED_MSG, "info", 5000);
         return;
       }
       runWithSpinner(UI.Buttons.exportCSV, "Exporting…", () => {
@@ -4828,11 +6203,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       showToast("Please select a dataset to preview.", "info", 3000);
       return;
     }
+    if (!selectionHasRuns(currentAssay, configs)) {
+      showToast(NO_RUNS_SELECTED_MSG, "info", 5000);
+      return;
+    }
 
     runWithSpinner(UI.Buttons.previewExcel, "Loading…", () => {
-      const sections = buildAllSections(currentAssay, configs, getExportOptions());
-      renderPreviewModal(sections);
-      UI.Displays.previewModal.hidden = false;
+      openPreview(currentAssay, configs, getExportOptions());
     }).catch(err => {
       // Without this catch, a data-shape edge case in buildAllSections/
       // renderPreviewModal becomes an unhandled rejection that the global
@@ -4855,8 +6232,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   UI.Buttons.exportFromPreview.addEventListener("click", () => {
-    UI.Buttons.exportExcel.click();       // Delegate to the main export handler
+    const ctx = previewContext;
     UI.Displays.previewModal.hidden = true;
+    if (!ctx) return;
+    // The Export screen's button shows the busy state: this one is in the
+    // modal that just closed.
+    exportExcelWithFallback(UI.Buttons.exportExcel, ctx.assay, ctx.configs, ctx.options);
   });
 
   // ── Export dataset list — checkbox delegation ────────────────────────────

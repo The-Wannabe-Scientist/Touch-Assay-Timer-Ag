@@ -10,7 +10,8 @@ import {
   escapeHTML,
   collectPooledRuns,
   collectTouchIndexExclusions,
-  summarizeTrialRunsByGenotype
+  summarizeTrialRunsByGenotype,
+  isRunEligible
 } from "../js/utils.js";
 
 describe("normaliseGenotype", () => {
@@ -22,6 +23,26 @@ describe("normaliseGenotype", () => {
 
   test("distinguishes genuinely different genotypes", () => {
     assert.notEqual(normaliseGenotype("mec-4"), normaliseGenotype("mec-3"));
+  });
+
+  test("keeps the symbols that carry genetic meaning", () => {
+    const distinct = [
+      ["mec-4(e1611)/+", "mec-4(e1611)"],  // heterozygote vs homozygote
+      ["lin-15/+",       "lin-15"],
+      ["N2 +ATR",        "N2 -ATR"],       // with vs without all-trans-retinal
+      ["Ex(+)",          "Ex(-)"],
+      ["+/+",            "-/-"],
+      ["α-syn",          "β-syn"],         // non-Latin letters
+      ["野生型",          "突变体"],
+    ];
+    for (const [a, b] of distinct) {
+      assert.notEqual(normaliseGenotype(a), normaliseGenotype(b), `${a} vs ${b}`);
+    }
+  });
+
+  test("still folds Unicode dashes and full-width characters", () => {
+    assert.equal(normaliseGenotype("mec\u20114"), normaliseGenotype("mec-4"));  // non-breaking hyphen
+    assert.equal(normaliseGenotype("ＷＴ"), normaliseGenotype("wt"));            // full-width letters (NFKC)
   });
 });
 
@@ -241,6 +262,45 @@ describe("collectTouchIndexExclusions", () => {
     };
     assert.deepEqual(collectTouchIndexExclusions(assay), []);
   });
+
+  test("says 'No complete bin' for an eligible run shorter than one bin", () => {
+    const assay = {
+      binSize: 10,
+      trials: [{
+        trialIndex: 1,
+        status: "completed",
+        runs: [{ genotype: "WT", animalIndex: 1, eligibleForAnalysis: true, values: [1, 1, 1] }]
+      }]
+    };
+    const [row] = collectTouchIndexExclusions(assay);
+    assert.equal(row[3], "No complete bin (3 of 10 stimuli recorded)");
+  });
+
+  test("scans exactly the exported trials when trialIds is given", () => {
+    const run = { genotype: "WT", animalIndex: 1, eligibleForAnalysis: true, values: [0, 0] };
+    const assay = {
+      binSize: 2,
+      trials: [
+        { trialId: "done",  trialIndex: 1, status: "completed", runs: [run] },
+        { trialId: "gone",  trialIndex: 2, status: "abandoned", runs: [run] }
+      ]
+    };
+    assert.deepEqual(collectTouchIndexExclusions(assay, { trialIds: new Set() }), []);
+    assert.deepEqual(
+      collectTouchIndexExclusions(assay, { trialIds: new Set(["gone"]) }).map(r => r[0]),
+      [2]
+    );
+  });
+});
+
+describe("isRunEligible", () => {
+  test("counts any finished run marked eligible, including a manual override", () => {
+    assert.equal(isRunEligible({ status: "completed",    eligibleForAnalysis: true }), true);
+    assert.equal(isRunEligible({ status: "stoppedEarly", eligibleForAnalysis: true }), true);
+    assert.equal(isRunEligible({ status: "completed",    eligibleForAnalysis: false }), false);
+    assert.equal(isRunEligible({ status: "active",       eligibleForAnalysis: true }), false);
+    assert.equal(isRunEligible({ status: "completed",    eligibleForAnalysis: null }), false);
+  });
 });
 
 describe("summarizeTrialRunsByGenotype", () => {
@@ -250,7 +310,7 @@ describe("summarizeTrialRunsByGenotype", () => {
     assert.deepEqual(summary["WT"], { total: 0, eligible: 0, ineligible: 0, runs: [] });
   });
 
-  test("tallies completed+eligible runs as eligible, everything else as ineligible", () => {
+  test("tallies finished runs marked eligible (including overrides) as eligible, the rest as ineligible", () => {
     const trial = {
       runs: [
         { genotype: "WT", status: "completed",    eligibleForAnalysis: true  },
@@ -260,8 +320,10 @@ describe("summarizeTrialRunsByGenotype", () => {
       ]
     };
     const summary = summarizeTrialRunsByGenotype(["WT"], trial);
+    // The stopped-early run was manually marked Eligible: the export
+    // includes it, so the progress table counts it too.
     assert.deepEqual(summary["WT"], {
-      total: 4, eligible: 1, ineligible: 3,
+      total: 4, eligible: 2, ineligible: 2,
       runs: trial.runs
     });
   });

@@ -92,8 +92,8 @@ Fill in the **Assay Setup** form before beginning:
 |---|---|
 | **Experiment ID** | A name for this assay (saved with your data) |
 | **Genotypes** | Type a genotype label and press **Enter** or **,** to add it as a chip. Add as many as needed. |
-| **Temperature (°C)** | Ambient temperature; logged with the assay |
-| **Humidity (% RH)** | Relative humidity; logged with the assay |
+| **Temperature (°C)** | Ambient temperature; logged with the assay. Optional — leave blank to record "N/A" |
+| **Humidity (% RH)** | Relative humidity; logged with the assay. Optional — leave blank to record "N/A" |
 | **Inter-stimulus Interval (s)** | Time between stimuli (e.g. `1.0` for 1-second ISI) |
 | **Total Number of Stimulations** | How many stimuli to deliver per animal (e.g. `100`) |
 | **Bin Size** | Number of stimuli grouped into each analysis bin (e.g. `10`) |
@@ -251,7 +251,7 @@ Access **Settings** from the ⋮ overflow menu in the header.
 | **Tick Pitch** | 200 – 2000 Hz (preview plays on slider move) |
 | **Speech Lead** | How many ms before stimulus the spoken count starts |
 | **Audio Cue Mode** | Tick / Count / Bins / Tens |
-| **Voice** | Select from available TTS voices in your browser |
+| **Voice** | Chosen automatically: an on-device English voice is preferred, since network voices are silent offline. If speech is unavailable or fails, Count/Tens modes play ticks instead |
 | **Warmup Countdown** | Enable/disable; 1–60 s duration (default 3 s) |
 | **Human Reaction Grace Period** | 0–400 ms (default 250 ms) — accepts a late tap as a valid non-response after the window closes |
 
@@ -280,7 +280,8 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
 - All assay data is stored **locally** in your browser's **IndexedDB** (`touch-assay-db`).
 - **No data is ever sent to a server.** There is no backend, no analytics, no telemetry.
 - Data persists across sessions but is **browser-local** — it will not sync between devices.
-- Clearing your browser's site data deletes all saved assays. Back up regularly from **☰ → Saved Assays → Export Full Backup** — a re-importable JSON snapshot of every assay/trial/run, separate from the analysis Excel/CSV export.
+- Clearing your browser's site data deletes all saved assays. The browser can also evict that data itself when the device runs low on storage; the app asks for persistent storage to prevent this, and says once if the browser refuses. Installing the app (Add to Home Screen) makes the request more likely to be granted. Safari can also clear the data of a site not used for a while when it is opened in a tab rather than installed.
+- Back up regularly from **☰ → Saved Assays → Export Full Backup** — a re-importable JSON snapshot of every assay/trial/run, separate from the analysis Excel/CSV export.
 - A banner will appear if IndexedDB is unavailable (e.g. private/incognito mode) — in that case, data is **not** saved and you should export immediately after each trial.
 
 ---
@@ -295,8 +296,11 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
 ├── service-worker.js       # Offline caching via Cache API
 ├── icon-192.png            # PWA icon (192×192)
 ├── icon-512.png            # PWA icon (512×512, maskable)
+├── Touch_assay_logo_main.png  # Full-resolution logo artwork
 ├── armband_build_guide.md  # Full hardware build guide for the haptic armband
 ├── package.json            # `npm test` runs the unit test suite; no runtime deps
+├── jsconfig.json           # Editor type-checking for js/ (no build step)
+├── LICENSE                 # MIT licence
 ├── fonts/                  # Self-hosted webfonts (no external CDN dependency)
 ├── test/                   # Unit tests (node --test) for utils/models/export/db
 ├── js/
@@ -308,7 +312,8 @@ Once installed, the app opens in standalone mode (no browser chrome) and behaves
 │   ├── export.js           # Excel (SheetJS) / CSV / HTML preview generation
 │   ├── utils.js            # Binning, Touch Index, pooled-run computation
 │   ├── toast.js            # Non-blocking notification toasts
-│   └── timer-worker.js     # Web Worker — drift-compensated ISI scheduler
+│   ├── timer-worker.js     # Web Worker — drift-compensated ISI scheduler
+│   └── global.d.ts         # Type declarations for globals (SheetJS, window hooks)
 └── firmware/
     ├── haptic_armband/
     │   └── haptic_armband.ino  # Full BLE firmware (LRA or ERM — set #define at top)

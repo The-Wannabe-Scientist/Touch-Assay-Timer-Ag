@@ -164,7 +164,7 @@
               <label for="temperature">Temperature (°C)</label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="temperature" data-delta="-1" aria-label="Decrease temperature">−</button>
-                <input type="number" id="temperature" min="-10" max="60" value="20" required inputmode="decimal">
+                <input type="number" id="temperature" min="-10" max="60" step="0.1" value="20" inputmode="decimal">
                 <button type="button" class="stepper-btn" data-target="temperature" data-delta="1" aria-label="Increase temperature">+</button>
               </div>
             </div>
@@ -173,7 +173,7 @@
               <label for="humidity">Humidity (% RH)</label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="humidity" data-delta="-1" aria-label="Decrease humidity">−</button>
-                <input type="number" id="humidity" min="0" max="100" value="60" required inputmode="decimal">
+                <input type="number" id="humidity" min="0" max="100" step="0.1" value="60" inputmode="decimal">
                 <button type="button" class="stepper-btn" data-target="humidity" data-delta="1" aria-label="Increase humidity">+</button>
               </div>
             </div>
@@ -189,7 +189,7 @@
               </label>
               <div class="stepper-wrapper">
                 <button type="button" class="stepper-btn" data-target="ISI" data-delta="-0.1" aria-label="Decrease ISI">−</button>
-                <input type="number" id="ISI" min="0.1" step="0.1" value="1" required inputmode="decimal">
+                <input type="number" id="ISI" min="0.1" step="0.01" value="1" required inputmode="decimal">
                 <button type="button" class="stepper-btn" data-target="ISI" data-delta="0.1" aria-label="Increase ISI">+</button>
               </div>
               <!-- Grace period × ISI conflict warning — shown by JS when grace > halfISI -->
@@ -727,7 +727,7 @@
             <label for="defaultTemperature">Temperature (°C)</label>
             <div class="stepper-wrapper">
               <button type="button" class="stepper-btn" data-target="defaultTemperature" data-delta="-1" aria-label="Decrease default temperature">−</button>
-              <input type="number" id="defaultTemperature" min="-10" max="60" value="20" inputmode="decimal">
+              <input type="number" id="defaultTemperature" min="-10" max="60" step="0.1" value="20" inputmode="decimal">
               <button type="button" class="stepper-btn" data-target="defaultTemperature" data-delta="1" aria-label="Increase default temperature">+</button>
             </div>
           </div>
@@ -735,7 +735,7 @@
             <label for="defaultHumidity">Humidity (% RH)</label>
             <div class="stepper-wrapper">
               <button type="button" class="stepper-btn" data-target="defaultHumidity" data-delta="-1" aria-label="Decrease default humidity">−</button>
-              <input type="number" id="defaultHumidity" min="0" max="100" value="60" inputmode="decimal">
+              <input type="number" id="defaultHumidity" min="0" max="100" step="0.1" value="60" inputmode="decimal">
               <button type="button" class="stepper-btn" data-target="defaultHumidity" data-delta="1" aria-label="Increase default humidity">+</button>
             </div>
           </div>
@@ -756,7 +756,7 @@
             <label for="defaultISI">Inter-stimulus Interval (s)</label>
             <div class="stepper-wrapper">
               <button type="button" class="stepper-btn" data-target="defaultISI" data-delta="-0.1" aria-label="Decrease default ISI">−</button>
-              <input type="number" id="defaultISI" min="0.1" step="0.1" value="1" inputmode="decimal">
+              <input type="number" id="defaultISI" min="0.1" step="0.01" value="1" inputmode="decimal">
               <button type="button" class="stepper-btn" data-target="defaultISI" data-delta="0.1" aria-label="Increase default ISI">+</button>
             </div>
           </div>
@@ -1065,15 +1065,27 @@
     const textInput  = document.getElementById('genotypeTextInput');
     const hiddenInput = document.getElementById('genotypes');
 
-    // normaliseGenotype() is imported from utils.js — was previously
-    // duplicated here, which let the two copies silently drift.
+    // normaliseGenotype() comes from utils.js so the chip input and main.js
+    // apply exactly the same duplicate-detection rule.
 
     function getValues() {
       return Array.from(chipList.querySelectorAll('.chip')).map(c => c.dataset.value);
     }
 
+    /**
+     * Mirrors the current chip list into the hidden #genotypes input and
+     * notifies listeners.
+     *
+     * The `change` dispatch lives here rather than at each call site because
+     * assigning `.value` programmatically fires no event, and main.js's
+     * draft auto-save listens for `change` on this input alone. Dispatching
+     * from the one place that writes the value means no mutation path (add,
+     * remove, paste, reorder) can forget it and leave the saved draft behind
+     * the visible chips.
+     */
     function syncHidden() {
       hiddenInput.value = getValues().join(',');
+      hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     /** Clears a lingering duplicate tooltip from the wrapper. */
@@ -1160,7 +1172,9 @@
     }
 
     function addChip(raw) {
-      const val = raw.replace(/,/g, '').trim();
+      // Collapse internal whitespace (tabs from a pasted spreadsheet row,
+      // double spaces) so a chip never holds invisible separators.
+      const val = raw.replace(/,/g, '').replace(/\s+/g, ' ').trim();
       if (!val) return;
 
       // Hard cap: refuse to add if we're already at the maximum.
@@ -1194,8 +1208,7 @@
       });
       chip.addEventListener('dragend', function() {
         chip.classList.remove('dragging');
-        syncHidden();
-        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+        syncHidden();  // also dispatches `change` — see syncHidden().
       });
 
       const label = document.createElement('span');
@@ -1209,13 +1222,11 @@
       removeBtn.textContent = '✕';
       removeBtn.addEventListener('click', function () {
         chip.remove();
+        // syncHidden() dispatches `change`, which is what persists the updated
+        // genotype list to the localStorage draft — without it the removed chip
+        // would reappear on the next page load.
         syncHidden();
         updateGenotypeMaxHint();
-        // Notify main.js's scheduleDraftSave listener so the updated genotype list
-        // is persisted to localStorage. Without this dispatch, removing a chip here
-        // only updates the hidden input value in memory — the draft is never written,
-        // so the removed chip reappears on the next page load.
-        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
       });
 
       chip.appendChild(label);
@@ -1226,7 +1237,20 @@
     }
 
     textInput.addEventListener('keydown', function (e) {
-      if ((e.key === 'Enter' || e.key === ',') && textInput.value.trim()) {
+      if (e.key === 'Enter') {
+        // Never let Enter here implicitly submit #setupForm — that would
+        // create the assay before the rest of the form was reviewed.
+        e.preventDefault();
+        if (e.repeat) return;  // a held Enter adds one chip, not more
+        if (textInput.value.trim()) {
+          addChip(textInput.value);
+          textInput.value = '';
+        } else {
+          textInput.blur();  // enterkeyhint="done" on an empty box: close the keyboard
+        }
+        return;
+      }
+      if (e.key === ',' && textInput.value.trim()) {
         e.preventDefault();
         addChip(textInput.value);
         textInput.value = '';
@@ -1235,8 +1259,8 @@
         var chips = chipList.querySelectorAll('.chip');
         if (chips.length) {
           chips[chips.length - 1].remove();
-          syncHidden();
-          hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+          syncHidden();  // also dispatches `change` — see syncHidden().
+          updateGenotypeMaxHint();
         }
       }
     });
@@ -1252,18 +1276,25 @@
       }
     });
 
-    // Paste handler: split pasted text on commas, newlines, and carriage returns,
-    // then add each non-empty token as a chip.  Splitting on \n / \r handles
-    // the common case of pasting a column from a spreadsheet (Excel, Sheets),
-    // where cells are separated by newlines rather than commas.
+    // Paste handler: split pasted text on commas, tabs, newlines and carriage
+    // returns, then add each non-empty token as a chip. Tabs and newlines
+    // cover pasting a row or a column from a spreadsheet (Excel, Sheets).
+    // The paste is merged with any text already typed around the caret, and a
+    // plain fragment with no separator is left to the browser to insert.
     // Shows a brief count toast when ≥2 chips are added in one paste action,
     // and an advisory toast when nothing was added (all duplicates or cap hit).
     textInput.addEventListener('paste', function (e) {
-      e.preventDefault();
       const raw = (e.clipboardData || window.clipboardData).getData('text');
       if (!raw) return;
+      if (!/[,\t\n\r]/.test(raw)) return;  // plain fragment: normal caret insertion
+      e.preventDefault();
+      const v = textInput.value;
+      const start = textInput.selectionStart ?? v.length;
+      const end   = textInput.selectionEnd ?? v.length;
+      const merged = v.slice(0, start) + raw + v.slice(end);
+      textInput.value = '';
       const countBefore = chipList.querySelectorAll('.chip').length;
-      raw.split(/[,\n\r]+/).forEach(function (p) { addChip(p); });
+      merged.split(/[,\t\n\r]+/).forEach(function (p) { addChip(p); });
       const countAfter = chipList.querySelectorAll('.chip').length;
       const added = countAfter - countBefore;
       if (typeof window.showToast === 'function') {
@@ -1430,6 +1461,12 @@
                   // document.body carries the CSS state class (e.g. "state-running")
                   // set by setState() in main.js — no import needed here.
                   const reloadAction = () => {
+                    // A completed run that couldn't be saved exists only in
+                    // memory (see unsavedRuns in main.js); a reload would lose it.
+                    if (window.__touchAssayHasUnsavedRuns?.()) {
+                      window.showToast?.("Update deferred: a completed run isn't saved yet. Export or finish the trial first.", "warning", 6000);
+                      return;
+                    }
                     if (document.body.classList.contains("state-running")) {
                       // Can't use window.showToast here safely (separate call stack),
                       // so fall back to a non-blocking console warning. The user's

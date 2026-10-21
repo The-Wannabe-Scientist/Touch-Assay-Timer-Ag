@@ -65,20 +65,28 @@
 
 /**
  * Normalises a genotype label for fuzzy duplicate comparison.
- * Strips: case, whitespace, hyphens (including Unicode dash variants),
- * underscores, and all remaining non-alphanumeric characters.
  *
- * This function is the single source of truth for normalisation — the same
- * logic is mirrored in the chip-input IIFE in index.html.
+ * Ignores the typo-level differences: case, whitespace, brackets and other
+ * punctuation, and a hyphen or underscore joining two words or numbers
+ * ("Wild-Type" = "wildtype", "mec-4(u253)" = "MEC4 U253"). Keeps what carries
+ * genetic meaning: letters and digits of any script ("α-syn" ≠ "β-syn"), "+",
+ * "/", and a free-standing "-" ("lin-15/+" ≠ "lin-15", "N2 +ATR" ≠ "N2 -ATR").
+ *
+ * This function is the single source of truth for normalisation — the
+ * chip-input IIFE in index.html imports it.
  *
  * @param {string} str - Raw genotype label.
- * @returns {string} Lower-cased alphanumeric-only key.
+ * @returns {string} Lower-cased key of letters, digits, "+", "-" and "/".
  */
 export function normaliseGenotype(str) {
   return String(str)
+    .normalize('NFKC')
     .toLowerCase()
-    .replace(/[\s\-_\u2010-\u2015\u2212]+/g, '')  // Whitespace + hyphens (all Unicode dash variants).
-    .replace(/[^a-z0-9]/g, '');                    // Strip remaining punctuation / symbols.
+    .replace(/[\u2010-\u2015\u2212]/g, '-')                     // Unicode dash variants -> "-".
+    // A capture group, not a lookbehind: lookbehind is a parse error in
+    // Safari before 16.4 and would stop this module loading at all.
+    .replace(/([\p{L}\p{N}])[-_]+(?=[\p{L}\p{N}])/gu, '$1')     // Word-joining "-"/"_": "wild-type" -> "wildtype".
+    .replace(/[^\p{L}\p{N}+\-\/]/gu, '');                       // Drop spaces, brackets, other punctuation.
 }
 
 /**
@@ -116,12 +124,13 @@ export function validateInputs(values) {
       errors.push("Genotype labels must not be empty.");
     }
     // Fuzzy duplicate check — same normaliseGenotype() the chip-input UI imports.
-    // Two labels that differ only in case, spacing, hyphens, or punctuation
-    // (e.g. "Wild-Type" vs "wildtype") are treated as the same genotype because
-    // they would produce identical export column headers after normalisation.
+    // Two labels that differ only in case, spacing, brackets or a word-joining
+    // hyphen (e.g. "Wild-Type" vs "wildtype") are almost certainly the same
+    // genotype typed twice. Export keys on the raw label, so this is about
+    // catching typos, not about avoiding clashing column headers.
     const normKeys = values.genotypes.map(g => normaliseGenotype(g));
     if (new Set(normKeys).size !== values.genotypes.length) {
-      errors.push("Genotype labels must be unique (ignoring case, spaces, and punctuation).");
+      errors.push("Genotype labels must be unique (ignoring case, spaces, brackets, and hyphens between words).");
     }
   }
 
@@ -303,9 +312,8 @@ export function binRunValues(values, binSize) {
  * @returns {number[]|null} Normalised ratios, or null if baseline is invalid.
  */
 export function computeTouchIndexBins(binnedPercentages) {
-  // Explicitly guard the empty-array case before reading index 0.
-  // Previously this relied on binnedPercentages[0] === undefined being == null,
-  // which is correct but fragile — a future strict-equality change would break it.
+  // Explicitly guard the empty-array case before reading index 0, rather than
+  // relying on binnedPercentages[0] (undefined) loosely equalling null below.
   if (!binnedPercentages || binnedPercentages.length === 0) return null;
 
   const baseline = binnedPercentages[0];
@@ -331,8 +339,7 @@ export function computeTouchIndexBins(binnedPercentages) {
  * Escapes HTML special characters to prevent XSS when rendering
  * user-supplied strings (e.g. assay names, genotype labels) into innerHTML.
  *
- * Shared between main.js and export.js as a single source of truth —
- * previously both modules had an identical private copy.
+ * Shared by main.js and export.js so both escape user strings identically.
  *
  * @param {string} str - Raw user input string.
  * @returns {string} Safely escaped HTML string.
@@ -383,14 +390,17 @@ export function collectPooledRuns(assay, options = {}) {
  * whether preview, export, or CSV functions have been called beforehand.
  *
  * @param {Assay} assay - The full assay object (needs assay.binSize).
+ * @param {Object} [options]
+ * @param {Set<string>|null} [options.trialIds=null] - The trials being
+ *   exported (as strings). When omitted, every completed trial is scanned.
  * @returns {Array<[number, string, number|string, string]>}
  *   Each row: [trialIndex, genotype, animalIndex, exclusionReason]
  */
-export function collectTouchIndexExclusions(assay) {
-  // Only scan completed trials — abandoned or still-active trials must not
-  // produce spurious exclusion rows in the export output.
+export function collectTouchIndexExclusions(assay, { trialIds = null } = {}) {
+  // Only scan the trials in the export — an unselected trial must not add
+  // rows, and an exported abandoned trial must not be left out.
   return assay.trials
-    .filter(t => t.status === "completed")
+    .filter(t => trialIds ? trialIds.has(String(t.trialId)) : t.status === "completed")
     .flatMap(trial =>
       trial.runs
         // Only eligible runs can be TI-excluded. Ineligible runs (stopped early,
@@ -398,20 +408,32 @@ export function collectTouchIndexExclusions(assay) {
         // which causes computeTouchIndexBins to return null, producing spurious
         // exclusion rows in the export sheet.
         .filter(run => run.eligibleForAnalysis)
-        .filter(run => {
+        .flatMap(run => {
           // A run is excluded if its Touch Index cannot be computed —
-          // i.e. computeTouchIndexBins returns null (baseline bin = 0).
+          // computeTouchIndexBins returns null when there is no complete bin
+          // or the baseline bin is 0.
           const binned = binRunValues(run.values, assay.binSize);
-          return computeTouchIndexBins(binned) === null;
+          if (computeTouchIndexBins(binned) !== null) return [];
+          const n = Array.isArray(run.values) ? run.values.length : 0;
+          const reason = binned.length === 0
+            ? `No complete bin (${n} of ${assay.binSize} stimuli recorded)`
+            : "Baseline bin = 0 (animal had no responses in the first bin)";
+          return [[trial.trialIndex, run.genotype, run.animalIndex, reason]];
         })
-        .map(run => [
-          trial.trialIndex,
-          run.genotype,
-          run.animalIndex,
-          "Baseline bin = 0 (animal had no responses in the first bin)"
-        ])
     );
 }
+
+/**
+ * Whether a run counts as eligible for analysis: it has finished, and its
+ * eligibility — automatic or a manual override — is "eligible". The one rule
+ * the progress table, the counters, animal numbering and the export share,
+ * so a stopped-early run that the experimenter marked Eligible counts
+ * everywhere it is exported.
+ *
+ * @param {Run} r
+ * @returns {boolean}
+ */
+export const isRunEligible = r => r.status !== "active" && r.eligibleForAnalysis === true;
 
 /**
  * Tallies a single trial's runs into per-genotype totals for the live
@@ -439,7 +461,7 @@ export function summarizeTrialRunsByGenotype(genotypes, trial) {
       if (!summary[r.genotype]) return;
       if (r.status === "active") return;  // Don't count in-progress runs
       summary[r.genotype].total++;
-      if (r.status === "completed" && r.eligibleForAnalysis) {
+      if (isRunEligible(r)) {
         summary[r.genotype].eligible++;
       } else {
         summary[r.genotype].ineligible++;

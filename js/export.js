@@ -51,8 +51,19 @@ import {
 export const RUN_STATUS_LABELS = {
   completed:    "Completed",
   stoppedEarly: "Stopped Early",
-  abandoned:    "Abandoned"
+  abandoned:    "Abandoned",
+  // A run whose final save failed is still "active" in IDB until the queue
+  // saves it; never let the raw status string reach a sheet.
+  active:       "Incomplete (unsaved)"
 };
+
+
+/**
+ * Orders two runs by when they started: runSeq (the run's position in its
+ * trial, which doesn't depend on the wall clock), then startedAt for older
+ * runs that have no runSeq.
+ */
+const byStartOrder = (a, b) => (a.runSeq ?? -1) - (b.runSeq ?? -1) || (a.startedAt || 0) - (b.startedAt || 0);
 
 
 /* ==========================================================================
@@ -107,11 +118,13 @@ function groupAndSortRuns(runs, genotypes, isPooled = false) {
   genotypes.forEach(g => {
     if (isPooled) {
       runsByGenotype[g].sort((a, b) =>
-        a.trialIndex - b.trialIndex || a.animalIndex - b.animalIndex
+        a.trialIndex - b.trialIndex || a.animalIndex - b.animalIndex || byStartOrder(a, b)
       );
       runsByGenotype[g].forEach((run, i) => { run.globalAnimalIndex = i + 1; });
     } else {
-      runsByGenotype[g].sort((a, b) => a.animalIndex - b.animalIndex);
+      // Start order breaks ties, so which attempt gets "(retry N)" doesn't
+      // depend on the order the runs arrived in.
+      runsByGenotype[g].sort((a, b) => a.animalIndex - b.animalIndex || byStartOrder(a, b));
       // A failed attempt and its successful retry share the same animalIndex
       // by design (see startRun() — only completed && eligibleForAnalysis
       // runs advance the counter), so both would otherwise render as
@@ -260,8 +273,11 @@ export function buildMetadata2D(assay) {
     ["Date Created",                 formatDateTime(assay.createdAt)],
     ["Last Modified",                assay.lastModifiedAt ? formatDateTime(assay.lastModifiedAt) : "N/A"],
     ["Genotypes",                    Array.isArray(assay.genotypes) ? assay.genotypes.join(", ") : "N/A"],
-    ["Temperature",                  assay.temperature !== undefined ? `${assay.temperature} °C` : "N/A"],
-    ["Humidity",                     assay.humidity    !== undefined ? `${assay.humidity} % RH`  : "N/A"],
+    // != null (not !== undefined): temperature/humidity are optional, and a
+    // blank field is stored as null — which would otherwise render literally
+    // as "null °C" in the exported metadata sheet.
+    ["Temperature",                  assay.temperature != null ? `${assay.temperature} °C` : "N/A"],
+    ["Humidity",                     assay.humidity    != null ? `${assay.humidity} % RH`  : "N/A"],
     ["Inter-stimulus Interval (s)",  assay.isi],
     ["Number of Stimulations",       assay.stimCount],
     ["Bin Size",                     assay.binSize]
@@ -306,8 +322,8 @@ const HTML_PREVIEW_HEADER_LABELS = new Set([
 export function buildHtmlTableFrom2D(title, data2D) {
   if (!data2D || data2D.length === 0) return "";
 
-  // Use the imported escapeHTML() — previously a hand-rolled replacement
-  // only covered &, <, > — omitting " and ' which escapeHTML handles correctly.
+  // escapeHTML() covers all five HTML-significant characters (& < > " '),
+  // so the title is safe to interpolate into markup.
   const titleHtml = title ? `<h3>${escapeHTML(title)}</h3>` : "";
 
   // Column index of a tidy-format "Eligible" column, if this table has one —
@@ -995,9 +1011,9 @@ export function buildPooledBinned2D(assay, options = {}, _runs = null, _cache = 
     ...rawRows,
     // Separator rows must span the FULL header width (all run columns
     // plus the spacer columns between genotypes), not just the static header fields.
-    // The old hardcoded fixed-width arrays caused SheetJS to detect fewer columns than the
-    // data rows had, producing inconsistent column widths in the Excel preview for any
-    // experiment with more than one run per genotype.
+    // Narrower separator rows would make SheetJS detect fewer columns than the
+    // data rows have, producing inconsistent column widths in the Excel preview for
+    // any experiment with more than one run per genotype.
     ...Array(3).fill(Array(hGenotype.length).fill("")),
     summaryHeader,
     ...summaryRows
@@ -1284,12 +1300,17 @@ export function buildAllSections(assay, exportConfigs, options = {}) {
     data2D:         buildMetadata2D(assay)
   });
 
+  // Every trial whose runs reach this export, so the Touch Index exclusions
+  // below list exactly those.
+  const exportedTrialIds = new Set();
+
   exportConfigs.forEach(config => {
 
     // ── Per-trial sections ─────────────────────────────────────────────────
     if (config.type === "trial") {
       const trial = assay.trials.find(t => String(t.trialId) === String(config.trialId));
       if (!trial) return;
+      exportedTrialIds.add(String(trial.trialId));
 
       sections.push({
         name:           `Trial ${trial.trialIndex} - Raw`,
@@ -1327,7 +1348,11 @@ export function buildAllSections(assay, exportConfigs, options = {}) {
         });
         sections.push({
           name:           `Trial ${trial.trialIndex} - Binned (Tidy)`,
-          excelSheetName: `Trial_${trial.trialIndex}_BinnedTidy`,
+          // "_BinTidy", not "_BinnedTidy": the pooled counterpart below would
+          // otherwise reach 33 chars, over Excel's hard 31-char sheet-name cap,
+          // and SheetJS throws rather than truncating. Kept consistent here so
+          // the two tidy sheets are named the same way.
+          excelSheetName: `Trial_${trial.trialIndex}_BinTidy`,
           data2D:         buildTrialBinnedTidy2D(trial, assay),
           large:          true
         });
@@ -1339,6 +1364,9 @@ export function buildAllSections(assay, exportConfigs, options = {}) {
       const suffix   = config.includeAbandoned ? "All Trials"  : "Completed Trials";
       const xlSuffix = config.includeAbandoned ? "AllTrials"   : "CompletedTrials";
       const poolOpt  = { includeAbandoned: config.includeAbandoned };
+      assay.trials
+        .filter(t => config.includeAbandoned || t.status === "completed")
+        .forEach(t => exportedTrialIds.add(String(t.trialId)));
 
       // Collect runs once and build a shared binning cache for this config.
       const runs  = collectPooledRuns(assay, poolOpt);
@@ -1377,7 +1405,11 @@ export function buildAllSections(assay, exportConfigs, options = {}) {
         });
         sections.push({
           name:           `Pooled (${suffix}) - Binned (Tidy)`,
-          excelSheetName: `Pooled_${xlSuffix}_BinnedTidy`,
+          // "Pooled_CompletedTrials_BinnedTidy" is 33 chars — over Excel's
+          // 31-char sheet-name cap, which made SheetJS throw and knocked the
+          // whole workbook down to the CSV fallback whenever tidy format was
+          // enabled on the (default-checked) completed-trials pool.
+          excelSheetName: `Pooled_${xlSuffix}_BinTidy`,
           data2D:         buildPooledBinnedTidy2D(assay, poolOpt, runs, cache),
           large:          true
         });
@@ -1386,7 +1418,7 @@ export function buildAllSections(assay, exportConfigs, options = {}) {
   });
 
   // ── Touch Index exclusions (appended only if any runs were excluded) ──────
-  const tiExclusions = collectTouchIndexExclusions(assay);
+  const tiExclusions = collectTouchIndexExclusions(assay, { trialIds: exportedTrialIds });
   if (tiExclusions.length > 0) {
     sections.push({
       name:           "Touch Index Exclusions",
@@ -1614,6 +1646,29 @@ export function injectLiveFormulas(sheet, data2D) {
   });
 }
 
+/**
+ * Deletes every formula-less empty-string cell from a SheetJS sheet, so
+ * Excel sees a true blank there.
+ *
+ * aoa_to_sheet stores "" as a zero-length TEXT cell, and Excel treats that
+ * differently from a blank inside the live formulas: `"" - mean` is #VALUE!
+ * in the SEM's SUMPRODUCT, and COUNTIFS(..., "<>") counts it. A run with no
+ * value in a bin (e.g. one stopped early) then breaks that bin's SEM and
+ * inflates its N as soon as Excel recalculates.
+ *
+ * Must run AFTER injectLiveFormulas(), which attaches formulas to the ""
+ * summary cells — those keep their .f and are left in place.
+ *
+ * @param {Object} sheet - SheetJS worksheet (mutated in place).
+ */
+export function blankEmptyTextCells(sheet) {
+  Object.keys(sheet).forEach(addr => {
+    if (addr[0] === "!") return;  // Sheet metadata (!ref, !cols, !merges, ...), not a cell.
+    const cell = sheet[addr];
+    if (cell && cell.t === "s" && cell.v === "" && !cell.f) delete sheet[addr];
+  });
+}
+
 
 /* ==========================================================================
    Master Export Functions
@@ -1643,7 +1698,14 @@ export function performExcelExport(currentAssay, exportConfigs, options = {}) {
     const wb       = XLSX.utils.book_new();
     const sections = buildAllSections(currentAssay, exportConfigs, options);
 
+    // Sheet names must be unique in a workbook — book_append_sheet throws on
+    // a repeat, which two trials sharing a trialIndex (e.g. from an older
+    // backup merge) would otherwise cause. Excel caps names at 31 chars.
+    const usedNames = new Set();
     sections.forEach(({ excelSheetName, data2D }) => {
+      let sheetName = excelSheetName;
+      for (let n = 2; usedNames.has(sheetName); n++) sheetName = `${excelSheetName.slice(0, 28)}_${n}`;
+      usedNames.add(sheetName);
       const sheet = XLSX.utils.aoa_to_sheet(data2D);
 
       if (excelSheetName === "Assay_Metadata") {
@@ -1655,9 +1717,10 @@ export function performExcelExport(currentAssay, exportConfigs, options = {}) {
         // rows (Assay Metadata is already excluded above; Touch Index
         // Exclusions has neither and is left untouched by the scan itself).
         injectLiveFormulas(sheet, data2D);
+        blankEmptyTextCells(sheet);
       }
 
-      XLSX.utils.book_append_sheet(wb, sheet, excelSheetName);
+      XLSX.utils.book_append_sheet(wb, sheet, sheetName);
     });
 
     XLSX.writeFile(wb, `${currentAssay.assayName || "Assay"}_Export.xlsx`);
@@ -1674,18 +1737,27 @@ export function performExcelExport(currentAssay, exportConfigs, options = {}) {
    CSV Fallback Export (No External Dependencies)
    ========================================================================== */
 
+/** Leading characters that make Excel/LibreOffice read a CSV cell as a formula. */
+const CSV_FORMULA_TRIGGER = /^[=+\-@\t\r]/;
+
 /**
  * Converts a single 2D row into a valid CSV line.
  * Cells containing commas, newlines, or quotes are wrapped in double-quotes,
  * and any existing double-quotes within those cells are escaped as "".
+ * Text that starts like a formula (e.g. a genotype or reason typed as
+ * "=…", "+…", "-…" or "@…") gets a leading apostrophe so a spreadsheet
+ * shows it as text instead of evaluating it; real numbers are left alone.
  *
  * @param {any[]} row - Array of cell values.
  * @returns {string} A properly escaped CSV line (no trailing newline).
  */
-function arrayToCSVRow(row) {
+export function arrayToCSVRow(row) {
   return row.map(cell => {
-    const val = (cell === null || cell === undefined) ? "" : String(cell);
-    if (val.includes(",") || val.includes("\n") || val.includes('"')) {
+    let val = (cell === null || cell === undefined) ? "" : String(cell);
+    if (typeof cell === "string" && CSV_FORMULA_TRIGGER.test(val) && isNaN(Number(val))) {
+      val = "'" + val;
+    }
+    if (/[",\n\r]/.test(val)) {
       return `"${val.replace(/"/g, '""')}"`;
     }
     return val;
@@ -1724,7 +1796,10 @@ export function performCSVExport(currentAssay, exportConfigs, options = {}) {
     });
 
     // Trigger file download — no DOM append/remove needed in modern browsers.
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    // A leading U+FEFF (written by Blob as EF BB BF) makes Excel decode the
+    // file as UTF-8 instead of the system code page; without it the en dash
+    // in every bin label, "°C" and non-ASCII genotype names come out garbled.
+    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8;" });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
     a.href     = url;

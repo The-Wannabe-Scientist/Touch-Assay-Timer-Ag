@@ -17,7 +17,9 @@ import {
   buildAllSections,
   applySheetLayout,
   injectLiveFormulas,
-  extractBinSeries
+  blankEmptyTextCells,
+  extractBinSeries,
+  arrayToCSVRow
 } from "../js/export.js";
 
 /**
@@ -217,6 +219,26 @@ describe("injectLiveFormulas", () => {
     test("does not touch cells outside any tracked block (e.g. the Genotype header row itself)", () => {
       assert.equal(sheet["A1"].f, undefined);
     });
+
+    // WT run 3 stopped after bin 1, so its bin-2 raw cell (D6) is "". Left as
+    // a zero-length text cell, Excel evaluates ""-mean as #VALUE! inside
+    // C12's SEM and counts it in D12's COUNTIFS(...,"<>").
+    test("blankEmptyTextCells removes the empty raw cells the SEM/N formulas reference", () => {
+      const s2 = mockSheetFromData2D(data2D);
+      injectLiveFormulas(s2, data2D);
+      assert.deepEqual(s2["D6"], { t: "s", v: "" }, "sanity: the stopped run's missing bin starts out as a text cell");
+      blankEmptyTextCells(s2);
+
+      assert.equal(s2["D6"], undefined);
+      for (const [addr, cell] of Object.entries(s2)) {
+        assert.ok(!(cell.t === "s" && cell.v === "" && !cell.f), `${addr} is still a formula-less "" cell`);
+      }
+      // Summary cells that are "" but carry a formula (mut's N=1 SEM) stay.
+      assert.equal(s2["F11"].v, "");
+      assert.match(s2["F11"].f, /SUMPRODUCT/);
+      // Real values are untouched.
+      assert.deepEqual(s2["B5"], sheet["B5"]);
+    });
   });
 
   describe("Touch Index block (no Eligible row — exclusion is blank-cell-encoded)", () => {
@@ -409,6 +431,26 @@ describe("buildMetadata2D", () => {
     assert.equal(asObj["Genotypes"], "WT, mec-4");
     assert.equal(asObj["Inter-stimulus Interval (s)"], 1);
   });
+
+  test("renders blank (null) temperature/humidity as N/A, not \"null °C\"", () => {
+    const rows = buildMetadata2D({
+      assayName: "x", createdAt: Date.now(), genotypes: ["WT"],
+      temperature: null, humidity: null, isi: 1, stimCount: 30, binSize: 10
+    });
+    const asObj = Object.fromEntries(rows.slice(1));
+    assert.equal(asObj["Temperature"], "N/A");
+    assert.equal(asObj["Humidity"], "N/A");
+  });
+
+  test("keeps a genuine 0 °C / 0 % RH reading", () => {
+    const rows = buildMetadata2D({
+      assayName: "x", createdAt: Date.now(), genotypes: ["WT"],
+      temperature: 0, humidity: 0, isi: 1, stimCount: 30, binSize: 10
+    });
+    const asObj = Object.fromEntries(rows.slice(1));
+    assert.equal(asObj["Temperature"], "0 °C");
+    assert.equal(asObj["Humidity"], "0 % RH");
+  });
 });
 
 describe("buildAllSections", () => {
@@ -429,6 +471,42 @@ describe("buildAllSections", () => {
     assert.equal(byName["Trial 1 - Analysed"], false);
     assert.equal(byName["Trial 1 - Raw (Tidy)"], true);
     assert.equal(byName["Trial 1 - Binned (Tidy)"], true);
+  });
+
+  test("keeps every Excel sheet name within the 31-char cap (SheetJS throws past it)", () => {
+    // Two-digit trial index + both pooled variants with tidy on: the longest
+    // names buildAllSections can produce.
+    const wide = {
+      ...assay,
+      trials: [{ ...assay.trials[0], trialId: "t12", trialIndex: 12 }]
+    };
+    const sections = buildAllSections(wide, [
+      { type: "trial",  trialId: "t12" },
+      { type: "pooled", includeAbandoned: false },
+      { type: "pooled", includeAbandoned: true }
+    ], { includeTidy: true });
+    assert.ok(sections.some(s => s.excelSheetName === "Pooled_CompletedTrials_BinTidy"));
+    for (const s of sections) {
+      assert.ok(s.excelSheetName.length <= 31, `${s.excelSheetName} is ${s.excelSheetName.length} chars`);
+    }
+  });
+
+  test("lists Touch Index exclusions only for the trials being exported", () => {
+    const zeroRun = { genotype: "WT", animalIndex: 1, status: "completed", eligibleForAnalysis: true, values: [0, 0, 1, 1] };
+    const two = {
+      ...assay,
+      trials: [
+        { trialId: "t1", trialIndex: 1, status: "completed", runs: [zeroRun] },
+        { trialId: "t2", trialIndex: 2, status: "abandoned", runs: [zeroRun] }
+      ]
+    };
+    const exclusionsFor = configs => {
+      const s = buildAllSections(two, configs).find(x => x.excelSheetName === "TouchIndex_Exclusions");
+      return s ? s.data2D.slice(1).map(r => r[0]) : [];
+    };
+    assert.deepEqual(exclusionsFor([{ type: "trial", trialId: "t2" }]), [2]);
+    assert.deepEqual(exclusionsFor([{ type: "pooled", includeAbandoned: false }]), [1]);
+    assert.deepEqual(exclusionsFor([{ type: "pooled", includeAbandoned: true }]), [1, 2]);
   });
 
   test("omits tidy sections entirely when includeTidy is not set", () => {
@@ -492,5 +570,16 @@ describe("applySheetLayout", () => {
     applySheetLayout(sheet, [["Genotype", "WT", "mut"]]);
     assert.equal(sheet["!cols"][0].wch, 22);
     assert.equal(sheet["!cols"][1].wch, 10);
+  });
+});
+
+describe("arrayToCSVRow", () => {
+  test("makes text that starts like a formula read as text, leaving numbers alone", () => {
+    assert.equal(arrayToCSVRow(["- x", "=1+1", "@SUM(A1)", "+3 worms"]), "'- x,'=1+1,'@SUM(A1),'+3 worms");
+    assert.equal(arrayToCSVRow([-0.5, "-0.50", "WT"]), "-0.5,-0.50,WT");
+  });
+
+  test("still quotes cells with commas, quotes or newlines", () => {
+    assert.equal(arrayToCSVRow(['a,b', 'say "hi"', "x\ny"]), '"a,b","say ""hi""","x\ny"');
   });
 });

@@ -26,16 +26,13 @@ Desktop.ini
 *.sln
 *.sw?
 
-# ── Claude Code (local, machine-specific settings) ──────────────────────────
-.claude/settings.local.json
-
 # ── Node ─────────────────────────────────────────────────────────────────────
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-# package-lock.json is tracked (see js/db.js's test devDependency) so
-# `npm test` resolves the exact same fake-indexeddb tree everywhere.
+# package-lock.json is tracked so `npm test` installs the exact same
+# fake-indexeddb dependency tree on every machine.
 yarn.lock
 
 # ── Build output ─────────────────────────────────────────────────────────────

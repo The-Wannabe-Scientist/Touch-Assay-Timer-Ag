@@ -319,7 +319,7 @@ body {
   background: rgba(255,255,255,0.05);
 }
 
-/* Legacy fallback removed — #overflowMenuButton now uses .header-icon-btn */
+/* #overflowMenuButton is styled by .header-icon-btn; only its font size differs */
 #overflowMenuButton {
   font-size: inherit;
 }
@@ -387,8 +387,12 @@ main {
   width: 100%;
   max-width: 860px;
   margin: 0 auto;
-  /* Prevent content overflow on very small screens */
+  /* Prevent content overflow on very small screens. clip, unlike hidden,
+     doesn't make <main> a scroll container — with hidden, the sticky Begin
+     Assay bar resolved against <main>, which never scrolls (the page does),
+     so it never stuck. hidden stays as the fallback for Safari < 16. */
   overflow-x: hidden;
+  overflow-x: clip;
 }
 
 section {
@@ -543,8 +547,8 @@ select option:disabled {
 }
 
 /* ------------------------------------------------------------------
-   CRITICAL DARK MODE READABILITY FIXES
-   Brute-forces dark backgrounds over browser autofill/iOS defaults 
+   DARK MODE FORM-FIELD READABILITY
+   Forces dark backgrounds over browser autofill/iOS default styling
 ------------------------------------------------------------------- */
 [data-theme="dark"] input[type="text"],
 [data-theme="dark"] input[type="number"],
@@ -628,8 +632,15 @@ select option:disabled {
   border-radius: 20px;
   font-size: 0.82rem;
   font-weight: 600;
-  white-space: nowrap;
+  /* Long names wrap inside the chip rather than pushing its ✕ past the
+     edge of the screen, where it can't be tapped. */
+  white-space: normal;
+  max-width: 100%;
   animation: chipIn 0.18s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+.chip-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 @keyframes chipIn {
   from { opacity: 0; transform: scale(0.7); }
@@ -638,6 +649,7 @@ select option:disabled {
 
 .chip-remove {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   width: 16px;
@@ -1322,7 +1334,7 @@ body.state-warming-up #liveProgress {
   font-weight: 600;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
-  /* Removed margin-bottom; #tapZone gap handles spacing uniformly */
+  /* No margin-bottom: #tapZone's gap handles spacing uniformly */
 }
 .live-progress-stim {
   grid-column: 2;
@@ -1727,9 +1739,8 @@ th {
 
 /* Desktop-safe formatting for the Saved Assays items.
    Card treatment (background/border/radius) mirrors #exportDatasetList's
-   dataset rows below — previously this was a flat list separated only by
-   hairlines while Export used cards for the same "list of selectable items"
-   pattern; unified so both read the same way. */
+   dataset rows below, so both "list of selectable items" screens read the
+   same way. */
 .saved-assay-row {
   display: flex;
   flex-direction: column;
@@ -1863,7 +1874,6 @@ th {
   margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0;
 }
 
-/* .warmup-display removed — countdown now rendered via .tap-warmup-overlay inside #tapButton */
 /* Export action layout — primary full-width, secondaries in a row below */
 .export-actions {
   display: flex;
@@ -1978,7 +1988,7 @@ body.state-warming-up #visualMetronomeContainer {
 
 /* The genotype picker is disabled (and fades to 0.55 opacity, see
    .genotype-pill:disabled / .genotype-trigger:disabled above) once a run
-   starts, since it can no longer be changed — but that fade also swallowed
+   starts, since it can no longer be changed — but that fade would also hide
    the color-coded highlight showing which genotype is actually running.
    Keep the CURRENTLY SELECTED pill (and the trigger, which only ever shows
    the current selection) at full opacity so its color/border stays a clear
@@ -1996,6 +2006,29 @@ body.state-configured #openSavedAssays,
 body.state-poised #openSavedAssays,
 body.state-running #openSavedAssays {
   display: none;
+}
+
+/* Settings and User Guidelines cover the assay screen, so the tap button is
+   unreachable while they are open — during a run every window would be
+   scored as "responded". Between runs and during the warmup they stay
+   available (startRun() closes them). With Saved Assays hidden too the menu
+   would be empty, so the ⋮ button is hidden as well; visibility, not display,
+   so the header doesn't reflow when a run starts. */
+body.state-running #openSettings,
+body.state-running #openGuidelines {
+  display: none;
+}
+body.state-running #overflowMenuButton {
+  visibility: hidden;
+}
+
+/* The run-details eligibility overrides are for between runs. During a run
+   or its warmup, a click would put focus in a reason box (where Space used
+   to type instead of tap) or change an animal's eligibility mid-run. */
+body.state-running #assayProgress .run-override-cell,
+body.state-warming-up #assayProgress .run-override-cell {
+  pointer-events: none;
+  opacity: 0.55;
 }
 
 body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):not(#savedAssaysScreen):not(#assayDefaultsScreen) {
@@ -2032,9 +2065,16 @@ body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):
  * we attach the animation to the section and let it play whenever the
  * section enters the visual tree.
  *
- * The `animation-fill-mode: both` keeps the element invisible
+ * The `animation-fill-mode: backwards` keeps the element invisible
  * (opacity:0 / translateY offset) before the animation begins, which
  * prevents the "flash of visible content" on slow devices.
+ *
+ * Not `both`: a forwards fill keeps `transform: translateY(0)` on the section
+ * after the animation ends, and any transform makes the section the
+ * containing block for its position:fixed descendants. The genotype picker's
+ * fixed overlay/panel inside #assayScreen was then placed relative to the
+ * section instead of the viewport — shifted and clipped on wide screens.
+ * The end frame equals the default styles, so dropping the fill is invisible.
  */
 
 @keyframes screenSlideUp {
@@ -2056,14 +2096,14 @@ body.state-overlay > main > section:not(#settingsScreen):not(#guidelinesScreen):
 /* Primary screens — slide up */
 body.state-setup #setupScreen,
 body.state-export #exportScreen {
-  animation: screenSlideUp 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: screenSlideUp 0.32s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 /* Assay screen — used across configured/poised/running, slides up once */
 body.state-configured #assayScreen,
 body.state-poised #assayScreen,
 body.state-running #assayScreen {
-  animation: screenSlideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: screenSlideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 /* Overlay screens (settings, guidelines, saved assays, assay defaults) — gentle slide */
@@ -2071,7 +2111,7 @@ body.state-running #assayScreen {
 #guidelinesScreen:not([hidden]),
 #savedAssaysScreen:not([hidden]),
 #assayDefaultsScreen:not([hidden]) {
-  animation: screenSlideUp 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: screenSlideUp 0.25s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 /* Live progress counter fades in when the run/warmup starts */
@@ -2186,8 +2226,14 @@ body.state-warming-up #visualMetronomeContainer {
   animation: toastEnter 0.28s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
-/* Exit state */
+/* Exit state. The explicit start matters: swapping in this animation drops
+   toastEnter's fill, and without a "from" the toast would snap back to the
+   enter animation's invisible starting style instead of fading out. */
 @keyframes toastExit {
+  from {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
   to {
     opacity: 0;
     transform: translateX(32px) scale(0.95);
@@ -3051,7 +3097,7 @@ input.settings-slider-input.settings-slider-badge:focus {
   line-height: 1.4;
 }
 
-/* #5 — Recording banner (shown only while RUNNING) */
+/* Recording banner (shown only while RUNNING) */
 #runBanner {
   background: #fef3c7;
   color: #92400e;
@@ -3067,7 +3113,7 @@ body.state-running #runBanner {
   display: flex;
 }
 
-/* #9 — IDB unavailability banner */
+/* IndexedDB unavailability banner */
 #idbWarningBanner {
   background: #fef2f2;
   color: #991b1b;
@@ -3506,10 +3552,6 @@ button.secondary.btn-loading::before {
   }
 }
 
-/* Wide desktop (≥ 1024px): single-column layout (two-panel removed) */
-
-
-
 /* ── Landscape orientation fixes ──────────────────────────────────────── */
 @media (orientation: landscape) and (max-height: 500px) {
   /* Tap button: reduced min-height to avoid overflow; flex:1 handles the rest */
@@ -3633,9 +3675,9 @@ body.state-running {
   }
 }
 
-/* ── Toggle progress: now inside assay header flex row ───────────────── */
-/* Align-self removed — #assayScreen>header's align-items:center
-   handles vertical alignment now that the button lives in the header. */
+/* ── Toggle progress: inside the assay header flex row ───────────────── */
+/* No align-self: #assayScreen>header's align-items:center handles
+   vertical alignment. */
 #toggleProgress {
   font-size: 0.88rem;
   padding: 0.4rem 0.85rem;
@@ -4058,8 +4100,8 @@ p.instruction {
 }
 
 /* Toggle progress pill button with eye icon */
-/* Removed align-self:flex-start — button now lives inside the
-   assay header flex row and inherits align-items:center from the parent. */
+/* Sits inside the assay header flex row and is vertically centred by the
+   parent's align-items:center. */
 #toggleProgress {
   display: inline-flex;
   align-items: center;

@@ -8,6 +8,27 @@
 //#define MOTOR_LRA   // Linear Resonant Actuator (closed-loop, 1.8V RMS typical)
 #define MOTOR_ERM   // Eccentric Rotating Mass coin motor (open-loop, 3V typical)
 //
+//  ── DRIVE LEVELS ────────────────────────────────────────────
+//  Written to RATED_VOLTAGE (0x16) and OD_CLAMP (0x17) by
+//  configureMotorRegisters(). These defaults drive HARDER than the BOM
+//  motors are rated for, for a stronger buzz; use the BOM-rated values in
+//  the comments for a by-the-datasheet build. (haptic_test.ino uses lower
+//  values than these, but still above the BOM ratings.)
+//  Formulas: TI SLOS854D, eq. 5 (LRA) and eq. 6 (ERM).
+#ifdef MOTOR_LRA
+  // LRA closed loop: V_rms = 0x16 × 20.71 mV / sqrt(1 − (4·t_SAMPLE + 300 µs)·f_LRA)
+  // 0x78 ≈ 3.1 V RMS at 235 Hz. BOM 1.8 V RMS LRA: 0x46 / 0x60.
+  // (haptic_test.ino: 0x57 ≈ 2.2 V RMS / 0x60.)
+  #define DRV_RATED_VOLTAGE 0x78
+  #define DRV_OD_CLAMP      0xA4
+#else
+  // ERM open loop: only OD_CLAMP sets the drive, 21.59 mV per LSB → 0xD0 ≈ 4.5 V
+  // (capped by the supply rail). BOM 3 V ERM: 0x8B. (haptic_test.ino: 0x96 ≈ 3.2 V.)
+  // RATED_VOLTAGE is not used in open loop.
+  #define DRV_RATED_VOLTAGE 0xC0
+  #define DRV_OD_CLAMP      0xD0
+#endif
+//
 //  ── WIRING ──────────────────────────────────────────────────
 //    DRV2605L SDA → D4 (XIAO I²C SDA)
 //    DRV2605L SCL → D5 (XIAO I²C SCL)
@@ -60,12 +81,19 @@
 Adafruit_DRV2605 drv;
 
 // ── XIAO nRF52840 battery monitoring ─────────────────────────
-// PIN_VBAT = P0.31, routed through an on-board 1MΩ/1MΩ divider.
-// Pin 14 (P0.14) gates the divider FET — drive HIGH before reading.
+// PIN_VBAT = P0.31, the midpoint of an on-board 1MΩ (top) / 510kΩ (bottom)
+// divider across the battery. The divider's low side is P0.14: drive it
+// LOW to enable reading, and KEEP it LOW — HIGH or floating puts P0.31 at
+// or above VDD (Seeed wiki warning). Use the core's own pin names: on the
+// mbed core, digital pin 14 is the blue LED, not P0.14.
 #ifndef PIN_VBAT
-  #define PIN_VBAT 32
+  #define PIN_VBAT P0_31
 #endif
-#define VBAT_ENABLE_PIN 14
+#ifdef PIN_VBAT_ENABLE
+  #define VBAT_ENABLE_PIN PIN_VBAT_ENABLE   // mbed core: index 32 = P0.14
+#else
+  #define VBAT_ENABLE_PIN P0_14             // PinName overload
+#endif
 
 // ── DRV2605L EN pin (clone boards only) ─────────────────────
 // Clone boards float EN low, disabling OUTP/OUTN completely.
@@ -332,18 +360,16 @@ void vibrateSOS() {                    // Morse "SOS": BLE-init failure, critica
 }
 
 // ── Battery Reading ──────────────────────────────────────────
-// Reads WLY 602040 3.7V LiPo via XIAO on-board 1MΩ/1MΩ divider.
+// Reads WLY 602040 3.7V LiPo via XIAO on-board 1MΩ/510kΩ divider, which
+// setup() leaves enabled (VBAT_ENABLE_PIN LOW).
 // AR_INTERNAL2V4 = 2.4V internal reference (Seeed nRF52 BSP).
-// 12-bit ADC, divider factor ×2, LiPo range: 3.0V (0%) → 4.2V (100%).
+// 12-bit ADC, divider factor ×2.96 (1510/510), LiPo range: 3.0V (0%) → 4.2V (100%).
+// The nominal factor can be a few percent off per board (≈2.88 has been
+// measured); calibrate against a multimeter if the percentages matter.
 int readBatteryPercent() {
-  pinMode(VBAT_ENABLE_PIN, OUTPUT);
-  digitalWrite(VBAT_ENABLE_PIN, HIGH);
-  delayMicroseconds(1000);  // bumped 500→1000 µs: more settling time on 1MΩ divider under motor load
-
   int raw = analogRead(PIN_VBAT);
-  digitalWrite(VBAT_ENABLE_PIN, LOW);
 
-  float volt = raw * (2.4f / 4095.0f) * 2.0f;
+  float volt = raw * (2.4f / 4095.0f) * (1510.0f / 510.0f);
   int pct = (int)((volt - 3.0f) / 1.2f * 100.0f);
   return constrain(pct, 0, 100);
 }
@@ -382,22 +408,26 @@ void updateLED() {
 #ifdef MOTOR_LRA
 // Configures the DRV2605L's library, feedback mode, resonance tracking, and
 // haptic strength registers for LRA closed-loop drive. Shared by initMotor()
-// (first boot) and recoverMotor() (post I2C-fault reinit) so the two can
-// never drift apart — a value tuned in one used to require remembering to
-// update the other by hand.
+// (first boot) and recoverMotor() (post I2C-fault reinit) so a value tuned
+// here applies to both paths.
 void configureMotorRegisters() {
   drv.selectLibrary(6);                                          // library 6 = LRA
   drv.writeRegister8(0x1A, drv.readRegister8(0x1A) | 0x80);    // N_ERM_LRA = 1 (LRA)
   drv.writeRegister8(0x1D, drv.readRegister8(0x1D) & ~0x04);   // closed-loop (auto-resonance tracking)
   drv.writeRegister8(0x22, 0x00);  // LRARESON_PERIOD = 0 → let closed-loop track resonant freq freely
-  // ── Haptic strength tuning (LRA) ─────────────────────────────
-  // Raised from 0x57/0x60 (1.8V RMS / 2.1V peak) to 0x7F/0xA4 (2.5V RMS / 3.6V peak).
-  // 0x7F = max RATED_VOLTAGE for a 2.5V-rated LRA (2.5 × 255/5.3 ≈ 120 → use 0x78 for exactly 2.5V).
-  // 0xA4 = OD_CLAMP ceiling that gives strong attack transients without exceeding 5.3V rail.
-  // If your LRA is rated lower (e.g. 2.0V RMS), drop 0x16 to 0x62 and 0x17 to 0x80.
-  drv.writeRegister8(0x16, 0x78);  // RATED_VOLTAGE: 2.5V RMS × 255/5.3 ≈ 120
-  drv.writeRegister8(0x17, 0xA4);  // OD_CLAMP:      3.6V peak × 255/5.6 ≈ 164
+  // ── Haptic strength (LRA) — see DRIVE LEVELS at the top of the file ──
+  // The defaults are above the BOM LRA's rating; higher values only suit
+  // motors rated for them.
+  drv.writeRegister8(0x16, DRV_RATED_VOLTAGE);  // RATED_VOLTAGE
+  drv.writeRegister8(0x17, DRV_OD_CLAMP);       // OD_CLAMP
 }
+
+// Auto-calibration results, kept so recoverMotor() can put them back: a chip
+// that really lost power comes back with default calibration otherwise.
+static bool    calValid    = false;
+static uint8_t calComp     = 0;  // A_CAL_COMP (0x18)
+static uint8_t calBemf     = 0;  // A_CAL_BEMF (0x19)
+static uint8_t calBemfGain = 0;  // BEMF_GAIN, bits 1:0 of 0x1A
 
 void initMotor() {
   configureMotorRegisters();
@@ -411,18 +441,31 @@ void initMotor() {
     Serial.println("WARNING: LRA auto-calibration failed. Check motor wiring.");
   } else {
     Serial.println("LRA auto-calibration OK (high-drive).");
-    Serial.print("  A_CAL_COMP (0x18): 0x"); Serial.println(drv.readRegister8(0x18), HEX);
-    Serial.print("  A_CAL_BEMF (0x19): 0x"); Serial.println(drv.readRegister8(0x19), HEX);
+    calComp     = drv.readRegister8(0x18);
+    calBemf     = drv.readRegister8(0x19);
+    calBemfGain = drv.readRegister8(0x1A) & 0x03;
+    calValid    = true;
+    Serial.print("  A_CAL_COMP (0x18): 0x"); Serial.println(calComp, HEX);
+    Serial.print("  A_CAL_BEMF (0x19): 0x"); Serial.println(calBemf, HEX);
   }
   drv.setMode(DRV2605_MODE_INTTRIG);
   Serial.println("DRV2605L: LRA closed-loop mode (high-drive).");
 }
 
-// I2C recovery restores full LRA config
-void recoverMotor() {
-  if (!drv.begin()) return;
+// I2C recovery restores full LRA config, including the calibration.
+// Returns whether the chip answered. Callers must not call drv.begin() again
+// to find out: begin() re-runs the library's init, which switches the chip
+// back to ERM open-loop mode.
+bool recoverMotor() {
+  if (!drv.begin()) return false;
   configureMotorRegisters();
+  if (calValid) {
+    drv.writeRegister8(0x18, calComp);
+    drv.writeRegister8(0x19, calBemf);
+    drv.writeRegister8(0x1A, (drv.readRegister8(0x1A) & ~0x03) | calBemfGain);
+  }
   drv.setMode(DRV2605_MODE_INTTRIG);
+  return true;
 }
 #endif
 
@@ -430,18 +473,17 @@ void recoverMotor() {
 #ifdef MOTOR_ERM
 // Configures the DRV2605L's library, feedback mode, and haptic strength
 // registers for ERM open-loop drive. Shared by initMotor() (first boot) and
-// recoverMotor() (post I2C-fault reinit) so the two can never drift apart —
-// a value tuned in one used to require remembering to update the other by hand.
+// recoverMotor() (post I2C-fault reinit) so a value tuned here applies to
+// both paths.
 void configureMotorRegisters() {
   drv.selectLibrary(1);                                          // library 1 = ERM
   drv.useERM();                                                  // clears N_ERM_LRA bit
   drv.writeRegister8(0x1D, drv.readRegister8(0x1D) | 0x20);    // ERM open-loop
-  // ── Haptic strength tuning ───────────────────────────────────
-  // Raised from 0x90/0x96 (3.0V/3.3V) to 0xC0/0xD0 (4.0V/4.4V)
-  // to push the ERM harder within its 5.3V output headroom.
-  // Do NOT exceed 0xFF/0xFF; stay within your motor's rated voltage.
-  drv.writeRegister8(0x16, 0xC0);  // RATED_VOLTAGE: ~4.0V × 255/5.3 ≈ 193
-  drv.writeRegister8(0x17, 0xD0);  // OD_CLAMP:      ~4.4V × 255/5.6 ≈ 208
+  // ── Haptic strength (ERM) — see DRIVE LEVELS at the top of the file ──
+  // The default OD_CLAMP is above the BOM ERM's rating; higher values only
+  // suit motors rated for them.
+  drv.writeRegister8(0x16, DRV_RATED_VOLTAGE);  // RATED_VOLTAGE (unused in open loop)
+  drv.writeRegister8(0x17, DRV_OD_CLAMP);       // OD_CLAMP: sets the open-loop drive
 }
 
 void initMotor() {
@@ -450,11 +492,13 @@ void initMotor() {
   Serial.println("DRV2605L: ERM open-loop mode (high-drive).");
 }
 
-// I2C recovery restores full ERM config
-void recoverMotor() {
-  if (!drv.begin()) return;
+// I2C recovery restores full ERM config. Returns whether the chip answered
+// (see the LRA variant for why callers must not call drv.begin() again).
+bool recoverMotor() {
+  if (!drv.begin()) return false;
   configureMotorRegisters();
   drv.setMode(DRV2605_MODE_INTTRIG);
+  return true;
 }
 #endif
 
@@ -485,6 +529,13 @@ void setup() {
   // Configure ADC for battery monitoring
   analogReference(AR_INTERNAL2V4);
   analogReadResolution(12);
+  // Enable the battery divider once and leave it on (a few µA through
+  // 1.5 MΩ) — see VBAT_ENABLE_PIN above for why it must never go HIGH.
+  pinMode(VBAT_ENABLE_PIN, OUTPUT);
+  digitalWrite(VBAT_ENABLE_PIN, LOW);
+  // The divider's ~338 kΩ source impedance needs the longest acquisition
+  // time; the 10 µs default under-reads.
+  analogAcquisitionTime(AT_40_US);
 
   // Enable DRV2605L output stage (EN pin on clone boards)
   pinMode(DRV_EN_PIN, OUTPUT);
@@ -661,8 +712,7 @@ void loop() {
           delay(1);
           Wire.begin();
           Wire.setClock(400000);
-          recoverMotor();
-          Serial.println(drv.begin() ? "DRV2605L recovered." : "ERROR: DRV2605L recovery failed!");
+          Serial.println(recoverMotor() ? "DRV2605L recovered." : "ERROR: DRV2605L recovery failed!");
         }
       }
     }

@@ -20,9 +20,11 @@
  *
  * Transaction strategy:
  *   Each exported function opens its own transaction(s) and awaits completion.
- *   Multi-step operations (e.g. deleteAssay) use sequential independent
- *   transactions rather than one combined multi-store transaction to avoid
- *   IDB auto-commit races when awaiting between operations.
+ *   Multi-step operations (e.g. deleteAssay) read in sequential independent
+ *   transactions, then write in one multi-store transaction whose requests
+ *   are all queued without an await in between, so it cannot auto-commit
+ *   part way. importAllDataFromJSON does its reads and writes in that one
+ *   transaction, so an import is all-or-nothing.
  */
 
 
@@ -65,6 +67,31 @@ export function getIdbAvailable() { return idbAvailable; }
  */
 let cachedDB = null;
 
+/** Whether this page has opened the database before (see dbRecreated). */
+let hasOpenedOnce = false;
+
+/**
+ * Set when the database had to be created from scratch after this page had
+ * already opened it — i.e. the stores were wiped while the app was open.
+ * @type {boolean}
+ */
+let dbRecreated = false;
+
+/**
+ * Reports, once, whether the database was wiped and re-created since the
+ * last call. Opens the connection first, so a wipe that closed it is noticed
+ * now rather than by the next save — which would otherwise silently write
+ * into an empty DB, with every record the page had stored before gone.
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function consumeDbRecreated() {
+  try { await openDB(); } catch { /* unavailable — nothing was re-created */ }
+  const r = dbRecreated;
+  dbRecreated = false;
+  return r;
+}
+
 /**
  * Opens (or returns the cached) IndexedDB connection.
  *
@@ -79,7 +106,16 @@ export function openDB() {
   if (cachedDB) return Promise.resolve(cachedDB);
 
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    let req;
+    try {
+      req = indexedDB.open(DB_NAME, DB_VERSION);
+    } catch (err) {
+      // indexedDB is missing, or open() threw synchronously (SecurityError
+      // when site storage is blocked). req.onerror never runs for these.
+      idbAvailable = false;
+      reject(err);
+      return;
+    }
 
     // Schema setup — runs only on first launch or version upgrade. Each
     // `if (event.oldVersion < N)` block is idempotent and only runs when
@@ -91,6 +127,12 @@ export function openDB() {
       // that event.target carries.
       const db  = req.result;
       const oldV = event.oldVersion;  // 0 = fresh install
+
+      // A fresh database after this page already had one means the stores
+      // were wiped while the app was open (site data cleared, eviction).
+      // The caller re-saves what it still holds in memory — see
+      // consumeDbRecreated().
+      if (oldV === 0 && hasOpenedOnce) dbRecreated = true;
 
       // ── Version 1–3 stores (create on fresh install or old upgrade) ────
       if (!db.objectStoreNames.contains(STORES.ASSAYS)) {
@@ -122,6 +164,7 @@ export function openDB() {
 
     req.onsuccess = () => {
       cachedDB = req.result;
+      hasOpenedOnce = true;
       // Invalidate the cache when the browser closes the connection
       // (e.g. on storage pressure) so the next call re-opens it.
       cachedDB.onclose = () => { cachedDB = null; };
@@ -133,6 +176,23 @@ export function openDB() {
       reject(req.error);
     };
   });
+}
+
+/**
+ * The reason to reject with when a write transaction's `error` event fires.
+ *
+ * That event is a failed request bubbling up, and it fires before the
+ * transaction aborts — so `tx.error` is still null at that point. Rejecting
+ * with it would hand callers a null reason, which the app's unhandled-
+ * rejection filter discards and no catch block can describe.
+ *
+ * @param {Event}          event - The `error` event received by tx.onerror.
+ * @param {IDBTransaction} tx    - The transaction it bubbled to.
+ * @param {string}         label - Operation name for the fallback message.
+ * @returns {Error|DOMException}
+ */
+function requestError(event, tx, label) {
+  return event?.target?.error ?? tx.error ?? new Error(`${label}: request failed`);
 }
 
 
@@ -153,7 +213,10 @@ export async function saveAssay(assay) {
   tx.objectStore(STORES.ASSAYS).put(assay);
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "saveAssay"));
+    // A commit-time failure (e.g. QuotaExceededError) fires only `abort` —
+    // see saveRun().
+    tx.onabort    = () => reject(tx.error ?? new Error("saveAssay: transaction aborted"));
   });
 }
 
@@ -234,12 +297,25 @@ export async function hydrateAssay(assayId) {
       req.onsuccess = () => resolve(req.result || []);
       req.onerror   = () => reject(req.error);
     });
-    // Sort chronologically — IDB getAll() returns records in insertion order, which
-    // may not match startedAt after aborted/retried transactions on some browsers.
-    trial.runs = runs.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+    // Sort in start order — IDB getAll() returns records in primary-key order.
+    // runSeq (the run's position in the trial when it started) comes first
+    // because it doesn't depend on the wall clock: a backward clock step
+    // between a failed attempt and its retry would otherwise swap them, and
+    // with them the export's "(retry N)" labels. Older runs have no runSeq
+    // and fall back to startedAt.
+    trial.runs = runs.sort(
+      (a, b) => (a.runSeq ?? -1) - (b.runSeq ?? -1) || (a.startedAt || 0) - (b.startedAt || 0)
+    );
   }
 
-  assay.trials = trials;
+  // Sort by trialIndex — the "assayId" index returns records in primary-key
+  // (trialId) order, and trialIds are random UUIDs, so without this the trial
+  // list comes back shuffled: the Export screen's dataset checkboxes and the
+  // resulting workbook's sheet order would read "Trial 2, Trial 3, Trial 1".
+  // startedAt breaks ties for any legacy record missing a trialIndex.
+  assay.trials = trials.sort(
+    (a, b) => (a.trialIndex ?? 0) - (b.trialIndex ?? 0) || (a.startedAt || 0) - (b.startedAt || 0)
+  );
   return assay;
 }
 
@@ -334,7 +410,7 @@ export async function deleteAssay(assayId) {
       "readwrite"
     );
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "deleteAssay"));
     tx.onabort    = () => reject(tx.error ?? new Error("deleteAssay: transaction aborted"));
 
     const runStore   = tx.objectStore(STORES.RUNS);
@@ -374,7 +450,8 @@ export async function saveTrial(assayId, trial) {
   tx.objectStore(STORES.TRIALS).put({ ...trialData, assayId });
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "saveTrial"));
+    tx.onabort    = () => reject(tx.error ?? new Error("saveTrial: transaction aborted"));
   });
 }
 
@@ -408,8 +485,10 @@ export async function markTrialCompleted(_assayId, trialId) {
 
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
-    tx.onabort    = () => reject(new Error(`markTrialCompleted: trial ${trialId} not found`));
+    tx.onerror    = e => reject(requestError(e, tx, "markTrialCompleted"));
+    // tx.error is null after our own tx.abort() above (trial not found) and
+    // set when the commit itself failed (e.g. QuotaExceededError).
+    tx.onabort    = () => reject(tx.error ?? new Error(`markTrialCompleted: trial ${trialId} not found`));
   });
 }
 
@@ -443,8 +522,8 @@ export async function markTrialAbandoned(_assayId, trialId, reason = "App closed
 
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
-    tx.onabort    = () => reject(new Error(`markTrialAbandoned: trial ${trialId} not found`));
+    tx.onerror    = e => reject(requestError(e, tx, "markTrialAbandoned"));
+    tx.onabort    = () => reject(tx.error ?? new Error(`markTrialAbandoned: trial ${trialId} not found`));
   });
 }
 
@@ -473,7 +552,11 @@ export async function saveRun(_assayId, trialId, run) {
   tx.objectStore(STORES.RUNS).put({ ...run, trialId });
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "saveRun"));
+    // A failure at commit time (e.g. QuotaExceededError) fires only `abort`,
+    // never `error`. Without this the promise would never settle and callers
+    // awaiting the save would hang.
+    tx.onabort    = () => reject(tx.error ?? new Error("saveRun: transaction aborted"));
   });
 }
 
@@ -510,7 +593,7 @@ export async function abandonAllActiveTrialsInDB() {
   if (activeTrials.length === 0) return;
 
   // Phase 2: Collect any active runs across all orphaned trials.
-  const runUpdates = [];
+  const activeRunIds = [];
   for (const trial of activeTrials) {
     const runs = await new Promise((resolve, reject) => {
       const tx  = db.transaction(STORES.RUNS, "readonly");
@@ -518,39 +601,53 @@ export async function abandonAllActiveTrialsInDB() {
       req.onsuccess = () => resolve(req.result || []);
       req.onerror   = () => reject(req.error);
     });
-
-    // Mutate the in-memory objects that will be written in Phase 3.
-    runs
-      .filter(r => r.status === "active")
-      .forEach(run => {
-        run.status               = "abandoned";
-        run.endedAt              = Date.now();
-        run.eligibleForAnalysis  = false;
-        run.ineligibleReason     = "App closed unexpectedly";
-        // Snapshot the automatic determination (see main.js completeRunNormally
-        // for why) so this run can still be manually overridden later with a
-        // record of the original reason preserved.
-        run.autoEligibleForAnalysis = false;
-        run.autoIneligibleReason    = "App closed unexpectedly";
-        runUpdates.push(run);
-      });
+    runs.filter(r => r.status === "active").forEach(r => activeRunIds.push(r.runId));
   }
 
   // Phase 3: Commit all trial and run updates atomically.
+  //
+  // Each record is re-read inside this readwrite transaction and only changed
+  // if it is STILL active. The copies read in Phases 1–2 can be stale by now:
+  // another open tab may have completed the run or finished the trial in
+  // between, and writing those copies back would replace its values with an
+  // empty "abandoned" record.
   const tx = db.transaction([STORES.TRIALS, STORES.RUNS], "readwrite");
+  const trialStore = tx.objectStore(STORES.TRIALS);
+  const runStore   = tx.objectStore(STORES.RUNS);
 
-  activeTrials.forEach(trial => {
-    trial.status          = "abandoned";
-    trial.abandonedReason = "App closed unexpectedly";
-    trial.endedAt         = Date.now();
-    tx.objectStore(STORES.TRIALS).put(trial);
+  activeTrials.forEach(({ trialId }) => {
+    const req = trialStore.get(trialId);
+    req.onsuccess = () => {
+      const trial = req.result;
+      if (!trial || trial.status !== "active") return;
+      trial.status          = "abandoned";
+      trial.abandonedReason = "App closed unexpectedly";
+      trial.endedAt         = Date.now();
+      trialStore.put(trial);
+    };
   });
 
-  runUpdates.forEach(run => tx.objectStore(STORES.RUNS).put(run));
+  activeRunIds.forEach(runId => {
+    const req = runStore.get(runId);
+    req.onsuccess = () => {
+      const run = req.result;
+      if (!run || run.status !== "active") return;
+      run.status               = "abandoned";
+      run.endedAt              = Date.now();
+      run.eligibleForAnalysis  = false;
+      run.ineligibleReason     = "App closed unexpectedly";
+      // Snapshot the automatic determination (see main.js completeRunNormally
+      // for why) so this run can still be manually overridden later with a
+      // record of the original reason preserved.
+      run.autoEligibleForAnalysis = false;
+      run.autoIneligibleReason    = "App closed unexpectedly";
+      runStore.put(run);
+    };
+  });
 
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "abandonAllActiveTrials"));
     tx.onabort    = () => reject(tx.error ?? new Error("abandonAllActiveTrials: transaction aborted"));
   });
 }
@@ -610,17 +707,26 @@ export async function markOrphanRunsStopped() {
     const tx    = db.transaction(STORES.RUNS, "readwrite");
     const store = tx.objectStore(STORES.RUNS);
     tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+    tx.onerror    = e => reject(requestError(e, tx, "markOrphanRunsStopped"));
+    tx.onabort    = () => reject(tx.error ?? new Error("markOrphanRunsStopped: transaction aborted"));
 
-    activeRuns.forEach(run => {
-      run.status              = "stoppedEarly";
-      run.endedAt             = Date.now();
-      run.eligibleForAnalysis = false;
-      run.ineligibleReason    = "App restarted unexpectedly";
-      // Snapshot the automatic determination — see main.js completeRunNormally.
-      run.autoEligibleForAnalysis = false;
-      run.autoIneligibleReason    = "App restarted unexpectedly";
-      store.put(run);
+    // Re-read each run inside this transaction and change it only if it is
+    // still active — another tab may have completed it since the scan above
+    // (see abandonAllActiveTrialsInDB).
+    activeRuns.forEach(({ runId }) => {
+      const req = store.get(runId);
+      req.onsuccess = () => {
+        const run = req.result;
+        if (!run || run.status !== "active") return;
+        run.status              = "stoppedEarly";
+        run.endedAt             = Date.now();
+        run.eligibleForAnalysis = false;
+        run.ineligibleReason    = "App restarted unexpectedly";
+        // Snapshot the automatic determination — see main.js completeRunNormally.
+        run.autoEligibleForAnalysis = false;
+        run.autoIneligibleReason    = "App restarted unexpectedly";
+        store.put(run);
+      };
     });
   });
 }
@@ -658,7 +764,8 @@ export async function recoverCrashGuard() {
       const tx    = db.transaction(STORES.RUNS, "readwrite");
       const store = tx.objectStore(STORES.RUNS);
       tx.oncomplete = resolve;
-      tx.onerror    = () => reject(tx.error);
+      tx.onerror    = e => reject(requestError(e, tx, "recoverCrashGuard"));
+      tx.onabort    = () => reject(tx.error ?? new Error("recoverCrashGuard: transaction aborted"));
 
       const req = store.get(guard.runId);
       req.onerror = () => reject(req.error);
@@ -723,16 +830,79 @@ export async function exportAllDataAsJSON() {
   };
 }
 
+const isKey   = v => (typeof v === "string" && v !== "") || Number.isFinite(v);
+const isPlain = v => v !== null && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * Whether an assay record has the shape the app relies on: a string (or,
+ * from older databases, numeric) assayId, and — when present — a string name
+ * and an array of string genotypes. Used to refuse malformed backups, and by
+ * the Saved Assays list to set aside a damaged record that is already stored
+ * instead of failing to render the whole list.
+ *
+ * @param {any} a - A record from the assays store or a backup file.
+ * @returns {boolean}
+ */
+export function isWellFormedAssay(a) {
+  return isPlain(a) && isKey(a.assayId) &&
+    (a.assayName == null || typeof a.assayName === "string") &&
+    (a.genotypes == null || (Array.isArray(a.genotypes) && a.genotypes.every(g => typeof g === "string")));
+}
+
+/**
+ * The latest time a record says it was changed. Used by the import to decide
+ * which copy of a record is newer.
+ *
+ * @param {Object} r - An assay, trial or run record.
+ * @returns {number} Unix ms (0 if the record carries no timestamps).
+ */
+const recordStamp = r => Math.max(
+  Number(r.lastModifiedAt) || 0, Number(r.overrideAt) || 0,
+  Number(r.endedAt) || 0, Number(r.startedAt) || 0, Number(r.createdAt) || 0
+);
+
+/**
+ * Whether the record already on this device should be kept instead of the
+ * backup's copy.
+ *
+ * A completed copy beats any other: it carries the real outcome (a run's
+ * values, a trial's completion), while another copy of the same record was
+ * left open, or was closed by the startup cleanup ("App closed
+ * unexpectedly") — which stamps it with the time of that later startup, so
+ * timestamps alone would pick the empty copy. Otherwise the backup must not
+ * send a finished record back to "active" (the next startup would abandon
+ * it), and the newer copy wins.
+ *
+ * @param {Object|undefined} existing - The stored record, if any.
+ * @param {Object}           incoming - The backup's record.
+ * @returns {boolean}
+ */
+function keepExistingRecord(existing, incoming) {
+  if (!existing) return false;
+  const done = r => r.status === "completed";
+  if (done(existing) !== done(incoming)) return done(existing);
+  if (incoming.status === "active" && existing.status && existing.status !== "active") return true;
+  return recordStamp(existing) > recordStamp(incoming);
+}
+
 /**
  * Restores assays/trials/runs from a backup object produced by
- * exportAllDataAsJSON(). Uses put() (upsert) per record — existing records
- * with the same ID are overwritten with the backup's version, records not
- * already present are added. Deliberately non-destructive: nothing already
- * in the database that ISN'T in the backup is ever touched or deleted, so
- * restoring a backup can only add/update data, never lose it.
+ * exportAllDataAsJSON(). Records not already present are added; a record
+ * that already exists is replaced only if the backup's copy is the better
+ * one (see keepExistingRecord), so importing an old backup can't revert
+ * newer work. Deliberately non-destructive: nothing already in the database that
+ * ISN'T in the backup is ever touched or deleted.
+ *
+ * All-or-nothing: every write happens in one transaction, so a failure part
+ * way through (e.g. QuotaExceededError at commit) leaves the database as it
+ * was. Trial numbers that end up duplicated within an assay (two devices'
+ * "Trial 2") are renumbered in start order, since the Excel export names a
+ * sheet after each one.
  *
  * @param {Object} data - A backup object with assays/trials/runs arrays.
- * @returns {Promise<{assays:number, trials:number, runs:number}>} Record counts written per store.
+ * @returns {Promise<{assays:number, trials:number, runs:number, keptNewer:number}>}
+ *   Record counts written per store, and how many records were skipped
+ *   because this device's copy was newer.
  * @throws {Error} If `data` doesn't look like a valid backup.
  */
 export async function importAllDataFromJSON(data) {
@@ -745,23 +915,101 @@ export async function importAllDataFromJSON(data) {
     throw new Error("This file doesn't look like a valid Touch Assay Timer backup.");
   }
 
-  const db = await openDB();
+  // Check every record before writing any. A record with a missing key makes
+  // put() throw part-way through a store, and an assay whose genotypes or name
+  // has the wrong type is stored fine but then breaks every screen that lists
+  // assays. Older databases used numeric IDs, so numbers are accepted too.
+  const badAssay = data.assays.findIndex(a => !isWellFormedAssay(a));
+  const badTrial = data.trials.findIndex(t => !isPlain(t) || !isKey(t.trialId) || !isKey(t.assayId));
+  const badRun   = data.runs.findIndex(r =>
+    !isPlain(r) || !isKey(r.runId) || !isKey(r.trialId) ||
+    (r.values != null && !Array.isArray(r.values))
+  );
+  if (badAssay !== -1 || badTrial !== -1 || badRun !== -1) {
+    const where = badAssay !== -1 ? `assay #${badAssay + 1}`
+                : badTrial !== -1 ? `trial #${badTrial + 1}`
+                :                   `run #${badRun + 1}`;
+    throw new Error(`This backup contains a malformed record (${where}), so nothing was imported.`);
+  }
 
-  const putAllInto = (storeName, records) => new Promise((resolve, reject) => {
-    if (records.length === 0) { resolve(); return; }
-    const tx    = db.transaction(storeName, "readwrite");
-    const store = tx.objectStore(storeName);
-    records.forEach(r => store.put(r));
-    tx.oncomplete = resolve;
-    tx.onerror    = () => reject(tx.error);
+  const db = await openDB();
+  const kept = { [STORES.ASSAYS]: 0, [STORES.TRIALS]: 0, [STORES.RUNS]: 0 };
+
+  // ONE readwrite transaction over all three stores. Every request is queued
+  // from a request callback of the same transaction, so it cannot auto-commit
+  // part way. Settle on `abort` only: it fires for every failure (request
+  // error, commit-time quota error, explicit abort()), and an `error` event
+  // arrives before tx.error is set.
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction([STORES.ASSAYS, STORES.TRIALS, STORES.RUNS], "readwrite");
+    let cause = null;
+    tx.oncomplete = () => resolve();
+    tx.onabort    = () => reject(cause ?? tx.error ?? new Error("importAllDataFromJSON: transaction aborted"));
+    const fail = err => {
+      if (cause) return;
+      cause = err;
+      try { tx.abort(); } catch { /* already finished */ }
+    };
+
+    const batches = [
+      [STORES.ASSAYS, "assayId", data.assays],
+      [STORES.TRIALS, "trialId", data.trials],
+      [STORES.RUNS,   "runId",   data.runs]
+    ];
+    let pending = batches.reduce((n, [, , records]) => n + records.length, 0);
+    if (pending === 0) return;  // nothing queued — the transaction completes empty
+
+    for (const [storeName, keyPath, records] of batches) {
+      const store = tx.objectStore(storeName);
+      records.forEach((record, i) => {
+        const req = store.get(record[keyPath]);
+        req.onsuccess = () => {
+          try {
+            if (keepExistingRecord(req.result, record)) kept[storeName]++;
+            else store.put(record);
+          } catch (err) {
+            // A synchronous put() throw does not abort the transaction by
+            // itself — the writes already queued would still commit.
+            fail(new Error(`Backup record ${storeName}[${i}] could not be stored (${err.name}). Nothing was imported.`));
+            return;
+          }
+          if (--pending === 0) renumberDuplicateTrials(tx, data.trials);
+        };
+      });
+    }
   });
 
-  // Sequential, one store per transaction — matches the file's existing
-  // transaction strategy (see header comment) rather than combining stores
-  // into one transaction or racing them with Promise.all.
-  await putAllInto(STORES.ASSAYS, data.assays);
-  await putAllInto(STORES.TRIALS, data.trials);
-  await putAllInto(STORES.RUNS,   data.runs);
+  const keptNewer = kept[STORES.ASSAYS] + kept[STORES.TRIALS] + kept[STORES.RUNS];
+  return {
+    assays: data.assays.length - kept[STORES.ASSAYS],
+    trials: data.trials.length - kept[STORES.TRIALS],
+    runs:   data.runs.length   - kept[STORES.RUNS],
+    keptNewer
+  };
+}
 
-  return { assays: data.assays.length, trials: data.trials.length, runs: data.runs.length };
+/**
+ * Inside the import transaction, after every write is queued: for each assay
+ * the backup touched, renumber its trials 1…N in (trialIndex, startedAt)
+ * order if two of them now share a trialIndex. Requests run in the order
+ * they were issued, so these reads see the import's writes.
+ *
+ * @param {IDBTransaction} tx     - The import's readwrite transaction.
+ * @param {Object[]}       trials - The backup's trial records.
+ */
+function renumberDuplicateTrials(tx, trials) {
+  const store = tx.objectStore(STORES.TRIALS);
+  for (const assayId of new Set(trials.map(t => t.assayId))) {
+    const req = store.index("assayId").getAll(assayId);
+    req.onsuccess = () => {
+      const ts = req.result || [];
+      if (new Set(ts.map(t => t.trialIndex)).size === ts.length) return;
+      ts.sort((a, b) => (a.trialIndex ?? 0) - (b.trialIndex ?? 0) || (a.startedAt || 0) - (b.startedAt || 0));
+      ts.forEach((t, i) => {
+        if (t.trialIndex === i + 1) return;
+        t.trialIndex = i + 1;
+        store.put(t);
+      });
+    };
+  }
 }
